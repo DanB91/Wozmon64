@@ -112,11 +112,15 @@ const poll_mouse = @intToPtr(*const fn(out_event: *MouseEvent) callconv(.C) bool
 //returns true on success, else false.  core_number must be >= 1 and < N_CORES (core 0 is reserved for the monitor)
 const run_on_core = @intToPtr(*const fn(entry_point: *const fn(arg: ?*anyopaque) callconv(.C) void, arg: ?*anyopaque, core_number: u64) callconv(.C) bool, 0xA0_0010);
 
+
+//exits the current core and returns control back to the monitor.  If all cores are returned back to the montior, then the monitor interface assumes control of the machine.
+const exit = @intToPtr(*const fn() callconv(.C) void) callconv(.C) bool, 0xA0_0018);
+
 //runtime constant that contains the number of cores of the machine
-const N_CORES = @intToPtr(*const u64, 0xA0_0018);
+const N_CORES = @intToPtr(*const u64, 0xA0_0020);
 
 //runtime constant that contains the highest usable RAM address
-const MAX_RAM_ADDRESS = @intToPtr(*const u64, 0xA0_0020);
+const MAX_RAM_ADDRESS = @intToPtr(*const u64, 0xA0_0028);
 ```
 
 
@@ -157,10 +161,11 @@ This will be the virtual memory map of Wozmon64.  2MiB pages are used, so there 
 | 0xA0_0000 - A0_0007| 8 bytes | `poll_keyboard` Procedure Address | Contains the address of the `poll_keyboard` procedure. |
 | 0xA0_0008 - A0_000F| 8 bytes | `poll_mouse` Procedure Address | Contains the address of the `poll_mouse` procedure. |
 | 0xA0_0010 - A0_0017| 8 bytes | `run_on_core` Procedure Address | Contains the address of the `run_on_core` procedure. |
-| 0xA0_0018 - A0_001F| 8 bytes | N_CORES  | Contains the number of physical cores the CPU has (not threads). |
-| 0xA0_0020 - A0_0027| 8 bytes | MAX_RAM_ADDRESS  | Contains the highest usable RAM address. `MAX_RAM_ADDRESS.* - 0xC0_0000` will give you the total number of bytes free on the system. |
-| 0xA0_0028 - A0_0030| 8 bytes | Program selector entry point  | Entry point of the **Program Selector** program. Run with `A00028R` in the monitor |
-| 0xA0_0028 - 0xBF_FFFF | 2,097,120 bytes | Reserved | Reserved for future use.
+| 0xA0_0018 - A0_001F| 8 bytes | `exit` Procedure Address | Contains the address of the `exit` procedure. |
+| 0xA0_0020 - A0_0027| 8 bytes | N_CORES  | Contains the number of physical cores the CPU has (not threads). |
+| 0xA0_0028 - A0_0030| 8 bytes | MAX_RAM_ADDRESS  | Contains the highest usable RAM address. `MAX_RAM_ADDRESS.* - 0xC0_0000` will give you the total number of bytes free on the system. |
+| 0xA0_0030 - A0_0037| 8 bytes | Program selector entry point  | Entry point of the **Program Selector** program. Run with `A00030R` in the monitor |
+| 0xA0_0038 - 0xBF_FFFF | 2,097,096 bytes | Reserved | Reserved for future use.
 | 0xC0_0000 - XXXXXX | Depends on the amount of RAM in the machine | Usable Memory | All the free memory on the machine|
 | [XXXXXX + 1] - 0xFFFF_FFFF_7FFF_FFFF |  Depends on the amount of RAM in the machine | Invalid Memory| This is left over address space between usable memory and where the monitor lives.
 | 0xFFFF_FFFF_8000_0000 and after | Depends on the size of the monitor program | Monitor | Where the monitor lives.  You probably don't want to touch this memory unless you're feeling like a h4xor.| 
@@ -169,6 +174,7 @@ This will be the virtual memory map of Wozmon64.  2MiB pages are used, so there 
 There are many things that are up in the air and alternative paths I have considered. It's kind of a delicate balance of keeping the spirit of the original WozMon and trying to provide nicer features.  This includes:
 - Should programs run in Ring 3? Or, should I keep the spirit of the Apple I where you can romp all over memory?
     - If programs run at Ring 3, should the procedures and runtime constants be system calls and not part of the memory map?
+- Should the monitor set up the stack when running code? Or should the program be in charge of that?
 - Should I support reading and writing 16-bit, 32-bit and 64-bit numbers in the monitor?
 - Should I support NVMe SSDs like I do in BoksOS?
 - Should I refer "Null Memory" as the "Zero Page" as an homage to the 6502?
