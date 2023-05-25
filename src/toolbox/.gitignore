@@ -1,0 +1,14 @@
+*.o
+*.obj
+.*sw*
+*.elf
+*.bin
+.swl
+.swi
+.DS_Store
+.vscode
+kernel.bin
+crossllvm
+build
+zig-cache
+zig-out
