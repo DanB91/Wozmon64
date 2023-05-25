@@ -1,0 +1,5 @@
+- Set up bootloader compilation
+    - objdump step? 
+    - Add parse symbols utility?
+    X Add toolbox code to repo
+    X run qemu step
