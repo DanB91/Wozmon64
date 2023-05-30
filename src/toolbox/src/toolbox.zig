@@ -11,6 +11,7 @@ pub usingnamespace @import("stack.zig");
 pub usingnamespace @import("fixed_list.zig");
 pub usingnamespace @import("ring_queue.zig");
 pub usingnamespace @import("random.zig");
+pub usingnamespace @import("dynamic_array.zig");
 
 const builtin = @import("builtin");
 const build_flags = @import("build_flags");

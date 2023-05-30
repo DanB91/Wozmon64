@@ -32,6 +32,8 @@ pub fn build(b: *std.Build) !void {
             .optimize = optimize,
         });
         exe.addModule("toolbox", toolbox_module);
+        exe.force_pic = true;
+        exe.red_zone = false;
         const install_step = b.addInstallArtifact(exe);
         install_step.dest_dir = .{ .custom = "img/EFI/BOOT/" };
 

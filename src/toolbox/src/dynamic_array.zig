@@ -1,5 +1,5 @@
 const toolbox = @import("toolbox.zig");
-pub fn DynamicArray(T: type) type {
+pub fn DynamicArray(comptime T: type) type {
     return struct {
         store: []T,
         _len: usize = 0,
@@ -11,7 +11,7 @@ pub fn DynamicArray(T: type) type {
         pub fn init(arena: *toolbox.Arena, capacity: usize) Self {
             return Self{
                 .arena = arena,
-                .store = arena.push_slice([]T, capacity),
+                .store = arena.push_slice(T, capacity),
             };
         }
 
@@ -36,7 +36,7 @@ pub fn DynamicArray(T: type) type {
                 return;
             }
             const src = self.store;
-            const dest = self.arena.push_slice([]T, capacity);
+            const dest = self.arena.push_slice(T, capacity);
             for (src, 0..) |s, i| dest[i] = s;
             self.store = dest;
         }
