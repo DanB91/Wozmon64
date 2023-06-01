@@ -10,7 +10,7 @@ pub fn build(b: *std.Build) !void {
         .source_file = .{ .path = "src/toolbox/src/toolbox.zig" },
     });
 
-    const kernel_install_step = b: {
+    const kernel_step = b: {
         const kernel_target = try std.zig.CrossTarget.parse(.{ .arch_os_abi = "x86_64-freestanding-gnu" });
         const exe = b.addExecutable(.{
             .name = "kernel.elf",
@@ -24,8 +24,8 @@ pub fn build(b: *std.Build) !void {
         exe.addModule("toolbox", toolbox_module);
         exe.force_pic = true;
         exe.red_zone = false;
-        const install_step = b.addInstallArtifact(exe);
-        break :b install_step;
+        _ = b.addInstallArtifact(exe);
+        break :b exe;
     };
 
     //compile bootloader
@@ -46,7 +46,7 @@ pub fn build(b: *std.Build) !void {
 
         const install_step = b.addInstallArtifact(exe);
         install_step.dest_dir = .{ .custom = "img/EFI/BOOT/" };
-        install_step.step.dependOn(&kernel_install_step.step);
+        install_step.step.dependOn(&kernel_step.step);
 
         break :b install_step;
     };
