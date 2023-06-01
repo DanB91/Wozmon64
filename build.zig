@@ -24,7 +24,6 @@ pub fn build(b: *std.Build) !void {
         exe.addModule("toolbox", toolbox_module);
         exe.force_pic = true;
         exe.red_zone = false;
-        _ = b.addInstallArtifact(exe);
         break :b exe;
     };
 
@@ -43,12 +42,14 @@ pub fn build(b: *std.Build) !void {
 
         //allows @embedFile("../zig-out/bin/kernel.elf") to work
         exe.setMainPkgPath(".");
+        exe.step.dependOn(&kernel_step.step);
 
-        const install_step = b.addInstallArtifact(exe);
-        install_step.dest_dir = .{ .custom = "img/EFI/BOOT/" };
-        install_step.step.dependOn(&kernel_step.step);
+        const kernel_install_step = b.addInstallArtifact(kernel_step);
+        const bootloader_install_step = b.addInstallArtifact(exe);
+        bootloader_install_step.dest_dir = .{ .custom = "img/EFI/BOOT/" };
+        bootloader_install_step.step.dependOn(&kernel_install_step.step);
 
-        break :b install_step;
+        break :b bootloader_install_step;
     };
     b.getInstallStep().dependOn(&bootloader_install_step.step);
 
