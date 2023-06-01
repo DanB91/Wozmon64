@@ -5,6 +5,8 @@ const std = @import("std");
 const toolbox = @import("toolbox");
 const mpsp = @import("mp_service_protocol.zig");
 
+const kernel_elf = @embedFile("../zig-out/bin/kernel.elf");
+
 const ENABLE_CONSOLE = true;
 
 const ZSGraphicsOutputProtocol = std.os.uefi.protocols.GraphicsOutputProtocol;
@@ -116,7 +118,35 @@ pub fn main() noreturn {
     };
 
     //TODO: get rsdp
-    {}
+    var rsdp: u64 = 0;
+    {
+        const ACPI2RSDP = extern struct {
+            signature: [8]u8,
+            checksum: u8,
+            oem_id: [6]u8,
+            revision: u8,
+            rsdt_address: u32,
+            length: u32,
+            xsdt_address_low: u32,
+            xsdt_address_high: u32,
+            extended_checksum: u8,
+            reserved: [3]u8,
+        };
+        table_loop: for (0..system_table.number_of_table_entries) |i| {
+            if (system_table.configuration_table[i].vendor_guid.eql(std.os.uefi.tables.ConfigurationTable.acpi_20_table_guid)) {
+                const tmp_rsdp = @ptrCast(*ACPI2RSDP, @alignCast(
+                    @alignOf(ACPI2RSDP),
+                    system_table.configuration_table[i].vendor_table,
+                ));
+                if (std.mem.eql(u8, &tmp_rsdp.signature, "RSD PTR ")) {
+                    rsdp = @ptrToInt(tmp_rsdp);
+                    break :table_loop;
+                }
+            }
+        } else {
+            fatal("Cannot find rsdp!", .{});
+        }
+    }
     //reset console before getting memory map and exiting, since we cannot call any services
     //after getting the memory map
     {
@@ -124,9 +154,11 @@ pub fn main() noreturn {
         _ = con_out.clearScreen();
         _ = con_out.setCursorPosition(0, 0);
     }
+
+    //get memory map
+    var memory_map: []LargeUEFIMemoryDescriptor = undefined;
+    var map_key: usize = 0;
     {
-        var memory_map: []LargeUEFIMemoryDescriptor = undefined;
-        var map_key: usize = 0;
         const MAX_MEMORY_DESCRIPTORS = 512;
         var mmap_store: [MAX_MEMORY_DESCRIPTORS]LargeUEFIMemoryDescriptor = undefined;
         var mmap_size: usize = @sizeOf(@TypeOf(mmap_store));
@@ -151,8 +183,11 @@ pub fn main() noreturn {
         const num_descriptors = mmap_size / descriptor_size;
         memory_map = bootloader_arena.push_slice(LargeUEFIMemoryDescriptor, num_descriptors);
         @memcpy(memory_map, mmap_store[0..num_descriptors]);
+    }
 
-        status = bs.exitBootServices(handle, map_key);
+    //exit boot services
+    {
+        const status = bs.exitBootServices(handle, map_key);
         if (status != ZSUEFIStatus.Success) {
             fatal(
                 "Failed to exit boot services! Error: {}, Handle: {}, Map key: {X}",
@@ -178,24 +213,28 @@ pub fn main() noreturn {
     // );
     // @atomicStore(bool, &print_strip, true, .SeqCst);
 
+    //TODO debug logging
+    // for (memory_map) |desc| {
+    //     serialprintln("addr: {X}, num pages: {}, type: {}", .{
+    //         desc.physical_start,
+    //         desc.number_of_pages,
+    //         desc.type,
+    //     });
+    // }
+    // serialprintln("rsdp: {X}", .{rsdp});
+    // serialprintln("kernel size: {}", .{kernel_elf.len});
     for (screen.pixels) |*p| p.colors = .{
-        .r = 0x80,
+        .r = 0,
         .g = 0,
-        .b = 0,
+        .b = 0x40,
     };
 
-    hang();
+    toolbox.hang();
 }
 
 fn fatal(comptime fmt: []const u8, args: anytype) noreturn {
     uefiprintln(fmt, args);
-    hang();
-}
-
-fn hang() noreturn {
-    while (true) {
-        std.atomic.spinLoopHint();
-    }
+    toolbox.hang();
 }
 
 //should only be called by BSP (main processor) and before getMemoryMap
@@ -254,7 +293,7 @@ fn serialprintln(comptime fmt: []const u8, args: anytype) void {
 //     serialprintln("yes", .{});
 
 //     draw_strip(ctx.core_id, ctx.cores_detected, ctx.screen);
-//     hang();
+//     toolbox.hang();
 // }
 // fn draw_strip(core_id: usize, cores_detected: usize, screen: Screen) void {
 //     const height = screen.height / cores_detected;

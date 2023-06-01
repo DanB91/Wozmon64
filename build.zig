@@ -4,29 +4,35 @@ const std = @import("std");
 // declaratively construct a build graph that will be executed by an external
 // runner.
 pub fn build(b: *std.Build) !void {
-    // Standard target options allows the person running `zig build` to choose
-    // what target to build for. Here we do not override the defaults, which
-    // means any target is allowed, and the default is native. Other options
-    // for restricting supported target set are available.
-    const target = b.standardTargetOptions(.{});
-    _ = target;
-
-    // Standard optimization options allow the person running `zig build` to select
-    // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall. Here we do not
-    // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
 
     const toolbox_module = b.addModule("toolbox", .{
         .source_file = .{ .path = "src/toolbox/src/toolbox.zig" },
     });
 
+    const kernel_install_step = b: {
+        const kernel_target = try std.zig.CrossTarget.parse(.{ .arch_os_abi = "x86_64-freestanding-gnu" });
+        const exe = b.addExecutable(.{
+            .name = "kernel.elf",
+            .root_source_file = .{ .path = "src/kernel.zig" },
+            .target = kernel_target,
+            .optimize = optimize,
+        });
+        exe.linker_script = .{ .path = "src/linker.ld" };
+        exe.code_model = .kernel;
+
+        exe.addModule("toolbox", toolbox_module);
+        exe.force_pic = true;
+        exe.red_zone = false;
+        const install_step = b.addInstallArtifact(exe);
+        break :b install_step;
+    };
+
     //compile bootloader
     const bootloader_install_step = b: {
         const uefi_target = try std.zig.CrossTarget.parse(.{ .arch_os_abi = "x86_64-uefi-gnu" });
         const exe = b.addExecutable(.{
             .name = "bootx64",
-            // In this case the main source file is merely a path, however, in more
-            // complicated build scripts, this could be a generated file.
             .root_source_file = .{ .path = "src/bootloader.zig" },
             .target = uefi_target,
             .optimize = optimize,
@@ -34,8 +40,13 @@ pub fn build(b: *std.Build) !void {
         exe.addModule("toolbox", toolbox_module);
         exe.force_pic = true;
         exe.red_zone = false;
+
+        //allows @embedFile("../zig-out/bin/kernel.elf") to work
+        exe.setMainPkgPath(".");
+
         const install_step = b.addInstallArtifact(exe);
         install_step.dest_dir = .{ .custom = "img/EFI/BOOT/" };
+        install_step.step.dependOn(&kernel_install_step.step);
 
         break :b install_step;
     };
