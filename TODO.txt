@@ -3,3 +3,12 @@
     - Add parse symbols utility?
     X Add toolbox code to repo
     X run qemu step
+- Create page tables
+    - Map kernel ELF into memory
+    - Determine the first free 2MiB-based virtual address that is free in kernel space
+    - Properly map MMIO into this free virtual address space
+        X Collect all .ACPIMemoryNVS and .ACPIReclaimMemory pages together
+        - Map MMIO into virtual address space
+        - Map first page of conventional memory which will hold the kernel start context
+    - Collect .ConventionalMemory into a list
+- Bootstrap cores in bootloader

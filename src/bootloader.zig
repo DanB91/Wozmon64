@@ -5,7 +5,10 @@ const std = @import("std");
 const toolbox = @import("toolbox");
 const mpsp = @import("mp_service_protocol.zig");
 
-const kernel_elf = @embedFile("../zig-out/bin/kernel.elf");
+const KERNEL_ELF = @embedFile("../zig-out/bin/kernel.elf");
+const MEMORY_PAGE_SIZE = toolbox.mb(2);
+const MMIO_PAGE_SIZE = toolbox.kb(4);
+const UEFI_PAGE_SIZE = toolbox.kb(4);
 
 const ENABLE_CONSOLE = true;
 
@@ -16,6 +19,7 @@ const ZSMemoryDescriptor = std.os.uefi.tables.MemoryDescriptor;
 
 const SmallUEFIMemoryDescriptor = ZSMemoryDescriptor;
 
+//TODO change to 1920
 const TARGET_RESOLUTION = .{
     .width = 1280,
     .height = 720,
@@ -30,10 +34,9 @@ const Pixel = packed union {
     data: u32,
 };
 comptime {
-    toolbox.assert(
+    toolbox.static_assert(
         @sizeOf(Pixel) == 4,
-        "Pixel size incorrect. Expected: 4, Actual: {}",
-        .{@sizeOf(Pixel)},
+        "Pixel size incorrect",
     );
 }
 const Screen = struct {
@@ -52,7 +55,34 @@ pub const LargeUEFIMemoryDescriptor = extern struct {
     unknown: u64,
 };
 
-var bootloader_arena_buffer = [_]u8{0} ** toolbox.kb(512);
+pub const ConventionalMemoryDescriptor = struct {
+    physical_address: u64,
+    number_of_pages: usize,
+
+    const PAGE_SIZE = MEMORY_PAGE_SIZE;
+};
+pub const MMIOMemoryDescriptor = struct {
+    physical_address: u64,
+    virtual_address: u64,
+    number_of_pages: usize,
+
+    const PAGE_SIZE = MMIO_PAGE_SIZE;
+};
+
+const KernelParseResult = struct {
+    next_free_virtual_address: u64,
+    entry_point: u64,
+    top_of_stack_address: u64,
+    page_table_data: toolbox.RandomRemovalLinkedList(PageTableData),
+};
+const PageTableData = struct {
+    destination_virtual_address: u64,
+    data_to_copy: []const u8,
+    number_of_bytes: usize,
+    is_executable: bool,
+    is_writable: bool,
+};
+
 pub fn main() noreturn {
     //disable interrupts
     asm volatile ("cli");
@@ -67,6 +97,7 @@ pub fn main() noreturn {
 
     const bs = system_table.boot_services.?;
 
+    var bootloader_arena_buffer = [_]u8{0} ** toolbox.kb(512);
     var bootloader_arena = toolbox.Arena.init_with_buffer(&bootloader_arena_buffer);
 
     //graphics
@@ -213,16 +244,93 @@ pub fn main() noreturn {
     // );
     // @atomicStore(bool, &print_strip, true, .SeqCst);
 
-    //TODO debug logging
-    // for (memory_map) |desc| {
-    //     serialprintln("addr: {X}, num pages: {}, type: {}", .{
-    //         desc.physical_start,
-    //         desc.number_of_pages,
-    //         desc.type,
-    //     });
-    // }
-    // serialprintln("rsdp: {X}", .{rsdp});
-    // serialprintln("kernel size: {}", .{kernel_elf.len});
+    const kernel_start_context_page = b: {
+        for (memory_map) |*desc| {
+            switch (desc.type) {
+                .ConventionalMemory => {
+                    const descriptor_size = desc.number_of_pages * UEFI_PAGE_SIZE;
+                    if (descriptor_size >= MEMORY_PAGE_SIZE) {
+                        const ret = @intToPtr([*]u8, desc.physical_start)[0..MEMORY_PAGE_SIZE];
+                        desc.number_of_pages -= MEMORY_PAGE_SIZE / UEFI_PAGE_SIZE;
+                        desc.physical_start += MEMORY_PAGE_SIZE;
+                        break :b ret;
+                    }
+                },
+                else => {},
+            }
+        } else {
+            //TODO: proper fatal function
+            serialprintln("failed to find enough memory for kernel start context", .{});
+            toolbox.hang();
+        }
+    };
+    var kernel_start_arena = toolbox.Arena.init_with_buffer(kernel_start_context_page);
+    const kernel_parse_result = parse_kernel_elf(&kernel_start_arena) catch |e| {
+        //TODO: proper fatal function
+        serialprintln("failed to parse kernel elf: {}", .{e});
+        toolbox.hang();
+    };
+    var next_free_virtual_address = kernel_parse_result.next_free_virtual_address;
+
+    //collect conventional memory and MMIO descriptors
+    var conventional_memory_descriptors = toolbox.RandomRemovalLinkedList(ConventionalMemoryDescriptor)
+        .init(&kernel_start_arena);
+    var mmio_descriptors = toolbox.RandomRemovalLinkedList(MMIOMemoryDescriptor)
+        .init(&kernel_start_arena);
+    for (memory_map) |desc| {
+        const descriptor_size = desc.number_of_pages * UEFI_PAGE_SIZE;
+        switch (desc.type) {
+            .ConventionalMemory => {
+                if (descriptor_size >= MEMORY_PAGE_SIZE) {
+                    const number_of_pages = descriptor_size / MEMORY_PAGE_SIZE;
+                    _ = conventional_memory_descriptors.append(.{
+                        .physical_address = desc.physical_start,
+                        .number_of_pages = number_of_pages,
+                    });
+                }
+            },
+            .ACPIMemoryNVS, .ACPIReclaimMemory => {
+                _ = mmio_descriptors.append(.{
+                    .virtual_address = next_free_virtual_address,
+                    .physical_address = desc.physical_start,
+                    .number_of_pages = desc.number_of_pages,
+                });
+                next_free_virtual_address += descriptor_size;
+            },
+            else => {
+                //TODO?
+            },
+        }
+    }
+    {
+        //TODO: set up page tables
+        //1) map kernel_start_context_page
+        //2) map MMIO addresses
+    }
+    //dump debug memory data
+    {
+        serialprintln("rsdp: 0x{X}", .{rsdp});
+        serialprintln("start context page address: 0x{X}", .{@ptrToInt(kernel_start_context_page.ptr)});
+        {
+            var it = conventional_memory_descriptors.iterator();
+            while (it.next()) |desc| {
+                serialprintln("Conventional Memory:  paddr: {X}, number of pages: {}", .{
+                    desc.physical_address,
+                    desc.number_of_pages,
+                });
+            }
+        }
+        {
+            var it = mmio_descriptors.iterator();
+            while (it.next()) |desc| {
+                serialprintln("MMIO: vaddr: {X}, paddr: {X}, number of pages: {}", .{
+                    desc.virtual_address,
+                    desc.physical_address,
+                    desc.number_of_pages,
+                });
+            }
+        }
+    }
     for (screen.pixels) |*p| p.colors = .{
         .r = 0,
         .g = 0,
@@ -230,6 +338,65 @@ pub fn main() noreturn {
     };
 
     toolbox.hang();
+}
+fn parse_kernel_elf(arena: *toolbox.Arena) !KernelParseResult {
+    var page_table_data = toolbox.RandomRemovalLinkedList(PageTableData).init(arena);
+    var kernel_image_byte_stream = std.io.fixedBufferStream(KERNEL_ELF);
+    var header = try std.elf.Header.read(&kernel_image_byte_stream);
+
+    var next_free_virtual_address: usize = 0;
+    var it = header.program_header_iterator(&kernel_image_byte_stream);
+    var top_of_stack_address: usize = 0;
+    while (it.next() catch null) |program_header| {
+        switch (program_header.p_type) {
+            std.elf.PT_LOAD => {
+                if (program_header.p_memsz == 0) {
+                    continue;
+                }
+                const is_executable = program_header.p_flags & std.elf.PF_X != 0;
+                const is_writable = program_header.p_flags & std.elf.PF_W != 0;
+                const page_table_setup_data = PageTableData{
+                    .destination_virtual_address = program_header.p_vaddr,
+                    .data_to_copy = KERNEL_ELF[program_header.p_offset .. program_header.p_offset + program_header.p_filesz],
+                    .number_of_bytes = toolbox.align_up(program_header.p_memsz, MEMORY_PAGE_SIZE),
+                    .is_executable = is_executable,
+                    .is_writable = is_writable,
+                };
+                toolbox.assert(page_table_setup_data.data_to_copy.len <= page_table_setup_data.number_of_bytes, "number of bytes to copy should be no greater than the number of bytes to allocate", .{});
+                _ = page_table_data.append(page_table_setup_data);
+                next_free_virtual_address = @max(
+                    next_free_virtual_address,
+                    toolbox.align_down(program_header.p_vaddr + program_header.p_memsz + MEMORY_PAGE_SIZE, MEMORY_PAGE_SIZE),
+                );
+                serialprintln("ELF vaddr: {X}, size: {X}", .{ program_header.p_vaddr, program_header.p_memsz });
+            },
+            std.elf.PT_GNU_STACK => {
+                const KERNEL_STACK_BOTTOM_ADDRESS = 0x1_0000_0000_0000_0000 - MEMORY_PAGE_SIZE;
+                const stack_size = toolbox.align_up(program_header.p_memsz, MEMORY_PAGE_SIZE);
+                top_of_stack_address = KERNEL_STACK_BOTTOM_ADDRESS - stack_size + MEMORY_PAGE_SIZE;
+                const page_table_setup_data = PageTableData{
+                    .destination_virtual_address = top_of_stack_address,
+                    .data_to_copy = &[_]u8{},
+                    .number_of_bytes = stack_size,
+                    .is_executable = false,
+                    .is_writable = true,
+                };
+
+                _ = page_table_data.append(page_table_setup_data);
+            }, //TODO
+            std.elf.PT_GNU_RELRO => {},
+            std.elf.PT_PHDR => {},
+            //else => toolbox.panic("Unexpected ELF section: {x}", .{program_header.p_type}),
+            else => return error.UnexpectedELFSection,
+        }
+    }
+    serialprintln("next free virtual address: {X}", .{next_free_virtual_address});
+    return .{
+        .next_free_virtual_address = next_free_virtual_address,
+        .entry_point = header.entry,
+        .top_of_stack_address = top_of_stack_address,
+        .page_table_data = page_table_data,
+    };
 }
 
 fn fatal(comptime fmt: []const u8, args: anytype) noreturn {
