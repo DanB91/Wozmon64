@@ -4,6 +4,7 @@
 const std = @import("std");
 const toolbox = @import("toolbox");
 const mpsp = @import("mp_service_protocol.zig");
+const w64 = @import("wozmon64_definitions.zig");
 
 const KERNEL_ELF = @embedFile("../zig-out/bin/kernel.elf");
 const MEMORY_PAGE_SIZE = toolbox.mb(2);
@@ -19,28 +20,15 @@ const ZSMemoryDescriptor = std.os.uefi.tables.MemoryDescriptor;
 
 const SmallUEFIMemoryDescriptor = ZSMemoryDescriptor;
 
-//TODO change to 1920
-const TARGET_RESOLUTION = .{
-    .width = 1280,
-    .height = 720,
-};
-const Pixel = packed union {
-    colors: packed struct(u32) {
-        b: u8,
-        g: u8,
-        r: u8,
-        reserved: u8 = 0,
-    },
-    data: u32,
-};
 comptime {
     toolbox.static_assert(
-        @sizeOf(Pixel) == 4,
+        @sizeOf(w64.Pixel) == 4,
         "Pixel size incorrect",
     );
 }
 const Screen = struct {
-    pixels: []Pixel,
+    frame_buffer: []volatile w64.Pixel,
+    back_buffer: []w64.Pixel,
     width: usize,
     height: usize,
     stride: usize,
@@ -104,44 +92,62 @@ pub fn main() noreturn {
 
     var gop: *ZSGraphicsOutputProtocol = undefined;
     var found_valid_resolution = false;
-    const screen: Screen = b: {
+    var screen: Screen = b: {
         var status = bs.locateProtocol(&ZSGraphicsOutputProtocol.guid, null, @ptrCast(*?*anyopaque, &gop));
         if (status != ZSUEFIStatus.Success) {
             fatal("Cannot init graphics system! Error locating GOP protocol: {}", .{status});
         }
 
+        //set graphics mode to 0 if NotStarted is returned
+        {
+            var gop_mode_info: *ZSGraphicsOutputModeInformation = undefined;
+            var size_of_info: usize = 0;
+            const query_mode_status = gop.queryMode(0, &size_of_info, &gop_mode_info);
+            if (query_mode_status == .NotStarted) {
+                _ = gop.setMode(0);
+            }
+        }
         var mode: u32 = 0;
         for (0..gop.mode.max_mode + 1) |i| {
             mode = @intCast(u32, i);
             var gop_mode_info: *ZSGraphicsOutputModeInformation = undefined;
             var size_of_info: usize = 0;
             const query_mode_status = gop.queryMode(mode, &size_of_info, &gop_mode_info);
-            if ((query_mode_status == ZSUEFIStatus.Success or
-                query_mode_status == ZSUEFIStatus.NotStarted) and
-                (gop_mode_info.horizontal_resolution == TARGET_RESOLUTION.width and
-                gop_mode_info.vertical_resolution == TARGET_RESOLUTION.height))
-            {
-                found_valid_resolution = true;
-                status = gop.setMode(mode);
-                if (status != ZSUEFIStatus.Success) {
-                    fatal("Cannot init graphics system! Error setting mode {}: {}", .{ mode, status });
+            if (query_mode_status == .Success) {
+                toolbox.assert(
+                    @sizeOf(ZSGraphicsOutputModeInformation) == size_of_info,
+                    "Wrong size for GOP mode info. Expected: {}, Actual: {}",
+                    .{
+                        @sizeOf(ZSGraphicsOutputModeInformation),
+                        size_of_info,
+                    },
+                );
+                if (gop_mode_info.horizontal_resolution == w64.TARGET_RESOLUTION.width and
+                    gop_mode_info.vertical_resolution == w64.TARGET_RESOLUTION.height)
+                {
+                    found_valid_resolution = true;
+                    status = gop.setMode(mode);
+                    if (status != ZSUEFIStatus.Success) {
+                        fatal("Cannot init graphics system! Error setting mode {}: {}", .{ mode, status });
+                    }
+                    break;
                 }
-                break;
             }
         }
         if (!found_valid_resolution) {
             fatal(
                 "Failed to set screen to required resolution: {}x{}",
                 .{
-                    TARGET_RESOLUTION.width,
-                    TARGET_RESOLUTION.height,
+                    w64.TARGET_RESOLUTION.width,
+                    w64.TARGET_RESOLUTION.height,
                 },
             );
         }
 
-        const pixels = @intToPtr([*]Pixel, gop.mode.frame_buffer_base)[0 .. gop.mode.frame_buffer_size / @sizeOf(Pixel)];
+        const frame_buffer = @intToPtr([*]w64.Pixel, gop.mode.frame_buffer_base)[0 .. gop.mode.frame_buffer_size / @sizeOf(w64.Pixel)];
         break :b .{
-            .pixels = pixels,
+            .frame_buffer = frame_buffer,
+            .back_buffer = undefined,
             .width = gop.mode.info.horizontal_resolution,
             .height = gop.mode.info.vertical_resolution,
             .stride = gop.mode.info.pixels_per_scan_line,
@@ -177,13 +183,6 @@ pub fn main() noreturn {
         } else {
             fatal("Cannot find rsdp!", .{});
         }
-    }
-    //reset console before getting memory map and exiting, since we cannot call any services
-    //after getting the memory map
-    {
-        _ = con_out.reset(false);
-        _ = con_out.clearScreen();
-        _ = con_out.setCursorPosition(0, 0);
     }
 
     //get memory map
@@ -265,6 +264,32 @@ pub fn main() noreturn {
         }
     };
     var kernel_start_arena = toolbox.Arena.init_with_buffer(kernel_start_context_page);
+
+    //allocate back buffer
+    screen.back_buffer = b: {
+        const number_of_pages_to_allocate =
+            toolbox.align_up(screen.frame_buffer.len * @sizeOf(w64.Pixel), MEMORY_PAGE_SIZE) /
+            UEFI_PAGE_SIZE;
+        for (memory_map) |*desc| {
+            switch (desc.type) {
+                .ConventionalMemory => {
+                    if (desc.number_of_pages >= number_of_pages_to_allocate) {
+                        const ret = @intToPtr([*]w64.Pixel, desc.physical_start)[0..screen.frame_buffer.len];
+                        desc.number_of_pages -= number_of_pages_to_allocate;
+                        desc.physical_start += number_of_pages_to_allocate * UEFI_PAGE_SIZE;
+                        break :b ret;
+                    }
+                },
+                else => {},
+            }
+        } else {
+            //TODO: proper fatal function
+            serialprintln("failed to find enough memory for kernel start context", .{});
+            toolbox.hang();
+        }
+    };
+    serialprintln("back buffer len: {}, screen len: {}", .{ screen.back_buffer.len, screen.frame_buffer.len });
+
     const kernel_parse_result = parse_kernel_elf(&kernel_start_arena) catch |e| {
         //TODO: proper fatal function
         serialprintln("failed to parse kernel elf: {}", .{e});
@@ -331,13 +356,87 @@ pub fn main() noreturn {
             }
         }
     }
-    for (screen.pixels) |*p| p.colors = .{
-        .r = 0,
-        .g = 0,
-        .b = 0x40,
-    };
+
+    //draw test
+    {
+        // bounce_demo(screen);
+
+        for (screen.back_buffer) |*p| p.colors = .{
+            .r = 0,
+            .g = 0,
+            .b = 0,
+        };
+        var cursor_x: usize = 0;
+        var cursor_y: usize = 0;
+        for (w64.CHARACTERS) |bitmap| {
+            for (0..w64.CharacterBitmap.HEIGHT) |y| {
+                for (0..w64.CharacterBitmap.WIDTH) |x| {
+                    screen.back_buffer[(y + cursor_y) * screen.stride + x + cursor_x] = bitmap.pixels[y * w64.CharacterBitmap.WIDTH + x];
+                }
+            }
+            cursor_x += w64.CharacterBitmap.KERNING;
+            if (cursor_x >= screen.width - w64.CharacterBitmap.KERNING) {
+                cursor_x = 0;
+                cursor_y += w64.CharacterBitmap.HEIGHT + 1;
+            }
+        }
+        @memcpy(screen.frame_buffer, screen.back_buffer);
+    }
 
     toolbox.hang();
+}
+fn bounce_demo(screen: Screen) noreturn {
+    //TODO test with back buffer
+    var cursor_y: usize = 0;
+    var upwards = false;
+    while (true) {
+        if (upwards) {
+            cursor_y -= 1;
+        } else {
+            cursor_y += 1;
+        }
+        if (cursor_y >= screen.height - w64.CharacterBitmap.HEIGHT) {
+            upwards = true;
+        } else if (cursor_y == 0) {
+            upwards = false;
+        }
+        for (screen.back_buffer) |*p| p.colors = .{
+            .r = 0,
+            .g = 0,
+            .b = 0,
+        };
+        draw_rect(screen, 500, cursor_y);
+        {
+            var cursor_x: usize = 0;
+            for (w64.CHARACTERS) |bitmap| {
+                for (0..w64.CharacterBitmap.HEIGHT) |y| {
+                    for (0..w64.CharacterBitmap.WIDTH) |x| {
+                        screen.back_buffer[(y + cursor_y) * screen.stride + (x + cursor_x)] = bitmap.pixels[y * w64.CharacterBitmap.WIDTH + x];
+                    }
+                }
+                cursor_x += w64.CharacterBitmap.KERNING;
+            }
+        }
+        @memcpy(screen.frame_buffer, screen.back_buffer);
+        for (0..100000) |_| {
+            std.atomic.spinLoopHint();
+        }
+    }
+}
+
+fn draw_rect(screen: Screen, x: usize, y: usize) void {
+    const w = 30;
+    const h = 20;
+
+    for (y..y + h) |py| {
+        for (x..x + w) |px| {
+            screen.back_buffer[py * screen.stride + px] = .{ .colors = .{
+                .r = 0xFF,
+                .g = 0xFF,
+                .b = 0xFF,
+            } };
+        }
+    }
 }
 fn parse_kernel_elf(arena: *toolbox.Arena) !KernelParseResult {
     var page_table_data = toolbox.RandomRemovalLinkedList(PageTableData).init(arena);
@@ -471,7 +570,7 @@ fn serialprintln(comptime fmt: []const u8, args: anytype) void {
 //     );
 //     for (y0..y0 + height) |y| {
 //         for (0..screen.width) |x| {
-//             screen.pixels[y * screen.stride + x].colors = .{
+//             screen.frame_buffer[y * screen.stride + x].colors = .{
 //                 .r = @intCast(u8, core_id) * 100,
 //                 .g = 0,
 //                 .b = 0,
