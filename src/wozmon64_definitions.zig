@@ -22,6 +22,14 @@ pub const Pixel = packed union {
     data: u32,
 };
 
+pub const Screen = struct {
+    frame_buffer: []volatile Pixel,
+    back_buffer: []Pixel,
+    width: usize,
+    height: usize,
+    stride: usize,
+};
+
 comptime {
     toolbox.static_assert(@sizeOf(Pixel) == 4, "Incorrect size for Pixel");
 }

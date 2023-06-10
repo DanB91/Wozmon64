@@ -5,6 +5,7 @@ const std = @import("std");
 const toolbox = @import("toolbox");
 const mpsp = @import("mp_service_protocol.zig");
 const w64 = @import("wozmon64_definitions.zig");
+const console = @import("bootloader_console.zig");
 
 const KERNEL_ELF = @embedFile("../zig-out/bin/kernel.elf");
 const MEMORY_PAGE_SIZE = toolbox.mb(2);
@@ -20,19 +21,14 @@ const ZSMemoryDescriptor = std.os.uefi.tables.MemoryDescriptor;
 
 const SmallUEFIMemoryDescriptor = ZSMemoryDescriptor;
 
+const println = console.println;
+
 comptime {
     toolbox.static_assert(
         @sizeOf(w64.Pixel) == 4,
         "Pixel size incorrect",
     );
 }
-const Screen = struct {
-    frame_buffer: []volatile w64.Pixel,
-    back_buffer: []w64.Pixel,
-    width: usize,
-    height: usize,
-    stride: usize,
-};
 
 pub const LargeUEFIMemoryDescriptor = extern struct {
     type: std.os.uefi.tables.MemoryType,
@@ -92,7 +88,7 @@ pub fn main() noreturn {
 
     var gop: *ZSGraphicsOutputProtocol = undefined;
     var found_valid_resolution = false;
-    var screen: Screen = b: {
+    var screen: w64.Screen = b: {
         var status = bs.locateProtocol(&ZSGraphicsOutputProtocol.guid, null, @ptrCast(*?*anyopaque, &gop));
         if (status != ZSUEFIStatus.Success) {
             fatal("Cannot init graphics system! Error locating GOP protocol: {}", .{status});
@@ -224,6 +220,7 @@ pub fn main() noreturn {
                 .{ status, handle, map_key },
             );
         }
+        console.exit_boot_services();
     }
     {
         system_table.console_in_handle = null;
@@ -259,7 +256,7 @@ pub fn main() noreturn {
             }
         } else {
             //TODO: proper fatal function
-            serialprintln("failed to find enough memory for kernel start context", .{});
+            println("failed to find enough memory for kernel start context", .{});
             toolbox.hang();
         }
     };
@@ -277,6 +274,9 @@ pub fn main() noreturn {
                         const ret = @intToPtr([*]w64.Pixel, desc.physical_start)[0..screen.frame_buffer.len];
                         desc.number_of_pages -= number_of_pages_to_allocate;
                         desc.physical_start += number_of_pages_to_allocate * UEFI_PAGE_SIZE;
+
+                        //clear memory
+                        @memset(ret, .{ .data = 0 });
                         break :b ret;
                     }
                 },
@@ -284,15 +284,16 @@ pub fn main() noreturn {
             }
         } else {
             //TODO: proper fatal function
-            serialprintln("failed to find enough memory for kernel start context", .{});
+            println("failed to find enough memory for kernel start context", .{});
             toolbox.hang();
         }
     };
-    serialprintln("back buffer len: {}, screen len: {}", .{ screen.back_buffer.len, screen.frame_buffer.len });
+    console.init_graphics_console(screen);
+    println("back buffer len: {}, screen len: {}", .{ screen.back_buffer.len, screen.frame_buffer.len });
 
     const kernel_parse_result = parse_kernel_elf(&kernel_start_arena) catch |e| {
         //TODO: proper fatal function
-        serialprintln("failed to parse kernel elf: {}", .{e});
+        println("failed to parse kernel elf: {}", .{e});
         toolbox.hang();
     };
     var next_free_virtual_address = kernel_parse_result.next_free_virtual_address;
@@ -332,14 +333,15 @@ pub fn main() noreturn {
         //1) map kernel_start_context_page
         //2) map MMIO addresses
     }
+
     //dump debug memory data
     {
-        serialprintln("rsdp: 0x{X}", .{rsdp});
-        serialprintln("start context page address: 0x{X}", .{@ptrToInt(kernel_start_context_page.ptr)});
+        println("rsdp: 0x{X}", .{rsdp});
+        println("start context page address: 0x{X}", .{@ptrToInt(kernel_start_context_page.ptr)});
         {
             var it = conventional_memory_descriptors.iterator();
             while (it.next()) |desc| {
-                serialprintln("Conventional Memory:  paddr: {X}, number of pages: {}", .{
+                println("Conventional Memory:  paddr: {X}, number of pages: {}", .{
                     desc.physical_address,
                     desc.number_of_pages,
                 });
@@ -348,7 +350,7 @@ pub fn main() noreturn {
         {
             var it = mmio_descriptors.iterator();
             while (it.next()) |desc| {
-                serialprintln("MMIO: vaddr: {X}, paddr: {X}, number of pages: {}", .{
+                println("MMIO: vaddr: {X}, paddr: {X}, number of pages: {}", .{
                     desc.virtual_address,
                     desc.physical_address,
                     desc.number_of_pages,
@@ -357,6 +359,9 @@ pub fn main() noreturn {
         }
     }
 
+    toolbox.hang();
+}
+fn draw_test(screen: w64.Screen) noreturn {
     //draw test
     {
         // bounce_demo(screen);
@@ -382,10 +387,8 @@ pub fn main() noreturn {
         }
         @memcpy(screen.frame_buffer, screen.back_buffer);
     }
-
-    toolbox.hang();
 }
-fn bounce_demo(screen: Screen) noreturn {
+fn bounce_demo(screen: w64.Screen) noreturn {
     //TODO test with back buffer
     var cursor_y: usize = 0;
     var upwards = false;
@@ -424,7 +427,7 @@ fn bounce_demo(screen: Screen) noreturn {
     }
 }
 
-fn draw_rect(screen: Screen, x: usize, y: usize) void {
+fn draw_rect(screen: w64.Screen, x: usize, y: usize) void {
     const w = 30;
     const h = 20;
 
@@ -467,7 +470,7 @@ fn parse_kernel_elf(arena: *toolbox.Arena) !KernelParseResult {
                     next_free_virtual_address,
                     toolbox.align_down(program_header.p_vaddr + program_header.p_memsz + MEMORY_PAGE_SIZE, MEMORY_PAGE_SIZE),
                 );
-                serialprintln("ELF vaddr: {X}, size: {X}", .{ program_header.p_vaddr, program_header.p_memsz });
+                println("ELF vaddr: {X}, size: {X}", .{ program_header.p_vaddr, program_header.p_memsz });
             },
             std.elf.PT_GNU_STACK => {
                 const KERNEL_STACK_BOTTOM_ADDRESS = 0x1_0000_0000_0000_0000 - MEMORY_PAGE_SIZE;
@@ -489,7 +492,7 @@ fn parse_kernel_elf(arena: *toolbox.Arena) !KernelParseResult {
             else => return error.UnexpectedELFSection,
         }
     }
-    serialprintln("next free virtual address: {X}", .{next_free_virtual_address});
+    println("next free virtual address: {X}", .{next_free_virtual_address});
     return .{
         .next_free_virtual_address = next_free_virtual_address,
         .entry_point = header.entry,
@@ -499,40 +502,8 @@ fn parse_kernel_elf(arena: *toolbox.Arena) !KernelParseResult {
 }
 
 fn fatal(comptime fmt: []const u8, args: anytype) noreturn {
-    uefiprintln(fmt, args);
+    println(fmt, args);
     toolbox.hang();
-}
-
-//should only be called by BSP (main processor) and before getMemoryMap
-fn uefiprintln(comptime fmt: []const u8, args: anytype) void {
-    if (comptime !ENABLE_CONSOLE) {
-        return;
-    }
-    const MAX_CHARS = 256;
-    var buf8: [MAX_CHARS:0]u8 = undefined;
-    var buf16: [MAX_CHARS:0]u16 = [_:0]u16{0} ** MAX_CHARS;
-    const utf8 = std.fmt.bufPrintZ(&buf8, fmt ++ "\r\n", args) catch buf8[0..];
-    _ = std.unicode.utf8ToUtf16Le(&buf16, utf8) catch return;
-    _ = std.os.uefi.system_table.con_out.?.outputString(&buf16);
-}
-
-fn serialprintln(comptime fmt: []const u8, args: anytype) void {
-    if (comptime !ENABLE_CONSOLE) {
-        return;
-    }
-    const MAX_CHARS = 256;
-    const COM1_PORT_ADDRESS = 0x3F8;
-    var buf: [MAX_CHARS]u8 = undefined;
-    const utf8 = std.fmt.bufPrint(&buf, fmt ++ "\r\n", args) catch buf[0..];
-    for (utf8) |b| {
-        asm volatile (
-            \\outb %%al, %%dx
-            :
-            : [data] "{al}" (b),
-              [port] "{dx}" (COM1_PORT_ADDRESS),
-            : "rax", "rdx"
-        );
-    }
 }
 
 //TODO:
