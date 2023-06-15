@@ -1,4 +1,4 @@
-const w64 = @import("wozmon64_definitions.zig");
+const w64 = @import("wozmon64.zig");
 
 pub const SCREEN_CHARACTER_RESOLUTION = .{
     .width = w64.TARGET_RESOLUTION.width / CharacterBitmap.KERNING,

@@ -105,13 +105,18 @@ pub const Arena = struct {
         const ret_bytes = arena.push_bytes_aligned(@sizeOf(T), @alignOf(T));
         return @ptrCast(*T, ret_bytes.ptr);
     }
+    pub fn push_clear(arena: *Arena, comptime T: type) *T {
+        const ret_bytes = arena.push_bytes_aligned(@sizeOf(T), @alignOf(T));
+        @memset(ret_bytes, 0);
+        return @ptrCast(*T, ret_bytes.ptr);
+    }
     pub fn push_slice(arena: *Arena, comptime T: type, n: usize) []T {
         const ret_bytes = arena.push_bytes_aligned(@sizeOf(T) * n, @alignOf(T));
         return @ptrCast([*]T, ret_bytes.ptr)[0..n];
     }
     pub fn push_slice_clear(arena: *Arena, comptime T: type, n: usize) []T {
         const ret_bytes = arena.push_bytes_aligned(@sizeOf(T) * n, @alignOf(T));
-        for (ret_bytes) |*b| b.* = 0;
+        @memset(ret_bytes, 0);
         return @ptrCast([*]T, ret_bytes.ptr)[0..n];
     }
 

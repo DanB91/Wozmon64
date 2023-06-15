@@ -1,7 +1,7 @@
 //Screen can fit 53x20 characters
 //should only be called by BSP (main processor) and before getMemoryMap
 const std = @import("std");
-const w64 = @import("wozmon64_definitions.zig");
+const w64 = @import("wozmon64.zig");
 const toolbox = @import("toolbox");
 
 const ENABLE_CONSOLE = true;

@@ -4,15 +4,16 @@
 const std = @import("std");
 const toolbox = @import("toolbox");
 const mpsp = @import("mp_service_protocol.zig");
-const w64 = @import("wozmon64_definitions.zig");
+const w64 = @import("wozmon64.zig");
+const amd64 = @import("amd64.zig");
 const console = @import("bootloader_console.zig");
 
 const KERNEL_ELF = @embedFile("../zig-out/bin/kernel.elf");
-const MEMORY_PAGE_SIZE = toolbox.mb(2);
-const MMIO_PAGE_SIZE = toolbox.kb(4);
 const UEFI_PAGE_SIZE = toolbox.kb(4);
 
 const ENABLE_CONSOLE = true;
+
+const KERNEL_STACK_BOTTOM_ADDRESS = 0x1_0000_0000_0000_0000 - w64.MEMORY_PAGE_SIZE;
 
 const ZSGraphicsOutputProtocol = std.os.uefi.protocols.GraphicsOutputProtocol;
 const ZSGraphicsOutputModeInformation = std.os.uefi.protocols.GraphicsOutputModeInformation;
@@ -39,33 +40,28 @@ pub const LargeUEFIMemoryDescriptor = extern struct {
     unknown: u64,
 };
 
-pub const ConventionalMemoryDescriptor = struct {
-    physical_address: u64,
-    number_of_pages: usize,
-
-    const PAGE_SIZE = MEMORY_PAGE_SIZE;
-};
-pub const MMIOMemoryDescriptor = struct {
-    physical_address: u64,
-    virtual_address: u64,
-    number_of_pages: usize,
-
-    const PAGE_SIZE = MMIO_PAGE_SIZE;
-};
-
 const KernelParseResult = struct {
     next_free_virtual_address: u64,
     entry_point: u64,
     top_of_stack_address: u64,
-    page_table_data: toolbox.RandomRemovalLinkedList(PageTableData),
+    page_table_data: toolbox.DynamicArray(PageTableData),
 };
 const PageTableData = struct {
     destination_virtual_address: u64,
-    data_to_copy: []const u8,
+    data: []const u8,
     number_of_bytes: usize,
     is_executable: bool,
     is_writable: bool,
 };
+
+pub fn panic(msg: []const u8, error_return_trace: ?*std.builtin.StackTrace, ret_addr: ?usize) noreturn {
+    //not set in UEFI
+    _ = ret_addr;
+    _ = error_return_trace;
+
+    println("PANIC: {s}", .{msg});
+    toolbox.hang();
+}
 
 pub fn main() noreturn {
     //disable interrupts
@@ -150,36 +146,21 @@ pub fn main() noreturn {
         };
     };
 
-    //TODO: get rsdp
-    var rsdp: u64 = 0;
-    {
-        const ACPI2RSDP = extern struct {
-            signature: [8]u8,
-            checksum: u8,
-            oem_id: [6]u8,
-            revision: u8,
-            rsdt_address: u32,
-            length: u32,
-            xsdt_address_low: u32,
-            xsdt_address_high: u32,
-            extended_checksum: u8,
-            reserved: [3]u8,
-        };
-        table_loop: for (0..system_table.number_of_table_entries) |i| {
+    var rsdp = b: {
+        for (0..system_table.number_of_table_entries) |i| {
             if (system_table.configuration_table[i].vendor_guid.eql(std.os.uefi.tables.ConfigurationTable.acpi_20_table_guid)) {
-                const tmp_rsdp = @ptrCast(*ACPI2RSDP, @alignCast(
-                    @alignOf(ACPI2RSDP),
+                const tmp_rsdp = @ptrCast(*amd64.ACPI2RSDP, @alignCast(
+                    @alignOf(amd64.ACPI2RSDP),
                     system_table.configuration_table[i].vendor_table,
                 ));
                 if (std.mem.eql(u8, &tmp_rsdp.signature, "RSD PTR ")) {
-                    rsdp = @ptrToInt(tmp_rsdp);
-                    break :table_loop;
+                    break :b tmp_rsdp;
                 }
             }
         } else {
             fatal("Cannot find rsdp!", .{});
         }
-    }
+    };
 
     //get memory map
     var memory_map: []LargeUEFIMemoryDescriptor = undefined;
@@ -240,107 +221,165 @@ pub fn main() noreturn {
     // );
     // @atomicStore(bool, &print_strip, true, .SeqCst);
 
-    const kernel_start_context_page = b: {
+    const kernel_start_context_bytes = b: {
+        // const size = toolbox.next_power_of_2(
+        //     screen.frame_buffer.len * @sizeOf(w64.Pixel) * 2 + w64.MEMORY_PAGE_SIZE,
+        // );
+        const size = toolbox.mb(64); //64 MB should be big enough!!!
         for (memory_map) |*desc| {
             switch (desc.type) {
-                .ConventionalMemory => {
+                .ConventionalMemory => case: {
+                    //must be aligned on a 2MB boundary
+                    const target_address = toolbox.align_up(desc.physical_start, w64.MEMORY_PAGE_SIZE);
+                    const padding = target_address - desc.physical_start;
                     const descriptor_size = desc.number_of_pages * UEFI_PAGE_SIZE;
-                    if (descriptor_size >= MEMORY_PAGE_SIZE) {
-                        const ret = @intToPtr([*]u8, desc.physical_start)[0..MEMORY_PAGE_SIZE];
-                        desc.number_of_pages -= MEMORY_PAGE_SIZE / UEFI_PAGE_SIZE;
-                        desc.physical_start += MEMORY_PAGE_SIZE;
+                    if (padding > descriptor_size) {
+                        break :case;
+                    }
+
+                    if (descriptor_size - padding >= size) {
+                        const ret = @intToPtr([*]u8, target_address)[0..size];
+                        desc.number_of_pages -= size / UEFI_PAGE_SIZE;
+                        desc.physical_start += size;
                         break :b ret;
                     }
                 },
                 else => {},
             }
         } else {
-            //TODO: proper fatal function
-            println("failed to find enough memory for kernel start context", .{});
-            toolbox.hang();
+            fatal("Failed to find enough memory for kernel start context.", .{});
         }
     };
-    var kernel_start_arena = toolbox.Arena.init_with_buffer(kernel_start_context_page);
+    var global_arena = toolbox.Arena.init_with_buffer(kernel_start_context_bytes);
 
     //allocate back buffer
-    screen.back_buffer = b: {
-        const number_of_pages_to_allocate =
-            toolbox.align_up(screen.frame_buffer.len * @sizeOf(w64.Pixel), MEMORY_PAGE_SIZE) /
-            UEFI_PAGE_SIZE;
-        for (memory_map) |*desc| {
-            switch (desc.type) {
-                .ConventionalMemory => {
-                    if (desc.number_of_pages >= number_of_pages_to_allocate) {
-                        const ret = @intToPtr([*]w64.Pixel, desc.physical_start)[0..screen.frame_buffer.len];
-                        desc.number_of_pages -= number_of_pages_to_allocate;
-                        desc.physical_start += number_of_pages_to_allocate * UEFI_PAGE_SIZE;
-
-                        //clear memory
-                        @memset(ret, .{ .data = 0 });
-                        break :b ret;
-                    }
-                },
-                else => {},
-            }
-        } else {
-            //TODO: proper fatal function
-            println("failed to find enough memory for kernel start context", .{});
-            toolbox.hang();
-        }
-    };
+    screen.back_buffer = global_arena.push_slice_clear(w64.Pixel, screen.frame_buffer.len);
     console.init_graphics_console(screen);
     println("back buffer len: {}, screen len: {}", .{ screen.back_buffer.len, screen.frame_buffer.len });
 
-    const kernel_parse_result = parse_kernel_elf(&kernel_start_arena) catch |e| {
+    var kernel_parse_result = parse_kernel_elf(&global_arena) catch |e| {
         //TODO: proper fatal function
         println("failed to parse kernel elf: {}", .{e});
         toolbox.hang();
     };
     var next_free_virtual_address = kernel_parse_result.next_free_virtual_address;
+    const pml4_table = global_arena.push_clear(amd64.PageMappingLevel4Table);
 
-    //collect conventional memory and MMIO descriptors
-    var conventional_memory_descriptors = toolbox.RandomRemovalLinkedList(ConventionalMemoryDescriptor)
-        .init(&kernel_start_arena);
-    var mmio_descriptors = toolbox.RandomRemovalLinkedList(MMIOMemoryDescriptor)
-        .init(&kernel_start_arena);
-    for (memory_map) |desc| {
-        const descriptor_size = desc.number_of_pages * UEFI_PAGE_SIZE;
-        switch (desc.type) {
-            .ConventionalMemory => {
-                if (descriptor_size >= MEMORY_PAGE_SIZE) {
-                    const number_of_pages = descriptor_size / MEMORY_PAGE_SIZE;
-                    _ = conventional_memory_descriptors.append(.{
-                        .physical_address = desc.physical_start,
-                        .number_of_pages = number_of_pages,
-                    });
-                }
-            },
-            .ACPIMemoryNVS, .ACPIReclaimMemory => {
-                _ = mmio_descriptors.append(.{
-                    .virtual_address = next_free_virtual_address,
-                    .physical_address = desc.physical_start,
-                    .number_of_pages = desc.number_of_pages,
-                });
-                next_free_virtual_address += descriptor_size;
-            },
-            else => {
-                //TODO?
-            },
-        }
-    }
+    //map recursive mapping
+    //0xFFFFFF00 00000000 - 0xFFFFFF7F FFFFFFFF   Page Mapping Level 1 (Page Tables)
+    //0xFFFFFF7F 80000000 - 0xFFFFFF7F BFFFFFFF   Page Mapping Level 2 (Page Directories)
+    //0xFFFFFF7F BFC00000 - 0xFFFFFF7F BFDFFFFF   Page Mapping Level 3 (PDPTs / Page-Directory-Pointer Tables)
+    //0xFFFFFF7F BFDFE000 - 0xFFFFFF7F BFDFEFFF   Page Mapping Level 4 (PML4)
+    pml4_table.entries[510] = .{
+        .present = true,
+        .write_enable = true,
+        .ring3_accessible = false,
+        .writethrough = false,
+        .cache_disable = false,
+        .pdp_base_address = @intCast(
+            u40,
+            @ptrToInt(pml4_table) >> 12,
+        ),
+        .no_execute = false,
+    };
+
+    var free_conventional_memory = toolbox.DynamicArray(w64.ConventionalMemoryDescriptor)
+        .init(&global_arena, memory_map.len);
+    var mapped_memory = toolbox.DynamicArray(w64.VirtualMemoryMapping)
+        .init(&global_arena, memory_map.len);
     {
-        //TODO: set up page tables
-        //1) map kernel_start_context_page
-        //2) map MMIO addresses
+
+        //map kernel global arena
+        map_virtual_memory(
+            @ptrToInt(kernel_start_context_bytes.ptr),
+            &next_free_virtual_address,
+            kernel_start_context_bytes.len / w64.MEMORY_PAGE_SIZE,
+            .ConventionalMemory,
+            &mapped_memory,
+            pml4_table,
+            &global_arena,
+        );
+
+        //map frame buffer
+        var frame_buffer_virtual_address: u64 = w64.FRAME_BUFFER_VIRTUAL_ADDRESS;
+        map_virtual_memory(
+            @ptrToInt(screen.frame_buffer.ptr),
+            &frame_buffer_virtual_address,
+            //+ 1 just in case
+            (screen.frame_buffer.len * @sizeOf(w64.Pixel) / w64.MEMORY_PAGE_SIZE) + 1,
+            .FrameBufferMemory,
+            &mapped_memory,
+            pml4_table,
+            &global_arena,
+        );
+
+        //need to identity map the start_kernel function since we load CR3 there
+        //kernel should unmap this
+        {
+            var virtual_address = @ptrToInt(&start_kernel);
+            map_virtual_memory(
+                @ptrToInt(&start_kernel),
+                &virtual_address,
+                1,
+                .MMIOMemory,
+                &mapped_memory,
+                pml4_table,
+                &global_arena,
+            );
+        }
+
+        //map kernel itself
+        for (kernel_parse_result.page_table_data.items()) |data| {
+            var virtual_address = data.destination_virtual_address;
+            map_virtual_memory(
+                @ptrToInt(data.data.ptr),
+                &virtual_address,
+                (data.data.len / w64.MEMORY_PAGE_SIZE) + 1,
+                .ConventionalMemory,
+                &mapped_memory,
+                pml4_table,
+                &global_arena,
+            );
+        }
+
+        for (memory_map) |desc| {
+            const descriptor_size = desc.number_of_pages * UEFI_PAGE_SIZE;
+            switch (desc.type) {
+                .ConventionalMemory => {
+                    if (descriptor_size >= w64.MEMORY_PAGE_SIZE) {
+                        const number_of_pages = descriptor_size / w64.MEMORY_PAGE_SIZE;
+                        free_conventional_memory.append(.{
+                            .physical_address = desc.physical_start,
+                            .number_of_pages = number_of_pages,
+                        });
+                    }
+                },
+                .ACPIMemoryNVS, .ACPIReclaimMemory => {
+                    map_virtual_memory(
+                        desc.physical_start,
+                        &next_free_virtual_address,
+                        desc.number_of_pages,
+                        .MMIOMemory,
+                        &mapped_memory,
+                        pml4_table,
+                        &global_arena,
+                    );
+                },
+                else => {
+                    //TODO?
+                },
+            }
+        }
     }
 
     //dump debug memory data
     {
-        println("rsdp: 0x{X}", .{rsdp});
-        println("start context page address: 0x{X}", .{@ptrToInt(kernel_start_context_page.ptr)});
+        println("start context address: 0x{X}, len: {}", .{
+            @ptrToInt(kernel_start_context_bytes.ptr),
+            kernel_start_context_bytes.len,
+        });
         {
-            var it = conventional_memory_descriptors.iterator();
-            while (it.next()) |desc| {
+            for (free_conventional_memory.items()) |desc| {
                 println("Conventional Memory:  paddr: {X}, number of pages: {}", .{
                     desc.physical_address,
                     desc.number_of_pages,
@@ -348,17 +387,69 @@ pub fn main() noreturn {
             }
         }
         {
-            var it = mmio_descriptors.iterator();
-            while (it.next()) |desc| {
-                println("MMIO: vaddr: {X}, paddr: {X}, number of pages: {}", .{
+            for (mapped_memory.items()) |desc| {
+                println("Mapped Memory: vaddr: {X}, paddr: {X}, size: {}, type: {s}", .{
                     desc.virtual_address,
                     desc.physical_address,
-                    desc.number_of_pages,
+                    desc.size,
+                    @tagName(desc.memory_type),
                 });
             }
         }
+        println("Space left in arena: {}", .{global_arena.data.len - global_arena.pos});
     }
 
+    var kernel_start_context = global_arena.push(w64.KernelStartContext);
+    kernel_start_context.* = .{
+        .rsdp = physical_to_virtual_pointer(rsdp, mapped_memory.items()),
+        .screen = screen,
+        .mapped_memory = physical_to_virtual_pointer(mapped_memory.items(), mapped_memory.items()),
+        .free_conventional_memory = physical_to_virtual_pointer(free_conventional_memory.items(), mapped_memory.items()),
+        .global_arena = global_arena,
+        .bootstrap_address_to_unmap = @ptrToInt(&start_kernel),
+    };
+    kernel_start_context.screen.back_buffer = physical_to_virtual_pointer(
+        kernel_start_context.screen.back_buffer,
+        mapped_memory.items(),
+    );
+    kernel_start_context.screen.frame_buffer = physical_to_virtual_pointer(
+        kernel_start_context.screen.frame_buffer,
+        mapped_memory.items(),
+    );
+    kernel_start_context.global_arena.data = physical_to_virtual_pointer(
+        kernel_start_context.global_arena.data,
+        mapped_memory.items(),
+    );
+
+    start_kernel(
+        pml4_table,
+        kernel_start_context,
+        mapped_memory.items(),
+        kernel_parse_result.entry_point,
+    );
+}
+fn start_kernel(
+    pml4_table: *amd64.PageMappingLevel4Table,
+    kernel_start_context: *w64.KernelStartContext,
+    mapped_memory: []w64.VirtualMemoryMapping,
+    entry_point: u64,
+) noreturn {
+    asm volatile (
+        \\movq %[cr3_data], %%cr3
+        \\movq %[stack_virtual_address], %%rsp
+        \\movq %[ksc_addr], %%rdi
+        \\jmpq *%[entry_point] #here we go!!!!
+        \\ud2 #this instruction is for searchability in the disassembly
+        :
+        : [cr3_data] "r" (@ptrToInt(pml4_table)),
+          [stack_virtual_address] "r" (KERNEL_STACK_BOTTOM_ADDRESS),
+          [ksc_addr] "r" (@ptrToInt(physical_to_virtual_pointer(
+            kernel_start_context,
+            mapped_memory,
+          ))),
+          [entry_point] "r" (entry_point),
+        : "rdi", "rsp", "cr3"
+    );
     toolbox.hang();
 }
 fn draw_test(screen: w64.Screen) noreturn {
@@ -441,8 +532,202 @@ fn draw_rect(screen: w64.Screen, x: usize, y: usize) void {
         }
     }
 }
+fn map_virtual_memory(
+    physical_address: u64,
+    virtual_address: *u64,
+    number_of_pages: usize,
+    memory_type: w64.MemoryType,
+    mapped_memory: *toolbox.DynamicArray(w64.VirtualMemoryMapping),
+    pml4_table: *amd64.PageMappingLevel4Table,
+    arena: *toolbox.Arena,
+) void {
+    const page_size: usize = switch (memory_type) {
+        .ConventionalMemory, .FrameBufferMemory => w64.MEMORY_PAGE_SIZE,
+        .MMIOMemory => w64.MMIO_PAGE_SIZE,
+    };
+    virtual_address.* = toolbox.align_down(virtual_address.*, page_size);
+    const aligned_physical_address = toolbox.align_down(physical_address, page_size);
+
+    const size = number_of_pages * page_size;
+    //NOTE proabably unnecessary.  We map the kernel in 2 different virtual addresses and that's fine
+    // for (mapped_memory.items()) |*mm| {
+    //     if (physical_address >= mm.physical_address and
+    //         physical_address < mm.physical_address + mm.size)
+    //     {
+    //         toolbox.panic("{X} already mapped!", .{physical_address});
+    //     }
+    // }
+    defer {
+        mapped_memory.append(.{
+            .physical_address = aligned_physical_address,
+            .virtual_address = virtual_address.*,
+            .size = size,
+            .memory_type = memory_type,
+        });
+
+        //needs to be +%= for stack memory since it would increment out of 64 bit space
+        virtual_address.* +%= size;
+    }
+
+    for (0..number_of_pages) |page_number| {
+        const vaddr = virtual_address.* + page_number * page_size;
+        const paddr = aligned_physical_address + page_number * page_size;
+        const pml4t_index = (vaddr >> 39) & 0b1_1111_1111;
+
+        var pml4e = &pml4_table.entries[pml4t_index];
+        if (!pml4e.present) {
+            const pdp = arena.push_clear(amd64.PageDirectoryPointer);
+            const pdp_address = @ptrToInt(pdp);
+            toolbox.assert(
+                (pdp_address & 0xFFF) == 0,
+                "PDP not aligned! Address was: {}",
+                .{pdp_address},
+            );
+            pml4e.* = .{
+                .present = true,
+                .write_enable = true,
+                .ring3_accessible = false,
+                .writethrough = false,
+                .cache_disable = false,
+                .pdp_base_address = @intCast(
+                    u40,
+                    pdp_address >> 12,
+                ),
+                .no_execute = false,
+            };
+        }
+
+        var pdp = @intToPtr(
+            *amd64.PageDirectoryPointer,
+            @as(u64, pml4e.pdp_base_address) << 12,
+        );
+        const pdp_index = (vaddr >> 30) & 0b1_1111_1111;
+        var pdpe = &pdp.entries[pdp_index];
+        if (!pdpe.present) {
+            //NOTE: it doesn't matter if it's PageDirectory2MB or PageDirectory4KB
+            //      since they are the same size and we are not accessing them here
+            const pd = arena.push_clear(amd64.PageDirectory2MB);
+            const pd_address = @ptrToInt(pd);
+            toolbox.assert(
+                (pd_address & 0xFFF) == 0,
+                "PD not aligned! Address was: {}",
+                .{pd_address},
+            );
+            pdpe.* = .{
+                .present = true,
+                .write_enable = true,
+                .ring3_accessible = false,
+                .writethrough = false,
+                .cache_disable = false,
+                .pd_base_address = @intCast(
+                    u40,
+                    pd_address >> 12,
+                ),
+                .no_execute = false,
+            };
+        }
+
+        const pd_index = (vaddr >> 21) & 0b1_1111_1111;
+        switch (memory_type) {
+            .ConventionalMemory, .FrameBufferMemory => {
+                var pd = @intToPtr(
+                    *amd64.PageDirectory2MB,
+                    @as(u64, pdpe.pd_base_address) << 12,
+                );
+                var pde = &pd.entries[pd_index];
+                if (!pde.present) {
+                    pde.* = .{
+                        .present = true,
+                        .write_enable = true,
+                        .ring3_accessible = false,
+                        .writethrough = false,
+                        .cache_disable = false,
+                        .page_attribute_table_bit = 0,
+                        .global = true,
+                        .physical_page_base_address = @intCast(
+                            u31,
+                            paddr >> 21,
+                        ),
+                        .memory_protection_key = 0,
+                        .no_execute = false,
+                    };
+                } else {
+                    const mapped_paddr = @as(u64, pde.physical_page_base_address) << 21;
+                    if (mapped_paddr != aligned_physical_address) {
+                        toolbox.panic("Trying to map {X} to {X}, when it is already mapped to {X}!", .{
+                            vaddr,
+                            paddr,
+                            mapped_paddr,
+                        });
+                    }
+                }
+            },
+            .MMIOMemory => {
+                var pd = @intToPtr(
+                    *amd64.PageDirectory4KB,
+                    @as(u64, pdpe.pd_base_address) << 12,
+                );
+                var pde = &pd.entries[pd_index];
+                if (!pde.present) {
+                    const pt = arena.push_clear(amd64.PageTable);
+
+                    const pt_address = @ptrToInt(pt);
+                    toolbox.assert(
+                        (pt_address & 0xFFF) == 0,
+                        "PT not aligned! Address was: {}",
+                        .{pt_address},
+                    );
+                    pde.* = .{
+                        .present = true,
+                        .write_enable = true,
+                        .ring3_accessible = false,
+                        .writethrough = false,
+                        .cache_disable = false,
+                        .pt_base_address = @intCast(
+                            u40,
+                            pt_address >> 12,
+                        ),
+                        .no_execute = false,
+                    };
+                }
+                var pt = @intToPtr(
+                    *amd64.PageTable,
+                    @as(u64, pde.pt_base_address) << 12,
+                );
+                const pt_index = (vaddr >> 12) & 0b1_1111_1111;
+                var pte = &pt.entries[pt_index];
+                if (!pte.present) {
+                    pte.* = .{
+                        .present = true,
+                        .write_enable = true,
+                        .ring3_accessible = false,
+                        .writethrough = false,
+                        .cache_disable = true, //disable cache for MMIO
+                        .page_attribute_table_bit = 0,
+                        .global = true,
+                        .physical_page_base_address = @intCast(
+                            u40,
+                            paddr >> 12,
+                        ),
+                        .memory_protection_key = 0,
+                        .no_execute = false,
+                    };
+                } else {
+                    const mapped_paddr = @as(u64, pte.physical_page_base_address) << 12;
+                    if (mapped_paddr != aligned_physical_address) {
+                        toolbox.panic("Trying to map {X} to {X}, when it is already mapped to {X}!", .{
+                            vaddr,
+                            paddr,
+                            mapped_paddr,
+                        });
+                    }
+                }
+            },
+        }
+    }
+}
 fn parse_kernel_elf(arena: *toolbox.Arena) !KernelParseResult {
-    var page_table_data = toolbox.RandomRemovalLinkedList(PageTableData).init(arena);
+    var page_table_data = toolbox.DynamicArray(PageTableData).init(arena, 32);
     var kernel_image_byte_stream = std.io.fixedBufferStream(KERNEL_ELF);
     var header = try std.elf.Header.read(&kernel_image_byte_stream);
 
@@ -457,34 +742,37 @@ fn parse_kernel_elf(arena: *toolbox.Arena) !KernelParseResult {
                 }
                 const is_executable = program_header.p_flags & std.elf.PF_X != 0;
                 const is_writable = program_header.p_flags & std.elf.PF_W != 0;
+                const data_to_copy = KERNEL_ELF[program_header.p_offset .. program_header.p_offset + program_header.p_filesz];
+                var data = arena.push_bytes_aligned(data_to_copy.len, w64.MEMORY_PAGE_SIZE);
+                @memcpy(data, data_to_copy);
                 const page_table_setup_data = PageTableData{
                     .destination_virtual_address = program_header.p_vaddr,
-                    .data_to_copy = KERNEL_ELF[program_header.p_offset .. program_header.p_offset + program_header.p_filesz],
-                    .number_of_bytes = toolbox.align_up(program_header.p_memsz, MEMORY_PAGE_SIZE),
+                    .data = data,
+                    .number_of_bytes = toolbox.align_up(program_header.p_memsz, w64.MEMORY_PAGE_SIZE),
                     .is_executable = is_executable,
                     .is_writable = is_writable,
                 };
-                toolbox.assert(page_table_setup_data.data_to_copy.len <= page_table_setup_data.number_of_bytes, "number of bytes to copy should be no greater than the number of bytes to allocate", .{});
-                _ = page_table_data.append(page_table_setup_data);
+                toolbox.assert(page_table_setup_data.data.len <= page_table_setup_data.number_of_bytes, "number of bytes to copy should be no greater than the number of bytes to allocate", .{});
+                page_table_data.append(page_table_setup_data);
                 next_free_virtual_address = @max(
                     next_free_virtual_address,
-                    toolbox.align_down(program_header.p_vaddr + program_header.p_memsz + MEMORY_PAGE_SIZE, MEMORY_PAGE_SIZE),
+                    toolbox.align_down(program_header.p_vaddr + program_header.p_memsz + w64.MEMORY_PAGE_SIZE, w64.MEMORY_PAGE_SIZE),
                 );
                 println("ELF vaddr: {X}, size: {X}", .{ program_header.p_vaddr, program_header.p_memsz });
             },
             std.elf.PT_GNU_STACK => {
-                const KERNEL_STACK_BOTTOM_ADDRESS = 0x1_0000_0000_0000_0000 - MEMORY_PAGE_SIZE;
-                const stack_size = toolbox.align_up(program_header.p_memsz, MEMORY_PAGE_SIZE);
-                top_of_stack_address = KERNEL_STACK_BOTTOM_ADDRESS - stack_size + MEMORY_PAGE_SIZE;
+                const stack_size = toolbox.align_up(program_header.p_memsz, w64.MEMORY_PAGE_SIZE);
+                top_of_stack_address = KERNEL_STACK_BOTTOM_ADDRESS - stack_size;
+                println("stack size: {}", .{stack_size});
                 const page_table_setup_data = PageTableData{
                     .destination_virtual_address = top_of_stack_address,
-                    .data_to_copy = &[_]u8{},
+                    .data = arena.push_bytes_aligned(stack_size, w64.MEMORY_PAGE_SIZE),
                     .number_of_bytes = stack_size,
                     .is_executable = false,
                     .is_writable = true,
                 };
 
-                _ = page_table_data.append(page_table_setup_data);
+                page_table_data.append(page_table_setup_data);
             }, //TODO
             std.elf.PT_GNU_RELRO => {},
             std.elf.PT_PHDR => {},
@@ -492,7 +780,6 @@ fn parse_kernel_elf(arena: *toolbox.Arena) !KernelParseResult {
             else => return error.UnexpectedELFSection,
         }
     }
-    println("next free virtual address: {X}", .{next_free_virtual_address});
     return .{
         .next_free_virtual_address = next_free_virtual_address,
         .entry_point = header.entry,
@@ -504,6 +791,33 @@ fn parse_kernel_elf(arena: *toolbox.Arena) !KernelParseResult {
 fn fatal(comptime fmt: []const u8, args: anytype) noreturn {
     println(fmt, args);
     toolbox.hang();
+}
+fn physical_to_virtual_pointer(physical: anytype, mappings: []w64.VirtualMemoryMapping) @TypeOf(physical) {
+    const T = @TypeOf(physical);
+    const pointer_size = switch (@typeInfo(T)) {
+        .Pointer => |ptr| ptr.size,
+        else => {
+            @compileError("Must be a pointer!");
+        },
+    };
+    const physical_address = if (pointer_size == .Slice)
+        @ptrToInt(physical.ptr)
+    else
+        @ptrToInt(physical);
+
+    const virtual_address = w64.physical_to_virtual(
+        physical_address,
+        mappings,
+    ) catch
+        fatal(
+        "Failed to find mapping for physical address: {X}",
+        .{physical_address},
+    );
+    if (pointer_size == .Slice) {
+        const Child = @typeInfo(T).Pointer.child;
+        return @intToPtr([*]Child, virtual_address)[0..physical.len];
+    }
+    return @intToPtr(T, virtual_address);
 }
 
 //TODO:
