@@ -36,6 +36,7 @@ pub fn build(b: *std.Build) !void {
             .target = uefi_target,
             .optimize = optimize,
         });
+        //exe.addAssemblyFile("src/processor_bootstrap_program.s");
         exe.addModule("toolbox", toolbox_module);
         exe.force_pic = true;
         exe.red_zone = false;
@@ -59,7 +60,7 @@ pub fn build(b: *std.Build) !void {
         const qemu_command = b.addSystemCommand(&[_][]const u8{
             "qemu-system-x86_64",
             "-smp",
-            "cores=3",
+            "cores=4",
             "-m",
             "1G",
             "-no-reboot",

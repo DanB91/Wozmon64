@@ -18,7 +18,7 @@ const State = struct {
 };
 
 var g_state = State{ .screen = undefined };
-const MAX_BYTES = 256;
+const MAX_BYTES = 512;
 
 pub fn println(comptime fmt: []const u8, args: anytype) void {
     switch (g_state.stage) {
@@ -61,10 +61,13 @@ fn graphics_println(comptime fmt: []const u8, args: anytype) void {
             continue;
         }
         var byte = if (rune >= ' ' and rune < 128)
-            @intCast(u8, rune)
+            std.ascii.toUpper(@intCast(u8, rune))
         else
             '?';
-        const index = std.ascii.toUpper(byte) - ' ';
+        if (byte > '_') {
+            byte = '?';
+        }
+        const index = byte - ' ';
 
         const bitmap = w64.CHARACTERS[index];
         for (0..w64.CharacterBitmap.HEIGHT) |y| {

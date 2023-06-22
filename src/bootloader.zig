@@ -162,6 +162,22 @@ pub fn main() noreturn {
         }
     };
 
+    var number_of_enabled_processors: usize = 0;
+    {
+        var mp: *mpsp.MPServiceProtocol = undefined;
+        var status = bs.locateProtocol(&mpsp.MPServiceProtocol.guid, null, @ptrCast(*?*anyopaque, &mp));
+        if (status != ZSUEFIStatus.Success) {
+            fatal("Cannot init multicore support! Error locating MP protocol: {}", .{status});
+        }
+
+        var number_of_processors: usize = 0;
+        status = mp.mp_services_get_number_of_processors(&number_of_processors, &number_of_enabled_processors);
+        if (status != ZSUEFIStatus.Success) {
+            fatal("Cannot init multicore support! Error getting number of processors: {}", .{status});
+        }
+        println("Number of enabled processors: {}", .{number_of_enabled_processors});
+    }
+
     //get memory map
     var memory_map: []LargeUEFIMemoryDescriptor = undefined;
     var map_key: usize = 0;
@@ -191,6 +207,8 @@ pub fn main() noreturn {
         memory_map = bootloader_arena.push_slice(LargeUEFIMemoryDescriptor, num_descriptors);
         @memcpy(memory_map, mmap_store[0..num_descriptors]);
     }
+
+    //NOTE: Do not call println or any UEFI functions here!!!
 
     //exit boot services
     {
@@ -354,7 +372,11 @@ pub fn main() noreturn {
                         });
                     }
                 },
-                .ACPIMemoryNVS, .ACPIReclaimMemory => {
+                .ACPIMemoryNVS,
+                .ACPIReclaimMemory,
+                .MemoryMappedIO,
+                .MemoryMappedIOPortSpace,
+                => {
                     map_virtual_memory(
                         desc.physical_start,
                         &next_free_virtual_address,
@@ -421,6 +443,10 @@ pub fn main() noreturn {
         mapped_memory.items(),
     );
 
+    bootstrap_cores(&global_arena, number_of_enabled_processors);
+
+    toolbox.hang();
+
     start_kernel(
         pml4_table,
         kernel_start_context,
@@ -452,6 +478,123 @@ fn start_kernel(
     );
     toolbox.hang();
 }
+extern var processor_bootstrap_program_start: u8;
+extern var processor_bootstrap_program_end: u8;
+
+fn bootstrap_cores(arena: *toolbox.Arena, number_of_processors: u64) void {
+    const IA32_APIC_BASE_MSR = 0x1B;
+    const CPUID_FEAT_EDX_APIC = 1 << 9;
+    {
+        const cpuid = amd64.cpuid(1);
+        if (cpuid.edx & CPUID_FEAT_EDX_APIC == 0) {
+            fatal("CPU does not support multicore processing as required!", .{});
+        }
+
+        //copy in bootstrapping program
+        const PROCESSOR_BOOTSTRAP_PROGRAM_ADDRESS = 0x1000;
+        {
+            const program_len = @ptrToInt(&processor_bootstrap_program_end) -
+                @ptrToInt(&processor_bootstrap_program_start);
+
+            const dest = @intToPtr(
+                [*]u8,
+                PROCESSOR_BOOTSTRAP_PROGRAM_ADDRESS,
+            )[0..program_len];
+            const src = @intToPtr(
+                [*]u8,
+                @ptrToInt(&processor_bootstrap_program_start),
+            )[0..program_len];
+            @memcpy(dest, src);
+
+            const stacks =
+                arena.push_bytes_aligned(w64.MEMORY_PAGE_SIZE * (number_of_processors - 1), w64.MEMORY_PAGE_SIZE);
+            const stacks_data = @bitCast([8]u8, @ptrToInt(stacks.ptr));
+            @memcpy(dest[dest.len - 16 .. dest.len - 8], stacks_data[0..]);
+
+            const cr3 = asm volatile ("mov %%cr3, %[cr3]"
+                : [cr3] "=r" (-> u64),
+            );
+            const cr3_data = @bitCast([8]u8, cr3);
+            @memcpy(dest[dest.len - 8 ..], cr3_data[0..]);
+        }
+
+        const apic_base_address = amd64.rdmsr(IA32_APIC_BASE_MSR) &
+            toolbox.mask_for_bit_range(12, 63, u64);
+        const InterruptControlRegisterLow = packed struct(u32) {
+            vector: u8, //VEC
+            message_type: enum(u3) {
+                Fixed = 0b000,
+                LowestPriority = 0b001,
+                SystemManagementInterrupt = 0b010, //SMI
+                RemoteRead = 0b011,
+                NonMaskableInterrupt = 0b100, //NMI
+                Initialize = 0b101, //INIT
+                Startup = 0b110,
+                ExternalInterrupt = 0b111,
+            }, //MT
+            destination_mode: enum(u1) {
+                SingleAPIC = 0,
+                MultipleAPICs = 1,
+            }, //DM
+            is_sent: bool, //DS
+            reserved1: u1 = 0,
+            assert_interrupt: bool, //L
+            trigger_mode: enum(u1) {
+                EdgeTriggered,
+                LevelSensitive,
+            },
+            remote_read_status: u2 = 0, //RRS. don't really care about this
+            destination_shorthand: enum(u2) {
+                Destination,
+                Self,
+                AllIncludingSelf,
+                AllExcludingSelf,
+            },
+            reserved2: u12 = 0,
+        };
+        const InterruptControlRegisterHigh = packed struct(u32) {
+            reserved: u24 = 0,
+            destination: u8,
+        };
+        const interrupt_command_register_low = @intToPtr(
+            *volatile InterruptControlRegisterLow,
+            apic_base_address + 0x300,
+        );
+        const interrupt_command_register_high = @intToPtr(
+            *volatile InterruptControlRegisterHigh,
+            apic_base_address + 0x300 + @sizeOf(InterruptControlRegisterLow),
+        );
+        interrupt_command_register_high.* = .{
+            .destination = 0xFF,
+        };
+
+        interrupt_command_register_low.* = .{
+            .vector = 0,
+            .message_type = .Initialize,
+            .destination_mode = .MultipleAPICs,
+            .is_sent = false,
+            .assert_interrupt = true,
+            .trigger_mode = .EdgeTriggered,
+            .destination_shorthand = .AllExcludingSelf,
+        };
+
+        toolbox.busy_wait(1000);
+
+        interrupt_command_register_high.* = .{
+            .destination = 0xFF,
+        };
+        interrupt_command_register_low.* = .{
+            .vector = PROCESSOR_BOOTSTRAP_PROGRAM_ADDRESS >> 12,
+            .message_type = .Startup,
+            .destination_mode = .MultipleAPICs,
+            .is_sent = false,
+            .assert_interrupt = true,
+            .trigger_mode = .EdgeTriggered,
+            .destination_shorthand = .AllExcludingSelf,
+        };
+    }
+}
+
 fn draw_test(screen: w64.Screen) noreturn {
     //draw test
     {
@@ -933,3 +1076,154 @@ fn physical_to_virtual_pointer(physical: anytype, mappings: []w64.VirtualMemoryM
 //     }
 //     uefiprintln("Started {} cores", .{cores_started});
 // }
+
+comptime {
+    asm (
+        \\.global processor_entry
+        \\
+        \\processor_bootstrap_program_start:
+        \\.equ LOAD_ADDRESS, 0x1000
+        \\.equ STACK_SIZE, (1 << 21)
+        \\.code16
+        \\cli
+        \\cld
+        \\lgdt (smp_gdt - processor_bootstrap_program_start) + LOAD_ADDRESS
+        \\mov %cr0, %eax 
+        \\bts $0, %eax
+        \\mov %eax, %cr0
+        \\ljmp $0x8, $((.mode32 - processor_bootstrap_program_start) + LOAD_ADDRESS)
+        \\
+        \\.code32
+        \\.mode32:
+        \\mov $0x10, %ax
+        \\mov %ax, %ds
+        \\mov %ax, %es
+        \\mov %ax, %fs
+        \\mov %ax, %gs
+        \\mov %ax, %ss
+        \\mov %cr0, %eax
+        \\#btr $29, %eax  #NW bit probably ignored 
+        \\btr $30, %eax  #enable cache
+        \\mov %eax, %cr0 
+        \\
+        \\mov %cr4, %eax 
+        \\bts $5, %eax #enable PAE
+        \\mov %eax, %cr4 
+        \\
+        \\mov (cr3_data - processor_bootstrap_program_start) + LOAD_ADDRESS, %eax
+        \\mov %eax, %cr3
+        \\mov $0xc0000080, %ecx 
+        \\rdmsr
+        \\bts $8, %eax  #enable long mode
+        \\bts $11, %eax #enable no-execute
+        \\wrmsr
+        \\
+        \\mov %cr0, %eax
+        \\bts $31, %eax #enable paging
+        \\bts $1, %eax #needed for SSE. set coprocessor monitoring  CR0.MP
+        \\mov %eax, %cr0 
+        \\mov %cr4, %eax 
+        \\or $3 << 9, %ax  #needed for SSE. set CR4.OSFXSR and CR4.OSXMMEXCPT at the same time
+        \\#TODO do we need to enable any other flags here?
+        \\mov %eax, %cr4 
+        \\ljmp $0x18, $(.mode64 - processor_bootstrap_program_start) + LOAD_ADDRESS
+        \\
+        \\.code64
+        \\.mode64:
+        \\mov $0x20, %ax
+        \\mov %ax, %ds
+        \\mov %ax, %es
+        \\mov %ax, %fs
+        \\mov %ax, %gs
+        \\mov %ax, %ss
+        \\
+        \\#get LAPIC base address
+        \\mov $0x1B, %ecx 
+        \\rdmsr
+        \\shl $32, %rdx
+        \\or %rax, %rdx
+        \\mov $0xFFFFF000, %rax
+        \\and %rax, %rdx
+        \\
+        \\# put LAPIC ID in %rdi
+        \\mov 0x20(%rdx), %edi
+        \\shr $24, %rdi
+        \\
+        \\mov stacks_base_address(%rip), %rbx
+        \\mov %rdi, %rax
+        \\dec %rax
+        \\mov $STACK_SIZE, %r8
+        \\mul %r8
+        \\lea (%rbx,%rax), %rsp
+        \\add %r8, %rsp
+        \\mov $processor_entry, %rax
+        \\
+        \\#Microsoft ABI has first parameter in rcx
+        \\mov %rdi, %rcx
+        \\jmp *%rax
+        \\.loop: jmp .loop
+        \\
+        \\
+        \\.align 16
+        \\smp_gdt:
+        \\  .word .size - 1    # GDT size
+        \\  .ptr:
+        \\     .long (.start - processor_bootstrap_program_start) + LOAD_ADDRESS       # GDT start address
+        \\
+        \\  .start:
+        \\    # Null descriptor (required)
+        \\    .word 0x0000       # Limit
+        \\    .word 0x0000       # Base (low 16 bits)
+        \\    .byte 0x00         # Base (mid 8 bits)
+        \\    .byte 0b00000000    # Access
+        \\    .byte 0b00000000    # Granularity
+        \\    .byte 0x00         # Base (high 8 bits)
+        \\
+        \\    # 32-bit code
+        \\    .word 0xffff       # Limit
+        \\    .word 0x0000       # Base (low 16 bits)
+        \\    .byte 0x00         # Base (mid 8 bits)
+        \\    .byte 0b10011010    # Access
+        \\    .byte 0b11001111    # Granularity
+        \\    .byte 0x00         # Base (high 8 bits)
+        \\
+        \\    # 32-bit data
+        \\    .word 0xffff       # Limit
+        \\    .word 0x0000       # Base (low 16 bits)
+        \\    .byte 0x00         # Base (mid 8 bits)
+        \\    .byte 0b10010010    # Access
+        \\    .byte 0b11001111    # Granularity
+        \\    .byte 0x00         # Base (high 8 bits)
+        \\
+        \\    # 64-bit code
+        \\    .word 0x0000       # Limit
+        \\    .word 0x0000       # Base (low 16 bits)
+        \\    .byte 0x00         # Base (mid 8 bits)
+        \\    .byte 0b10011010    # Access
+        \\    .byte 0b00100000    # Granularity
+        \\    .byte 0x00         # Base (high 8 bits)
+        \\
+        \\    # 64-bit data
+        \\    .word 0x0000       # Limit
+        \\    .word 0x0000       # Base (low 16 bits)
+        \\    .byte 0x00         # Base (mid 8 bits)
+        \\    .byte 0b10010010    # Access
+        \\    .byte 0b00000000    # Granularity
+        \\    .byte 0x00         # Base (high 8 bits)
+        \\
+        \\  .end:
+        \\
+        \\ .equ  .size, (.end - .start)
+        \\stacks_base_address:
+        \\.space 8, 0
+        \\cr3_data:
+        \\.space 8, 0
+        \\processor_bootstrap_program_end:
+        \\
+    );
+}
+export fn processor_entry(processor_id: u64) callconv(.C) noreturn {
+    @setAlignStack(256);
+    println("hello from processor {}", .{processor_id});
+    toolbox.hang();
+}

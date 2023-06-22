@@ -12,6 +12,71 @@ pub const ACPI2RSDP = extern struct {
     extended_checksum: u8,
     reserved: [3]u8,
 };
+//System Descriptor Table
+pub const XSDT = extern struct {
+    signature: [4]u8,
+    length: u32,
+    revision: u8,
+    checksum: u8,
+    oem_id: [6]u8,
+    oem_table_id: [8]u8,
+    oem_rev: u32,
+    creator_id: u32,
+    creator_rev: u32,
+};
+
+pub fn root_xsdt_entries(xsdt: *const XSDT) []align(4) *const XSDT {
+    const len = (xsdt.length - @sizeOf(XSDT)) / 8;
+    const ret = @intToPtr(
+        [*]align(4) *const XSDT,
+        @ptrToInt(xsdt) + @sizeOf(XSDT),
+    )[0..len];
+    return ret;
+}
+
+pub fn is_xsdt_checksum_valid(xsdt: *const XSDT) bool {
+    var sum: u8 = 0;
+    const bytes = @ptrCast([*]const u8, xsdt)[0..xsdt.length];
+
+    for (bytes) |b| {
+        sum +%= b;
+    }
+
+    return sum == 0;
+}
+
+//CPU Core strctures
+pub const MADT = extern struct {
+    xsdt: XSDT,
+    local_controller_address: u32,
+    flags: u32,
+};
+
+pub const APICType = enum(u8) {
+    LocalAPIC = 0,
+    IOAPIC = 1,
+    InterruptSourceOverride = 2,
+    NMISource = 3,
+    LocalAPICNMIStructure = 4,
+    LocalAPICAddressOverrideStructure = 5,
+    PlatformInterruptSources = 8,
+    x2APIC = 9,
+    x2APICNMIStructure = 10,
+    _,
+};
+pub const MADTEntryHeader = packed struct(u16) {
+    apic_type: APICType,
+    length: u8,
+};
+
+pub const MADTLocalAPIC = packed struct(u64) {
+    madt_header: MADTEntryHeader,
+    processor_uid: u8,
+    id: u8,
+    is_enabled: bool,
+    is_online_capable: bool,
+    padding: u30,
+};
 
 pub const PageMappingLevel4Table = struct {
     entries: [512]PageMappingLevel4Entry align(toolbox.kb(4)),
@@ -156,3 +221,42 @@ pub const PageTableEntry = packed struct(u64) {
     memory_protection_key: u4, //MPK bits
     no_execute: bool, //NX bit
 };
+
+pub const CPUIDResult = struct {
+    eax: u32,
+    ebx: u32,
+    ecx: u32,
+    edx: u32,
+};
+pub inline fn cpuid(input_eax: u32) CPUIDResult {
+    var eax: u32 = 0;
+    var ebx: u32 = 0;
+    var ecx: u32 = 0;
+    var edx: u32 = 0;
+
+    asm volatile (
+        \\cpuid
+        : [_eax] "={eax}" (eax),
+          [_ebx] "={ebx}" (ebx),
+          [_ecx] "={ecx}" (ecx),
+          [_edx] "={edx}" (edx),
+        : [eax] "{eax}" (input_eax),
+    );
+    return .{
+        .eax = eax,
+        .ebx = ebx,
+        .ecx = ecx,
+        .edx = edx,
+    };
+}
+pub inline fn rdmsr(msr: u32) u64 {
+    var eax: u64 = 0;
+    var edx: u64 = 0;
+    asm volatile (
+        \\rdmsr
+        : [eax] "={eax}" (eax),
+          [edx] "={edx}" (edx),
+        : [msr] "{ecx}" (msr),
+    );
+    return (edx << 32) | eax;
+}

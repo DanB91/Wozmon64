@@ -87,3 +87,11 @@ pub inline fn next_power_of_2(n: anytype) @TypeOf(n) {
 pub inline fn clamp(v: anytype, low: @TypeOf(v), high: @TypeOf(v)) @TypeOf(v) {
     return @max(low, @min(high, v));
 }
+
+pub inline fn mask_for_bit_range(comptime from: usize, comptime to: usize, comptime T: type) T {
+    var ret: T = 0;
+    inline for (from..to) |i| {
+        ret |= 1 << i;
+    }
+    return ret;
+}
