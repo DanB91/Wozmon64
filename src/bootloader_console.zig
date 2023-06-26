@@ -15,12 +15,15 @@ const State = struct {
     stage: BootloaderStage = .UEFI,
     cursor_x: usize = 0,
     cursor_y: usize = 0,
+    lock: toolbox.TicketLock = .{},
 };
 
 var g_state = State{ .screen = undefined };
 const MAX_BYTES = 512;
 
 pub fn println(comptime fmt: []const u8, args: anytype) void {
+    g_state.lock.lock();
+    defer g_state.lock.release();
     switch (g_state.stage) {
         .UEFI => uefi_println(fmt, args),
         .AfterExitButBeforeScreenIsSetup => serial_println(fmt, args),

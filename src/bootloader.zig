@@ -136,7 +136,7 @@ pub fn main() noreturn {
             );
         }
 
-        const frame_buffer = @intToPtr([*]w64.Pixel, gop.mode.frame_buffer_base)[0 .. gop.mode.frame_buffer_size / @sizeOf(w64.Pixel)];
+        const frame_buffer = @ptrFromInt([*]w64.Pixel, gop.mode.frame_buffer_base)[0 .. gop.mode.frame_buffer_size / @sizeOf(w64.Pixel)];
         break :b .{
             .frame_buffer = frame_buffer,
             .back_buffer = undefined,
@@ -243,7 +243,7 @@ pub fn main() noreturn {
         // const size = toolbox.next_power_of_2(
         //     screen.frame_buffer.len * @sizeOf(w64.Pixel) * 2 + w64.MEMORY_PAGE_SIZE,
         // );
-        const size = toolbox.mb(64); //64 MB should be big enough!!!
+        const size = toolbox.mb(128); //64 MB should be big enough!!!
         for (memory_map) |*desc| {
             switch (desc.type) {
                 .ConventionalMemory => case: {
@@ -256,7 +256,7 @@ pub fn main() noreturn {
                     }
 
                     if (descriptor_size - padding >= size) {
-                        const ret = @intToPtr([*]u8, target_address)[0..size];
+                        const ret = @ptrFromInt([*]u8, target_address)[0..size];
                         desc.number_of_pages -= size / UEFI_PAGE_SIZE;
                         desc.physical_start += size;
                         break :b ret;
@@ -296,7 +296,7 @@ pub fn main() noreturn {
         .cache_disable = false,
         .pdp_base_address = @intCast(
             u40,
-            @ptrToInt(pml4_table) >> 12,
+            @intFromPtr(pml4_table) >> 12,
         ),
         .no_execute = false,
     };
@@ -309,7 +309,7 @@ pub fn main() noreturn {
 
         //map kernel global arena
         map_virtual_memory(
-            @ptrToInt(kernel_start_context_bytes.ptr),
+            @intFromPtr(kernel_start_context_bytes.ptr),
             &next_free_virtual_address,
             kernel_start_context_bytes.len / w64.MEMORY_PAGE_SIZE,
             .ConventionalMemory,
@@ -321,7 +321,7 @@ pub fn main() noreturn {
         //map frame buffer
         var frame_buffer_virtual_address: u64 = w64.FRAME_BUFFER_VIRTUAL_ADDRESS;
         map_virtual_memory(
-            @ptrToInt(screen.frame_buffer.ptr),
+            @intFromPtr(screen.frame_buffer.ptr),
             &frame_buffer_virtual_address,
             //+ 1 just in case
             (screen.frame_buffer.len * @sizeOf(w64.Pixel) / w64.MEMORY_PAGE_SIZE) + 1,
@@ -334,12 +334,22 @@ pub fn main() noreturn {
         //need to identity map the start_kernel function since we load CR3 there
         //kernel should unmap this
         {
-            var virtual_address = @ptrToInt(&start_kernel);
+            var virtual_address = @intFromPtr(&start_kernel);
             map_virtual_memory(
-                @ptrToInt(&start_kernel),
+                @intFromPtr(&start_kernel),
                 &virtual_address,
                 1,
-                .MMIOMemory,
+                .ToBeUnmapped,
+                &mapped_memory,
+                pml4_table,
+                &global_arena,
+            );
+            virtual_address = @intFromPtr(&processor_entry);
+            map_virtual_memory(
+                @intFromPtr(&processor_entry),
+                &virtual_address,
+                1,
+                .ToBeUnmapped,
                 &mapped_memory,
                 pml4_table,
                 &global_arena,
@@ -350,7 +360,7 @@ pub fn main() noreturn {
         for (kernel_parse_result.page_table_data.items()) |data| {
             var virtual_address = data.destination_virtual_address;
             map_virtual_memory(
-                @ptrToInt(data.data.ptr),
+                @intFromPtr(data.data.ptr),
                 &virtual_address,
                 (data.data.len / w64.MEMORY_PAGE_SIZE) + 1,
                 .ConventionalMemory,
@@ -397,7 +407,7 @@ pub fn main() noreturn {
     //dump debug memory data
     {
         println("start context address: 0x{X}, len: {}", .{
-            @ptrToInt(kernel_start_context_bytes.ptr),
+            @intFromPtr(kernel_start_context_bytes.ptr),
             kernel_start_context_bytes.len,
         });
         {
@@ -421,6 +431,19 @@ pub fn main() noreturn {
         println("Space left in arena: {}", .{global_arena.data.len - global_arena.pos});
     }
 
+    const application_processor_contexts =
+        bootstrap_application_processors(&global_arena, number_of_enabled_processors);
+
+    //wait for application processors to come up
+    {
+        for (application_processor_contexts) |context| {
+            while (!@atomicLoad(bool, &context.is_booted, .SeqCst)) {
+                std.atomic.spinLoopHint();
+            }
+        }
+    }
+    println("APs booted!", .{});
+
     var kernel_start_context = global_arena.push(w64.KernelStartContext);
     kernel_start_context.* = .{
         .rsdp = physical_to_virtual_pointer(rsdp, mapped_memory.items()),
@@ -428,7 +451,7 @@ pub fn main() noreturn {
         .mapped_memory = physical_to_virtual_pointer(mapped_memory.items(), mapped_memory.items()),
         .free_conventional_memory = physical_to_virtual_pointer(free_conventional_memory.items(), mapped_memory.items()),
         .global_arena = global_arena,
-        .bootstrap_address_to_unmap = @ptrToInt(&start_kernel),
+        .application_processor_contexts = application_processor_contexts,
     };
     kernel_start_context.screen.back_buffer = physical_to_virtual_pointer(
         kernel_start_context.screen.back_buffer,
@@ -442,10 +465,6 @@ pub fn main() noreturn {
         kernel_start_context.global_arena.data,
         mapped_memory.items(),
     );
-
-    bootstrap_cores(&global_arena, number_of_enabled_processors);
-
-    toolbox.hang();
 
     start_kernel(
         pml4_table,
@@ -467,9 +486,9 @@ fn start_kernel(
         \\jmpq *%[entry_point] #here we go!!!!
         \\ud2 #this instruction is for searchability in the disassembly
         :
-        : [cr3_data] "r" (@ptrToInt(pml4_table)),
+        : [cr3_data] "r" (@intFromPtr(pml4_table)),
           [stack_virtual_address] "r" (KERNEL_STACK_BOTTOM_ADDRESS),
-          [ksc_addr] "r" (@ptrToInt(physical_to_virtual_pointer(
+          [ksc_addr] "r" (@intFromPtr(physical_to_virtual_pointer(
             kernel_start_context,
             mapped_memory,
           ))),
@@ -481,9 +500,11 @@ fn start_kernel(
 extern var processor_bootstrap_program_start: u8;
 extern var processor_bootstrap_program_end: u8;
 
-fn bootstrap_cores(arena: *toolbox.Arena, number_of_processors: u64) void {
+fn bootstrap_application_processors(arena: *toolbox.Arena, number_of_processors: u64) []*w64.BootloaderProcessorContext {
     const IA32_APIC_BASE_MSR = 0x1B;
     const CPUID_FEAT_EDX_APIC = 1 << 9;
+    const number_of_aps = number_of_processors - 1;
+    var processor_contexts = arena.push_slice(*w64.BootloaderProcessorContext, number_of_aps);
     {
         const cpuid = amd64.cpuid(1);
         if (cpuid.edx & CPUID_FEAT_EDX_APIC == 0) {
@@ -493,27 +514,43 @@ fn bootstrap_cores(arena: *toolbox.Arena, number_of_processors: u64) void {
         //copy in bootstrapping program
         const PROCESSOR_BOOTSTRAP_PROGRAM_ADDRESS = 0x1000;
         {
-            const program_len = @ptrToInt(&processor_bootstrap_program_end) -
-                @ptrToInt(&processor_bootstrap_program_start);
+            const program_len = @intFromPtr(&processor_bootstrap_program_end) -
+                @intFromPtr(&processor_bootstrap_program_start);
 
-            const dest = @intToPtr(
+            const dest = @ptrFromInt(
                 [*]u8,
                 PROCESSOR_BOOTSTRAP_PROGRAM_ADDRESS,
             )[0..program_len];
-            const src = @intToPtr(
+            const src = @ptrFromInt(
                 [*]u8,
-                @ptrToInt(&processor_bootstrap_program_start),
+                @intFromPtr(&processor_bootstrap_program_start),
             )[0..program_len];
             @memcpy(dest, src);
-
-            const stacks =
-                arena.push_bytes_aligned(w64.MEMORY_PAGE_SIZE * (number_of_processors - 1), w64.MEMORY_PAGE_SIZE);
-            const stacks_data = @bitCast([8]u8, @ptrToInt(stacks.ptr));
-            @memcpy(dest[dest.len - 16 .. dest.len - 8], stacks_data[0..]);
 
             const cr3 = asm volatile ("mov %%cr3, %[cr3]"
                 : [cr3] "=r" (-> u64),
             );
+
+            //allocate stacks and set up context structures
+            const stacks =
+                arena.push_bytes_aligned(w64.MEMORY_PAGE_SIZE * (number_of_processors - 1), w64.MEMORY_PAGE_SIZE);
+            for (0..number_of_aps) |proc| {
+                var context = arena.push_clear(w64.BootloaderProcessorContext);
+                context.* = .{
+                    .is_booted = false,
+                    .pml4_table_address = cr3,
+                    .application_processor_kernel_entry_data = null,
+                };
+                const context_data = @bitCast([8]u8, @intFromPtr(context));
+                const i = ((proc + 1) * w64.MEMORY_PAGE_SIZE) - @sizeOf(*w64.BootloaderProcessorContext);
+                @memcpy(stacks[i .. i + @sizeOf(*w64.BootloaderProcessorContext)], context_data[0..]);
+
+                processor_contexts[proc] = context;
+            }
+
+            const stacks_data = @bitCast([8]u8, @intFromPtr(stacks.ptr));
+            @memcpy(dest[dest.len - 16 .. dest.len - 8], stacks_data[0..]);
+
             const cr3_data = @bitCast([8]u8, cr3);
             @memcpy(dest[dest.len - 8 ..], cr3_data[0..]);
         }
@@ -556,18 +593,18 @@ fn bootstrap_cores(arena: *toolbox.Arena, number_of_processors: u64) void {
             reserved: u24 = 0,
             destination: u8,
         };
-        const interrupt_command_register_low = @intToPtr(
+        const interrupt_command_register_low = @ptrFromInt(
             *volatile InterruptControlRegisterLow,
             apic_base_address + 0x300,
         );
-        const interrupt_command_register_high = @intToPtr(
+        const interrupt_command_register_high = @ptrFromInt(
             *volatile InterruptControlRegisterHigh,
             apic_base_address + 0x300 + @sizeOf(InterruptControlRegisterLow),
         );
+
         interrupt_command_register_high.* = .{
             .destination = 0xFF,
         };
-
         interrupt_command_register_low.* = .{
             .vector = 0,
             .message_type = .Initialize,
@@ -593,6 +630,7 @@ fn bootstrap_cores(arena: *toolbox.Arena, number_of_processors: u64) void {
             .destination_shorthand = .AllExcludingSelf,
         };
     }
+    return processor_contexts;
 }
 
 fn draw_test(screen: w64.Screen) noreturn {
@@ -686,7 +724,7 @@ fn map_virtual_memory(
 ) void {
     const page_size: usize = switch (memory_type) {
         .ConventionalMemory, .FrameBufferMemory => w64.MEMORY_PAGE_SIZE,
-        .MMIOMemory => w64.MMIO_PAGE_SIZE,
+        .MMIOMemory, .ToBeUnmapped => w64.MMIO_PAGE_SIZE,
     };
     virtual_address.* = toolbox.align_down(virtual_address.*, page_size);
     const aligned_physical_address = toolbox.align_down(physical_address, page_size);
@@ -720,7 +758,7 @@ fn map_virtual_memory(
         var pml4e = &pml4_table.entries[pml4t_index];
         if (!pml4e.present) {
             const pdp = arena.push_clear(amd64.PageDirectoryPointer);
-            const pdp_address = @ptrToInt(pdp);
+            const pdp_address = @intFromPtr(pdp);
             toolbox.assert(
                 (pdp_address & 0xFFF) == 0,
                 "PDP not aligned! Address was: {}",
@@ -740,7 +778,7 @@ fn map_virtual_memory(
             };
         }
 
-        var pdp = @intToPtr(
+        var pdp = @ptrFromInt(
             *amd64.PageDirectoryPointer,
             @as(u64, pml4e.pdp_base_address) << 12,
         );
@@ -750,7 +788,7 @@ fn map_virtual_memory(
             //NOTE: it doesn't matter if it's PageDirectory2MB or PageDirectory4KB
             //      since they are the same size and we are not accessing them here
             const pd = arena.push_clear(amd64.PageDirectory2MB);
-            const pd_address = @ptrToInt(pd);
+            const pd_address = @intFromPtr(pd);
             toolbox.assert(
                 (pd_address & 0xFFF) == 0,
                 "PD not aligned! Address was: {}",
@@ -773,7 +811,7 @@ fn map_virtual_memory(
         const pd_index = (vaddr >> 21) & 0b1_1111_1111;
         switch (memory_type) {
             .ConventionalMemory, .FrameBufferMemory => {
-                var pd = @intToPtr(
+                var pd = @ptrFromInt(
                     *amd64.PageDirectory2MB,
                     @as(u64, pdpe.pd_base_address) << 12,
                 );
@@ -805,8 +843,8 @@ fn map_virtual_memory(
                     }
                 }
             },
-            .MMIOMemory => {
-                var pd = @intToPtr(
+            .MMIOMemory, .ToBeUnmapped => {
+                var pd = @ptrFromInt(
                     *amd64.PageDirectory4KB,
                     @as(u64, pdpe.pd_base_address) << 12,
                 );
@@ -814,7 +852,7 @@ fn map_virtual_memory(
                 if (!pde.present) {
                     const pt = arena.push_clear(amd64.PageTable);
 
-                    const pt_address = @ptrToInt(pt);
+                    const pt_address = @intFromPtr(pt);
                     toolbox.assert(
                         (pt_address & 0xFFF) == 0,
                         "PT not aligned! Address was: {}",
@@ -833,7 +871,7 @@ fn map_virtual_memory(
                         .no_execute = false,
                     };
                 }
-                var pt = @intToPtr(
+                var pt = @ptrFromInt(
                     *amd64.PageTable,
                     @as(u64, pde.pt_base_address) << 12,
                 );
@@ -944,9 +982,9 @@ fn physical_to_virtual_pointer(physical: anytype, mappings: []w64.VirtualMemoryM
         },
     };
     const physical_address = if (pointer_size == .Slice)
-        @ptrToInt(physical.ptr)
+        @intFromPtr(physical.ptr)
     else
-        @ptrToInt(physical);
+        @intFromPtr(physical);
 
     const virtual_address = w64.physical_to_virtual(
         physical_address,
@@ -958,9 +996,9 @@ fn physical_to_virtual_pointer(physical: anytype, mappings: []w64.VirtualMemoryM
     );
     if (pointer_size == .Slice) {
         const Child = @typeInfo(T).Pointer.child;
-        return @intToPtr([*]Child, virtual_address)[0..physical.len];
+        return @ptrFromInt([*]Child, virtual_address)[0..physical.len];
     }
-    return @intToPtr(T, virtual_address);
+    return @ptrFromInt(T, virtual_address);
 }
 
 //TODO:
@@ -1079,14 +1117,17 @@ fn physical_to_virtual_pointer(physical: anytype, mappings: []w64.VirtualMemoryM
 
 comptime {
     asm (
-        \\.global processor_entry
-        \\
+        \\.extern processor_entry
+        \\.macro hang
+        \\.hang: jmp .hang
+        \\.endm
         \\processor_bootstrap_program_start:
         \\.equ LOAD_ADDRESS, 0x1000
         \\.equ STACK_SIZE, (1 << 21)
         \\.code16
         \\cli
         \\cld
+        \\
         \\lgdt (smp_gdt - processor_bootstrap_program_start) + LOAD_ADDRESS
         \\mov %cr0, %eax 
         \\bts $0, %eax
@@ -1142,6 +1183,8 @@ comptime {
         \\rdmsr
         \\shl $32, %rdx
         \\or %rax, %rdx
+        \\
+        \\# Mask off low 12 bits of base address since they misc flags
         \\mov $0xFFFFF000, %rax
         \\and %rax, %rdx
         \\
@@ -1156,12 +1199,21 @@ comptime {
         \\mul %r8
         \\lea (%rbx,%rax), %rsp
         \\add %r8, %rsp
-        \\mov $processor_entry, %rax
+        \\
+        \\
+        \\#bottom 8 bytes contains the context address
+        \\sub $8, %rsp
         \\
         \\#Microsoft ABI has first parameter in rcx
-        \\mov %rdi, %rcx
+        \\mov (%rsp), %rcx
+        \\
+        \\
+        \\#Microsoft ABI has second parameter in rdx
+        \\mov %rdi, %rdx
+        \\movabs $processor_entry, %rax
         \\jmp *%rax
         \\.loop: jmp .loop
+        \\ud2
         \\
         \\
         \\.align 16
@@ -1222,8 +1274,32 @@ comptime {
         \\
     );
 }
-export fn processor_entry(processor_id: u64) callconv(.C) noreturn {
+
+export fn processor_entry(
+    context: *w64.BootloaderProcessorContext,
+    processor_id: u64,
+) callconv(.C) noreturn {
     @setAlignStack(256);
-    println("hello from processor {}", .{processor_id});
-    toolbox.hang();
+    @atomicStore(bool, &context.is_booted, true, .SeqCst);
+    println("hello from processor {} ", .{processor_id});
+    while (true) {
+        if (context.application_processor_kernel_entry_data) |entry_data| {
+            asm volatile (
+                \\movq %[cr3_data], %%cr3
+                \\movq %[stack_virtual_address], %%rsp
+                \\movq %[ksc_addr], %%rdi
+                \\movq %[processor_id], %%rsi
+                \\jmpq *%[entry_point] #here we go!!!!
+                \\ud2 #this instruction is for searchability in the disassembly
+                :
+                : [cr3_data] "r" (entry_data.cr3),
+                  [stack_virtual_address] "r" (entry_data.rsp),
+                  [ksc_addr] "r" (@intFromPtr(entry_data.start_context_data)),
+                  [processor_id] "r" (processor_id),
+                  [entry_point] "r" (@intFromPtr(entry_data.entry)),
+                : "rdi", "rsp", "cr3"
+            );
+        }
+        std.atomic.spinLoopHint();
+    }
 }

@@ -27,9 +27,9 @@ pub const XSDT = extern struct {
 
 pub fn root_xsdt_entries(xsdt: *const XSDT) []align(4) *const XSDT {
     const len = (xsdt.length - @sizeOf(XSDT)) / 8;
-    const ret = @intToPtr(
+    const ret = @ptrFromInt(
         [*]align(4) *const XSDT,
-        @ptrToInt(xsdt) + @sizeOf(XSDT),
+        @intFromPtr(xsdt) + @sizeOf(XSDT),
     )[0..len];
     return ret;
 }

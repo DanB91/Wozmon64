@@ -36,13 +36,31 @@ pub const Screen = struct {
     stride: usize,
 };
 
+pub const BootloaderProcessorContext = struct {
+    is_booted: bool,
+    pml4_table_address: u64,
+    application_processor_kernel_entry_data: ?struct {
+        entry: *const fn (
+            context: *ApplicationProcessorKernelStartContext,
+            processor_id: u64,
+        ) noreturn,
+        cr3: u64, //page table address
+        rsp: u64, //initial stack pointer
+        start_context_data: *anyopaque,
+    },
+};
+
+pub const ApplicationProcessorKernelStartContext = struct {
+    processor_id: u64,
+};
+
 pub const KernelStartContext = struct {
     screen: Screen,
     rsdp: *amd64.ACPI2RSDP,
     global_arena: toolbox.Arena,
     mapped_memory: []VirtualMemoryMapping,
     free_conventional_memory: []ConventionalMemoryDescriptor,
-    bootstrap_address_to_unmap: u64,
+    application_processor_contexts: []*BootloaderProcessorContext,
 };
 
 pub const ConventionalMemoryDescriptor = struct {
@@ -55,6 +73,7 @@ pub const MemoryType = enum {
     ConventionalMemory,
     MMIOMemory,
     FrameBufferMemory,
+    ToBeUnmapped,
 };
 pub const VirtualMemoryMapping = struct {
     physical_address: u64,

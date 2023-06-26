@@ -40,8 +40,8 @@ pub fn PoolAllocator(comptime T: type) type {
             }
             element.in_use = true;
             if (comptime toolbox.IS_DEBUG) {
-                const to_alloc_address = @ptrToInt(&element.data);
-                const elements_address = @ptrToInt(self.elements.ptr);
+                const to_alloc_address = @intFromPtr(&element.data);
+                const elements_address = @intFromPtr(self.elements.ptr);
                 toolbox.assert(
                     to_alloc_address >= elements_address and to_alloc_address < elements_address + self.elements.len * @sizeOf(Element),
                     "Invalid address of element to allocate: {x}. Element pool address: {x}",
@@ -56,8 +56,8 @@ pub fn PoolAllocator(comptime T: type) type {
 
         pub fn free(self: *Self, to_free: *T) void {
             if (comptime toolbox.IS_DEBUG) {
-                const to_free_address = @ptrToInt(to_free);
-                const elements_address = @ptrToInt(self.elements.ptr);
+                const to_free_address = @intFromPtr(to_free);
+                const elements_address = @intFromPtr(self.elements.ptr);
                 toolbox.assert(
                     to_free_address >= elements_address and to_free_address < elements_address + self.elements.len * @sizeOf(Element),
                     "Invalid address of element to free: {x}. Element pool address: {x}",
@@ -136,7 +136,7 @@ pub const Arena = struct {
         if (arena.data.len - arena.pos >= total_size) {
             var ret = @alignCast(alignment, arena.data[aligned_pos .. aligned_pos + n]);
             arena.pos += total_size;
-            toolbox.assert(toolbox.is_aligned_to(@ptrToInt(ret.ptr), alignment), "Alignment of return value is wrong!", .{});
+            toolbox.assert(toolbox.is_aligned_to(@intFromPtr(ret.ptr), alignment), "Alignment of return value is wrong!", .{});
             toolbox.assert(arena.pos <= arena.data.len, "Arena position is bad!", .{});
             return ret;
         }
@@ -147,7 +147,7 @@ pub const Arena = struct {
         const Child = @typeInfo(@TypeOf(ptr)).Pointer.child;
         toolbox.asserteq(
             arena.pos,
-            @ptrToInt(arena.data.ptr) + (arena.data.len * @sizeOf(Child)) - @ptrToInt(ptr),
+            @intFromPtr(arena.data.ptr) + (arena.data.len * @sizeOf(Child)) - @intFromPtr(ptr),
             "Slice to expand must've been last allocation",
         );
         return ptr.ptr[0..new_size];
@@ -247,12 +247,12 @@ fn macos_allocate_memory(n: usize) []u8 {
 
     const code = mach_vm_allocate(mach_task_self_, &address, n, VM_FLAGS_ANYWHERE);
     if (code == 0) {
-        return @intToPtr([*]u8, address)[0..n];
+        return @ptrFromInt([*]u8, address)[0..n];
     }
     toolbox.panic("Error allocating {} bytes of OS memory. Code: {}", .{ n, code });
 }
 fn macos_free_memory(memory: []u8) void {
-    const code = mach_vm_deallocate(mach_task_self_, @ptrToInt(memory.ptr), memory.len);
+    const code = mach_vm_deallocate(mach_task_self_, @intFromPtr(memory.ptr), memory.len);
     if (code != 0) {
         toolbox.panic("Error freeing OS memory. Code: {}", .{code});
     }

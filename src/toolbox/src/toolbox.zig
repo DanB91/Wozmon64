@@ -13,6 +13,7 @@ pub usingnamespace @import("ring_queue.zig");
 pub usingnamespace @import("random.zig");
 pub usingnamespace @import("dynamic_array.zig");
 pub usingnamespace @import("os_utils.zig");
+pub usingnamespace @import("atomic.zig");
 
 const builtin = @import("builtin");
 const build_flags = @import("build_flags");

@@ -19,7 +19,7 @@ pub fn microseconds() Microseconds {
         },
         .Playdate => {
             const sec = seconds();
-            return @floatToInt(Microseconds, sec * 1_000_000);
+            return @intFromFloat(Microseconds, sec * 1_000_000);
         },
         else => @compileError("Microsecond clock not supported on " ++ @tagName(toolbox.THIS_PLATFORM)),
     }
@@ -44,7 +44,7 @@ pub fn seconds() Seconds {
             const ctime = @cImport(@cInclude("time.h"));
             const nanos = ctime.clock_gettime_nsec_np(ctime.CLOCK_MONOTONIC);
             toolbox.assert(nanos != 0, "nanotime call failed!", .{});
-            return @intToFloat(Seconds, nanos / 1_000_000_000);
+            return @floatFromInt(Seconds, nanos / 1_000_000_000);
         },
         .Playdate => {
             return toolbox.playdate_get_seconds();

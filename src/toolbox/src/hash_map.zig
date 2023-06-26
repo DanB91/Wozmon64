@@ -41,7 +41,7 @@ fn BaseHashMap(comptime Key: type, comptime Value: type, comptime is_pointer_sta
         };
 
         pub fn init(initial_capacity: usize, arena: *toolbox.Arena) Self {
-            const num_buckets = toolbox.next_power_of_2(@floatToInt(usize, @intToFloat(f64, initial_capacity) * 1.5));
+            const num_buckets = toolbox.next_power_of_2(@intFromFloat(usize, @floatFromInt(f64, initial_capacity) * 1.5));
             const buckets = arena.push_slice_clear(?KeyValue, num_buckets);
             return Self{
                 .indices = toolbox.RandomRemovalLinkedList(usize).init(arena),

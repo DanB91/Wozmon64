@@ -61,7 +61,7 @@ fn run_tests(which_tests: TestModule) void {
             const num_bytes = toolbox.mb(1);
             var data = toolbox.os_allocate_memory(num_bytes);
             toolbox.asserteq(num_bytes, data.len, "Wrong number of bytes allocated");
-            toolbox.assert(toolbox.is_aligned_to(@ptrToInt(data.ptr), toolbox.PAGE_SIZE), "System allocated memory should be page aligned", .{});
+            toolbox.assert(toolbox.is_aligned_to(@intFromPtr(data.ptr), toolbox.PAGE_SIZE), "System allocated memory should be page aligned", .{});
             //os allocator should returned zero'ed memory
             for (data) |b| toolbox.asserteq(b, 0, "Memory should be zeroed from system allocator");
 
@@ -669,7 +669,7 @@ pub fn benchmark(comptime benchmark_name: []const u8, benchmark_obj: anytype, ar
     toolbox.println("Benchmark for " ++ benchmark_name ++ ":", .{});
     toolbox.println("----------------------", .{});
     toolbox.println("Total time: {d}µs", .{total_time});
-    toolbox.println("Avg time: {d}µs", .{@intToFloat(f64, total_time) / total_iterations});
+    toolbox.println("Avg time: {d}µs", .{@floatFromInt(f64, total_time) / total_iterations});
     toolbox.println("Max time: {d}µs", .{max_time});
     toolbox.println("Min time: {d}µs", .{min_time});
     toolbox.println("----------------------", .{});
