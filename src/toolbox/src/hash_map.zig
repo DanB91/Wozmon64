@@ -41,7 +41,7 @@ fn BaseHashMap(comptime Key: type, comptime Value: type, comptime is_pointer_sta
         };
 
         pub fn init(initial_capacity: usize, arena: *toolbox.Arena) Self {
-            const num_buckets = toolbox.next_power_of_2(@intFromFloat(usize, @floatFromInt(f64, initial_capacity) * 1.5));
+            const num_buckets = toolbox.next_power_of_2(@intFromFloat(@as(f64, initial_capacity) * 1.5));
             const buckets = arena.push_slice_clear(?KeyValue, num_buckets);
             return Self{
                 .indices = toolbox.RandomRemovalLinkedList(usize).init(arena),
@@ -177,7 +177,7 @@ fn BaseHashMap(comptime Key: type, comptime Value: type, comptime is_pointer_sta
                 to_bytes(&key);
             const h = hash_fnv1a64(key_bytes);
 
-            var index = @intCast(usize, h & (self.buckets.len - 1));
+            var index: usize = @intCast(h & (self.buckets.len - 1));
             var kvptr = &self.buckets[index];
             var did_delete = false;
             if (kvptr.*) |kv| {
@@ -193,10 +193,10 @@ fn BaseHashMap(comptime Key: type, comptime Value: type, comptime is_pointer_sta
             var dest = kvptr;
             //re-probe
             {
-                const index_bit_size = @intCast(u6, @ctz(self.buckets.len));
+                const index_bit_size: u6 = @intCast(@ctz(self.buckets.len));
                 var i = index_bit_size;
                 while (i < @bitSizeOf(usize)) : (i += index_bit_size) {
-                    index = @intCast(usize, (h >> i) & (self.buckets.len - 1));
+                    index = @intCast((h >> i) & (self.buckets.len - 1));
                     kvptr = &self.buckets[index];
                     if (kvptr.*) |kv| {
                         if (did_delete) {
@@ -250,7 +250,7 @@ fn BaseHashMap(comptime Key: type, comptime Value: type, comptime is_pointer_sta
                 to_bytes(&key);
             const h = hash_fnv1a64(key_bytes);
 
-            var index = @intCast(usize, h & (self.buckets.len - 1));
+            var index: usize = @intCast(h & (self.buckets.len - 1));
             var kvptr = &self.buckets[index];
             if (kvptr.*) |kv| {
                 if (eql(kv.k, key)) {
@@ -267,7 +267,7 @@ fn BaseHashMap(comptime Key: type, comptime Value: type, comptime is_pointer_sta
                 var i: usize = index_bit_size;
                 while (i < @bitSizeOf(usize)) : (i += index_bit_size) {
                     self.reprobe_collisions += 1;
-                    index = @intCast(usize, (h >> @intCast(u6, i)) & (self.buckets.len - 1));
+                    index = @intCast((h >> @intCast(i)) & (self.buckets.len - 1));
                     kvptr = &self.buckets[index];
                     if (kvptr.*) |kv| {
                         if (eql(kv.k, key)) {
@@ -322,10 +322,10 @@ fn to_bytes(v: anytype) []const u8 {
             const Child = info.child;
             switch (comptime info.size) {
                 .Slice => {
-                    return @ptrCast([*]const u8, v.ptr)[0..@sizeOf(Child)];
+                    return @as([*]const u8, v.ptr)[0..@sizeOf(Child)];
                 },
                 else => {
-                    return @ptrCast([*]const u8, v)[0..@sizeOf(Child)];
+                    return @as([*]const u8, v)[0..@sizeOf(Child)];
                 },
             }
         },

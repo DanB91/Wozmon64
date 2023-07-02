@@ -8,6 +8,10 @@ pub usingnamespace @import("bitmaps.zig");
 pub const MEMORY_PAGE_SIZE = toolbox.mb(2);
 pub const MMIO_PAGE_SIZE = toolbox.kb(4);
 
+pub const KERNEL_GLOBAL_ARENA_SIZE = toolbox.mb(128);
+pub const KERNEL_FRAME_ARENA_SIZE = toolbox.mb(4);
+pub const KERNEL_SCRATCH_ARENA_SIZE = toolbox.mb(4);
+
 //TODO change to 1920
 pub const TARGET_RESOLUTION = .{
     .width = 1280,
@@ -61,6 +65,7 @@ pub const KernelStartContext = struct {
     mapped_memory: []VirtualMemoryMapping,
     free_conventional_memory: []ConventionalMemoryDescriptor,
     application_processor_contexts: []*BootloaderProcessorContext,
+    tsc_mhz: u64,
 };
 
 pub const ConventionalMemoryDescriptor = struct {
@@ -91,6 +96,45 @@ pub fn physical_to_virtual(physical_address: u64, mappings: []VirtualMemoryMappi
         }
     }
     return error.PhysicalAddressNotMapped;
+}
+
+pub const Time = struct {
+    ticks: i64,
+
+    var ticks_to_microseconds: i64 = 0;
+    pub fn init(tsc_mhz: u64) void {
+        ticks_to_microseconds = @intCast(tsc_mhz);
+    }
+
+    pub inline fn sub(self: Time, other: Time) Time {
+        return .{ .ticks = self.ticks - other.ticks };
+    }
+
+    pub inline fn nanoseconds(self: Time) i64 {
+        return self.microseconds() * 1000;
+    }
+    pub inline fn microseconds(self: Time) i64 {
+        return @divTrunc(@as(i64, @intCast(self.ticks)), ticks_to_microseconds);
+    }
+    pub inline fn milliseconds(self: Time) i64 {
+        return @divTrunc(self.microseconds(), 1000);
+    }
+    pub inline fn seconds(self: Time) i64 {
+        return @divTrunc(self.microseconds(), 1_000_000);
+    }
+    pub inline fn minutes(self: Time) i64 {
+        return @divTrunc(self.microseconds(), 1_000_000 / 60);
+    }
+    pub inline fn hours(self: Time) i64 {
+        return @divTrunc(self.microseconds(), 1_000_000 / 60 / 60);
+    }
+    pub inline fn days(self: Time) i64 {
+        return @divTrunc(self.microseconds(), 1_000_000 / 60 / 60 / 24);
+    }
+};
+
+pub fn now() Time {
+    return .{ .ticks = @intCast(amd64.rdtsc()) };
 }
 
 comptime {

@@ -19,7 +19,7 @@ const State = struct {
 };
 
 var g_state = State{ .screen = undefined };
-const MAX_BYTES = 512;
+const MAX_BYTES = 1024;
 
 pub fn println(comptime fmt: []const u8, args: anytype) void {
     g_state.lock.lock();
@@ -64,7 +64,7 @@ fn graphics_println(comptime fmt: []const u8, args: anytype) void {
             continue;
         }
         var byte = if (rune >= ' ' and rune < 128)
-            std.ascii.toUpper(@intCast(u8, rune))
+            std.ascii.toUpper(@intCast(rune))
         else
             '?';
         if (byte > '_') {

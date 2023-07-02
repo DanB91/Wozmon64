@@ -5,8 +5,11 @@ pub const Rune = u32;
 pub fn str8lit(comptime bytes: [:0]const u8) String8 {
     return comptime str8(bytes);
 }
-pub fn str8fmt(buffer: []u8, comptime fmt: []const u8, args: anytype) !String8 {
-    const string_bytes = try std.fmt.bufPrint(buffer, fmt, args);
+pub fn str8fmt(comptime fmt: []const u8, args: anytype, arena: *toolbox.Arena) String8 {
+    const buffer_len = std.fmt.count(fmt, args);
+    const buffer = arena.push_bytes_unaligned(buffer_len);
+    const string_bytes = std.fmt.bufPrint(buffer, fmt, args) catch |e|
+        toolbox.panic("Error std.fmt.bufPrint in str8fmt: {}", .{e});
     return str8(string_bytes);
 }
 pub fn str8(bytes: []const u8) String8 {

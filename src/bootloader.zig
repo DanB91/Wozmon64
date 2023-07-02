@@ -4,6 +4,7 @@
 const std = @import("std");
 const toolbox = @import("toolbox");
 const mpsp = @import("mp_service_protocol.zig");
+const tsp = @import("timestamp_protocol.zig");
 const w64 = @import("wozmon64.zig");
 const amd64 = @import("amd64.zig");
 const console = @import("bootloader_console.zig");
@@ -63,6 +64,7 @@ pub fn panic(msg: []const u8, error_return_trace: ?*std.builtin.StackTrace, ret_
     toolbox.hang();
 }
 
+var bootloader_arena_buffer = [_]u8{0} ** toolbox.kb(512);
 pub fn main() noreturn {
     //disable interrupts
     asm volatile ("cli");
@@ -77,15 +79,23 @@ pub fn main() noreturn {
 
     const bs = system_table.boot_services.?;
 
-    var bootloader_arena_buffer = [_]u8{0} ** toolbox.kb(512);
     var bootloader_arena = toolbox.Arena.init_with_buffer(&bootloader_arena_buffer);
+
+    //calibrate rdtscp
+    {
+        // var timestamp_protocol: *tsp.TimestampProtocol = undefined;
+        // var status = bs.locateProtocol(&tsp.TimestampProtocol.guid, null, @ptrCast(&timestamp_protocol));
+        // if (status != ZSUEFIStatus.Success) {
+        //     fatal("Cannot init timing system! Error locating Timestamp Protocol: {}", .{status});
+        // }
+    }
 
     //graphics
 
     var gop: *ZSGraphicsOutputProtocol = undefined;
     var found_valid_resolution = false;
     var screen: w64.Screen = b: {
-        var status = bs.locateProtocol(&ZSGraphicsOutputProtocol.guid, null, @ptrCast(*?*anyopaque, &gop));
+        var status = bs.locateProtocol(&ZSGraphicsOutputProtocol.guid, null, @ptrCast(&gop));
         if (status != ZSUEFIStatus.Success) {
             fatal("Cannot init graphics system! Error locating GOP protocol: {}", .{status});
         }
@@ -101,7 +111,7 @@ pub fn main() noreturn {
         }
         var mode: u32 = 0;
         for (0..gop.mode.max_mode + 1) |i| {
-            mode = @intCast(u32, i);
+            mode = @intCast(i);
             var gop_mode_info: *ZSGraphicsOutputModeInformation = undefined;
             var size_of_info: usize = 0;
             const query_mode_status = gop.queryMode(mode, &size_of_info, &gop_mode_info);
@@ -136,7 +146,7 @@ pub fn main() noreturn {
             );
         }
 
-        const frame_buffer = @ptrFromInt([*]w64.Pixel, gop.mode.frame_buffer_base)[0 .. gop.mode.frame_buffer_size / @sizeOf(w64.Pixel)];
+        const frame_buffer = @as([*]w64.Pixel, @ptrFromInt(gop.mode.frame_buffer_base))[0 .. gop.mode.frame_buffer_size / @sizeOf(w64.Pixel)];
         break :b .{
             .frame_buffer = frame_buffer,
             .back_buffer = undefined,
@@ -149,8 +159,7 @@ pub fn main() noreturn {
     var rsdp = b: {
         for (0..system_table.number_of_table_entries) |i| {
             if (system_table.configuration_table[i].vendor_guid.eql(std.os.uefi.tables.ConfigurationTable.acpi_20_table_guid)) {
-                const tmp_rsdp = @ptrCast(*amd64.ACPI2RSDP, @alignCast(
-                    @alignOf(amd64.ACPI2RSDP),
+                const tmp_rsdp: *amd64.ACPI2RSDP = @ptrCast(@alignCast(
                     system_table.configuration_table[i].vendor_table,
                 ));
                 if (std.mem.eql(u8, &tmp_rsdp.signature, "RSD PTR ")) {
@@ -165,7 +174,7 @@ pub fn main() noreturn {
     var number_of_enabled_processors: usize = 0;
     {
         var mp: *mpsp.MPServiceProtocol = undefined;
-        var status = bs.locateProtocol(&mpsp.MPServiceProtocol.guid, null, @ptrCast(*?*anyopaque, &mp));
+        var status = bs.locateProtocol(&mpsp.MPServiceProtocol.guid, null, @ptrCast(&mp));
         if (status != ZSUEFIStatus.Success) {
             fatal("Cannot init multicore support! Error locating MP protocol: {}", .{status});
         }
@@ -187,7 +196,7 @@ pub fn main() noreturn {
         var mmap_size: usize = @sizeOf(@TypeOf(mmap_store));
         var descriptor_size: usize = 0;
         var descriptor_version: u32 = 0;
-        var status = bs.getMemoryMap(&mmap_size, @ptrCast([*]SmallUEFIMemoryDescriptor, &mmap_store), &map_key, &descriptor_size, &descriptor_version);
+        var status = bs.getMemoryMap(&mmap_size, @ptrCast(&mmap_store), &map_key, &descriptor_size, &descriptor_version);
         if (status != ZSUEFIStatus.Success) {
             fatal("Failed to get memory map! Error: {}", .{status});
         }
@@ -243,7 +252,7 @@ pub fn main() noreturn {
         // const size = toolbox.next_power_of_2(
         //     screen.frame_buffer.len * @sizeOf(w64.Pixel) * 2 + w64.MEMORY_PAGE_SIZE,
         // );
-        const size = toolbox.mb(128); //64 MB should be big enough!!!
+        const size = w64.KERNEL_GLOBAL_ARENA_SIZE;
         for (memory_map) |*desc| {
             switch (desc.type) {
                 .ConventionalMemory => case: {
@@ -256,7 +265,7 @@ pub fn main() noreturn {
                     }
 
                     if (descriptor_size - padding >= size) {
-                        const ret = @ptrFromInt([*]u8, target_address)[0..size];
+                        const ret = @as([*]u8, @ptrFromInt(target_address))[0..size];
                         desc.number_of_pages -= size / UEFI_PAGE_SIZE;
                         desc.physical_start += size;
                         break :b ret;
@@ -295,7 +304,6 @@ pub fn main() noreturn {
         .writethrough = false,
         .cache_disable = false,
         .pdp_base_address = @intCast(
-            u40,
             @intFromPtr(pml4_table) >> 12,
         ),
         .no_execute = false,
@@ -431,6 +439,22 @@ pub fn main() noreturn {
         println("Space left in arena: {}", .{global_arena.data.len - global_arena.pos});
     }
 
+    const tsc_mhz = b: {
+        var tmp: u64 = 0;
+        //the purpose of this loop is because clock rates are typically
+        //multiples of 100 or more.  we want to make sure we are getting the most
+        //accurate clock rate
+        for (0..10) |_| {
+            tmp = calculaute_tsc_mhz(rsdp, &bootloader_arena);
+            if (tmp % 10 == 0) {
+                break :b tmp;
+            }
+        }
+        break :b tmp;
+    };
+
+    println("tsc mhz: {}", .{tsc_mhz});
+
     const application_processor_contexts =
         bootstrap_application_processors(&global_arena, number_of_enabled_processors);
 
@@ -452,6 +476,7 @@ pub fn main() noreturn {
         .free_conventional_memory = physical_to_virtual_pointer(free_conventional_memory.items(), mapped_memory.items()),
         .global_arena = global_arena,
         .application_processor_contexts = application_processor_contexts,
+        .tsc_mhz = tsc_mhz,
     };
     kernel_start_context.screen.back_buffer = physical_to_virtual_pointer(
         kernel_start_context.screen.back_buffer,
@@ -517,13 +542,15 @@ fn bootstrap_application_processors(arena: *toolbox.Arena, number_of_processors:
             const program_len = @intFromPtr(&processor_bootstrap_program_end) -
                 @intFromPtr(&processor_bootstrap_program_start);
 
-            const dest = @ptrFromInt(
+            const dest = @as(
                 [*]u8,
-                PROCESSOR_BOOTSTRAP_PROGRAM_ADDRESS,
+                @ptrFromInt(
+                    PROCESSOR_BOOTSTRAP_PROGRAM_ADDRESS,
+                ),
             )[0..program_len];
-            const src = @ptrFromInt(
+            const src = @as(
                 [*]u8,
-                @intFromPtr(&processor_bootstrap_program_start),
+                @ptrCast(&processor_bootstrap_program_start),
             )[0..program_len];
             @memcpy(dest, src);
 
@@ -541,17 +568,17 @@ fn bootstrap_application_processors(arena: *toolbox.Arena, number_of_processors:
                     .pml4_table_address = cr3,
                     .application_processor_kernel_entry_data = null,
                 };
-                const context_data = @bitCast([8]u8, @intFromPtr(context));
+                const context_data: [8]u8 = @bitCast(@intFromPtr(context));
                 const i = ((proc + 1) * w64.MEMORY_PAGE_SIZE) - @sizeOf(*w64.BootloaderProcessorContext);
                 @memcpy(stacks[i .. i + @sizeOf(*w64.BootloaderProcessorContext)], context_data[0..]);
 
                 processor_contexts[proc] = context;
             }
 
-            const stacks_data = @bitCast([8]u8, @intFromPtr(stacks.ptr));
+            const stacks_data: [8]u8 = @bitCast(@intFromPtr(stacks.ptr));
             @memcpy(dest[dest.len - 16 .. dest.len - 8], stacks_data[0..]);
 
-            const cr3_data = @bitCast([8]u8, cr3);
+            const cr3_data: [8]u8 = @bitCast(cr3);
             @memcpy(dest[dest.len - 8 ..], cr3_data[0..]);
         }
 
@@ -593,13 +620,17 @@ fn bootstrap_application_processors(arena: *toolbox.Arena, number_of_processors:
             reserved: u24 = 0,
             destination: u8,
         };
-        const interrupt_command_register_low = @ptrFromInt(
+        const interrupt_command_register_low = @as(
             *volatile InterruptControlRegisterLow,
-            apic_base_address + 0x300,
+            @ptrFromInt(
+                apic_base_address + 0x300,
+            ),
         );
-        const interrupt_command_register_high = @ptrFromInt(
+        const interrupt_command_register_high = @as(
             *volatile InterruptControlRegisterHigh,
-            apic_base_address + 0x300 + @sizeOf(InterruptControlRegisterLow),
+            @ptrFromInt(
+                apic_base_address + 0x300 + @sizeOf(InterruptControlRegisterLow),
+            ),
         );
 
         interrupt_command_register_high.* = .{
@@ -771,15 +802,14 @@ fn map_virtual_memory(
                 .writethrough = false,
                 .cache_disable = false,
                 .pdp_base_address = @intCast(
-                    u40,
                     pdp_address >> 12,
                 ),
                 .no_execute = false,
             };
         }
 
-        var pdp = @ptrFromInt(
-            *amd64.PageDirectoryPointer,
+        var pdp: *amd64.PageDirectoryPointer =
+            @ptrFromInt(
             @as(u64, pml4e.pdp_base_address) << 12,
         );
         const pdp_index = (vaddr >> 30) & 0b1_1111_1111;
@@ -801,7 +831,6 @@ fn map_virtual_memory(
                 .writethrough = false,
                 .cache_disable = false,
                 .pd_base_address = @intCast(
-                    u40,
                     pd_address >> 12,
                 ),
                 .no_execute = false,
@@ -811,9 +840,11 @@ fn map_virtual_memory(
         const pd_index = (vaddr >> 21) & 0b1_1111_1111;
         switch (memory_type) {
             .ConventionalMemory, .FrameBufferMemory => {
-                var pd = @ptrFromInt(
+                var pd = @as(
                     *amd64.PageDirectory2MB,
-                    @as(u64, pdpe.pd_base_address) << 12,
+                    @ptrFromInt(
+                        @as(u64, pdpe.pd_base_address) << 12,
+                    ),
                 );
                 var pde = &pd.entries[pd_index];
                 if (!pde.present) {
@@ -826,7 +857,6 @@ fn map_virtual_memory(
                         .page_attribute_table_bit = 0,
                         .global = true,
                         .physical_page_base_address = @intCast(
-                            u31,
                             paddr >> 21,
                         ),
                         .memory_protection_key = 0,
@@ -844,9 +874,11 @@ fn map_virtual_memory(
                 }
             },
             .MMIOMemory, .ToBeUnmapped => {
-                var pd = @ptrFromInt(
+                var pd = @as(
                     *amd64.PageDirectory4KB,
-                    @as(u64, pdpe.pd_base_address) << 12,
+                    @ptrFromInt(
+                        @as(u64, pdpe.pd_base_address) << 12,
+                    ),
                 );
                 var pde = &pd.entries[pd_index];
                 if (!pde.present) {
@@ -865,15 +897,16 @@ fn map_virtual_memory(
                         .writethrough = false,
                         .cache_disable = false,
                         .pt_base_address = @intCast(
-                            u40,
                             pt_address >> 12,
                         ),
                         .no_execute = false,
                     };
                 }
-                var pt = @ptrFromInt(
+                var pt = @as(
                     *amd64.PageTable,
-                    @as(u64, pde.pt_base_address) << 12,
+                    @ptrFromInt(
+                        @as(u64, pde.pt_base_address) << 12,
+                    ),
                 );
                 const pt_index = (vaddr >> 12) & 0b1_1111_1111;
                 var pte = &pt.entries[pt_index];
@@ -887,7 +920,6 @@ fn map_virtual_memory(
                         .page_attribute_table_bit = 0,
                         .global = true,
                         .physical_page_base_address = @intCast(
-                            u40,
                             paddr >> 12,
                         ),
                         .memory_protection_key = 0,
@@ -996,9 +1028,9 @@ fn physical_to_virtual_pointer(physical: anytype, mappings: []w64.VirtualMemoryM
     );
     if (pointer_size == .Slice) {
         const Child = @typeInfo(T).Pointer.child;
-        return @ptrFromInt([*]Child, virtual_address)[0..physical.len];
+        return @as([*]Child, @ptrFromInt(virtual_address))[0..physical.len];
     }
-    return @ptrFromInt(T, virtual_address);
+    return @as(T, @ptrFromInt(virtual_address));
 }
 
 //TODO:
@@ -1114,6 +1146,74 @@ fn physical_to_virtual_pointer(physical: anytype, mappings: []w64.VirtualMemoryM
 //     }
 //     uefiprintln("Started {} cores", .{cores_started});
 // }
+fn calculaute_tsc_mhz(rsdp: *const amd64.ACPI2RSDP, arena: *toolbox.Arena) u64 {
+    const save_point = arena.create_save_point();
+    defer arena.restore_save_point(save_point);
+
+    const root_xsdt_address = (@as(u64, rsdp.xsdt_address_high) << 32) |
+        @as(u64, rsdp.xsdt_address_low);
+    const root_xsdt: *amd64.XSDT = @ptrFromInt(root_xsdt_address);
+    if (!amd64.is_xsdt_checksum_valid(root_xsdt)) {
+        fatal("Root XSDT checksum failed!", .{});
+    }
+
+    const entries = amd64.root_xsdt_entries(root_xsdt);
+    const hpet_xsdt = b: {
+        for (entries) |entry| {
+            if (std.mem.eql(u8, "HPET", entry.signature[0..])) {
+                break :b entry;
+            }
+        } else {
+            fatal("Timer device not found!", .{});
+        }
+    };
+    const hpet = @as(*const amd64.HPET, @ptrCast(hpet_xsdt));
+    const tick_rate = hpet.capabilities_and_id().counter_clock_period;
+    const nano_seconds_per_tick: f64 = @as(f64, @floatFromInt(tick_rate)) / 1000000;
+    println("tick_rate: {}, nano_seconds_per_tick: {d:.4}", .{ tick_rate, nano_seconds_per_tick });
+
+    hpet.configruation_register().enable_counter = true;
+    //disable HPET after we are done with it
+    defer hpet.configruation_register().enable_counter = false;
+
+    const NUM_ITERATIONS = 10;
+
+    const wait_value = b: {
+        var wait_value: usize = 16;
+        var tsc_time: u64 = 0;
+        while (tsc_time < 5_000_000) : (wait_value *= 2) {
+            const start = amd64.rdtsc();
+            for (0..wait_value) |_| {
+                std.atomic.spinLoopHint();
+            }
+            const end = amd64.rdtsc();
+            tsc_time = end - start;
+        }
+        break :b wait_value;
+    };
+
+    var hpet_time: u64 = std.math.maxInt(u64);
+    var tsc_time: u64 = std.math.maxInt(u64);
+
+    for (0..NUM_ITERATIONS) |_| {
+        const start_hpet = hpet.main_counter().*;
+        const start_tsc = amd64.rdtsc();
+        //wait a bit
+        for (0..wait_value) |_| {
+            std.atomic.spinLoopHint();
+        }
+        const end_tsc = amd64.rdtsc();
+        const end_hpet = hpet.main_counter().*;
+        hpet_time = @min(hpet_time, end_hpet - start_hpet);
+        tsc_time = @min(tsc_time, end_tsc - start_tsc);
+    }
+    println("tsc ticks: {}", .{tsc_time});
+    println("hpet ticks: {}", .{hpet_time});
+
+    const nanoseconds_passed = @as(f64, @floatFromInt(hpet_time)) * nano_seconds_per_tick;
+
+    return @intFromFloat(1_000 * (@as(f64, @floatFromInt(tsc_time)) / nanoseconds_passed));
+}
 
 comptime {
     asm (
@@ -1281,7 +1381,6 @@ export fn processor_entry(
 ) callconv(.C) noreturn {
     @setAlignStack(256);
     @atomicStore(bool, &context.is_booted, true, .SeqCst);
-    println("hello from processor {} ", .{processor_id});
     while (true) {
         if (context.application_processor_kernel_entry_data) |entry_data| {
             asm volatile (

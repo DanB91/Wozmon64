@@ -27,16 +27,16 @@ pub const XSDT = extern struct {
 
 pub fn root_xsdt_entries(xsdt: *const XSDT) []align(4) *const XSDT {
     const len = (xsdt.length - @sizeOf(XSDT)) / 8;
-    const ret = @ptrFromInt(
+    const ret = @as(
         [*]align(4) *const XSDT,
-        @intFromPtr(xsdt) + @sizeOf(XSDT),
+        @ptrFromInt(@intFromPtr(xsdt) + @sizeOf(XSDT)),
     )[0..len];
     return ret;
 }
 
 pub fn is_xsdt_checksum_valid(xsdt: *const XSDT) bool {
     var sum: u8 = 0;
-    const bytes = @ptrCast([*]const u8, xsdt)[0..xsdt.length];
+    const bytes = @as([*]const u8, @ptrCast(xsdt))[0..xsdt.length];
 
     for (bytes) |b| {
         sum +%= b;
@@ -76,6 +76,63 @@ pub const MADTLocalAPIC = packed struct(u64) {
     is_enabled: bool,
     is_online_capable: bool,
     padding: u30,
+};
+
+//HPET structures
+pub const HPET = extern struct {
+    xsdt: XSDT align(1),
+    hardware_rev_id: u8 align(1),
+    counter_comparator_info: packed struct(u8) {
+        number_of_comaprators: u5,
+        counter_size: enum(u1) {
+            //I don't see what counter size is documented in osdev wiki.  Just guessing...
+            Bits32,
+            Bits64,
+        },
+        reserved: u1,
+        legacy_replacement: bool,
+    } align(1),
+    pci_vendor_id: u16 align(1),
+    address_space_id: u8 align(1), // 0 - system memory, 1 - system I/O
+    register_bit_width: u8 align(1),
+    register_bit_offset: u8 align(1),
+    reserved: u8 align(1),
+    address: u64 align(1),
+    hpet_number: u8 align(1),
+    minimum_tick: u16 align(1),
+    page_protection: u8 align(1),
+
+    pub const CapabilitiesAndID = packed struct(u64) {
+        rev_id: u8,
+        number_of_timers_minus_one: u5,
+        counter_size: enum(u1) {
+            //I don't see what counter size is documented in osdev wiki.  Just guessing...
+            Bits32,
+            Bits64,
+        },
+        reserved: u1,
+        legacy_replacement: bool,
+        pci_vendor_id: u16,
+        counter_clock_period: u32,
+    };
+
+    pub const ConfigurationRegister = packed struct(u64) {
+        enable_counter: bool,
+        enable_legacy_replacement: bool,
+        reserved: u62,
+    };
+
+    pub fn capabilities_and_id(self: *const HPET) *volatile CapabilitiesAndID {
+        return @ptrFromInt(self.address + 0);
+    }
+
+    pub fn configruation_register(self: *const HPET) *volatile ConfigurationRegister {
+        return @ptrFromInt(self.address + 0x10);
+    }
+
+    pub fn main_counter(self: *const HPET) *u64 {
+        return @ptrFromInt(self.address + 0xF0);
+    }
 };
 
 pub const PageMappingLevel4Table = struct {
@@ -259,4 +316,34 @@ pub inline fn rdmsr(msr: u32) u64 {
         : [msr] "{ecx}" (msr),
     );
     return (edx << 32) | eax;
+}
+pub inline fn rdtsc() u64 {
+    var top: u64 = 0;
+    var bottom: u64 = 0;
+    asm volatile (
+        \\rdtsc
+        : [top] "={edx}" (top),
+          [bottom] "={eax}" (bottom),
+    );
+    return (top << 32) | bottom;
+}
+
+pub const RDTSCPResult = struct {
+    timestamp: u64,
+    processor_id: u32,
+};
+pub inline fn rdtscp() RDTSCPResult {
+    var top: u64 = 0;
+    var bottom: u64 = 0;
+    var pid: u32 = 0;
+    asm volatile (
+        \\rdtscp
+        : [top] "={edx}" (top),
+          [bottom] "={eax}" (bottom),
+          [pid] "={ecx}" (pid),
+    );
+    return .{
+        .timestamp = (top << 32) | bottom,
+        .processor_id = pid,
+    };
 }
