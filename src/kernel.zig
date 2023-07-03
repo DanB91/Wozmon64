@@ -62,13 +62,13 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
 
     @memset(g_state.screen.back_buffer, .{ .data = 0 });
 
-    echo("Wozmon64\n", .{});
+    echo_welcome_line("*** Wozmon64 ***\n", .{});
     {
         var bytes_free: usize = 0;
         for (g_state.free_conventional_memory) |desc| {
             bytes_free += desc.number_of_pages * w64.MEMORY_PAGE_SIZE;
         }
-        echo("{} bytes free, {} processors free, {} pixels free\n", .{
+        echo_welcome_line("{} bytes free *** {} processors free *** {} pixels free\n", .{
             bytes_free,
             g_state.application_processor_contexts.len,
             g_state.screen.height * g_state.screen.width,
@@ -104,6 +104,24 @@ pub fn draw_prompt() void {
                 bitmap.pixels[y * w64.CharacterBitmap.WIDTH + x];
         }
     }
+}
+pub fn echo_welcome_line(comptime fmt: []const u8, args: anytype) void {
+    const scratch_arena = &g_state.scratch_arena;
+    const arena_save_point = scratch_arena.create_save_point();
+    defer scratch_arena.restore_save_point(arena_save_point);
+
+    const str = toolbox.str8fmt(fmt, args, scratch_arena);
+
+    const screen_midpont = @divTrunc(w64.SCREEN_CHARACTER_RESOLUTION.width, 2);
+    _ = screen_midpont;
+
+    const padding_each_side = @divTrunc((w64.SCREEN_CHARACTER_RESOLUTION.width - str.rune_length), 2);
+    const spaces = scratch_arena.push_slice(u8, padding_each_side);
+
+    @memset(spaces, ' ');
+
+    echo("{s}{}{s}", .{ spaces, str, spaces });
+    carriage_return();
 }
 
 pub fn echo(comptime fmt: []const u8, args: anytype) void {

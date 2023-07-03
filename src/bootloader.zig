@@ -1380,6 +1380,7 @@ export fn processor_entry(
     processor_id: u64,
 ) callconv(.C) noreturn {
     @setAlignStack(256);
+    println("processor id: {}", .{processor_id});
     @atomicStore(bool, &context.is_booted, true, .SeqCst);
     while (true) {
         if (context.application_processor_kernel_entry_data) |entry_data| {
