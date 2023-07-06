@@ -52,13 +52,35 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
             .scratch_arena = toolbox.Arena.init_with_buffer(scratch_arena_bytes),
         };
     }
+    //set up GDT
+    {
+        //TODO
+    }
 
-    // while (true) {
-    //     for (0..0xFFFF_FFFF) |i| {
-    //         @memset(kernel_start_context.screen.back_buffer, .{ .data = @intCast(u32, i) });
-    //         @memcpy(kernel_start_context.screen.frame_buffer, kernel_start_context.screen.back_buffer);
-    //     }
-    // }
+    //set up IDT
+    {
+        //TODO
+    }
+
+    //set up memory map
+    {
+        //TODO
+        //map recursive mapping
+        //0xFFFFFF00 00000000 - 0xFFFFFF7F FFFFFFFF   Page Mapping Level 1 (Page Tables)
+        //0xFFFFFF7F 80000000 - 0xFFFFFF7F BFFFFFFF   Page Mapping Level 2 (Page Directories)
+        //0xFFFFFF7F BFC00000 - 0xFFFFFF7F BFDFFFFF   Page Mapping Level 3 (PDPTs / Page-Directory-Pointer Tables)
+        //0xFFFFFF7F BFDFE000 - 0xFFFFFF7F BFDFEFFF   Page Mapping Level 4 (PML4)
+    }
+
+    //bring processors in to kernel space
+    {
+        //TODO
+    }
+
+    //set up drivers
+    {
+        //TODO:
+    }
 
     @memset(g_state.screen.back_buffer, .{ .data = 0 });
 
@@ -68,14 +90,15 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
         for (g_state.free_conventional_memory) |desc| {
             bytes_free += desc.number_of_pages * w64.MEMORY_PAGE_SIZE;
         }
-        echo_welcome_line("{} bytes free *** {} processors free *** {} pixels free\n", .{
+        echo_welcome_line("{} bytes free *** {} processors free *** {} x {} pixels free\n", .{
             bytes_free,
             g_state.application_processor_contexts.len,
-            g_state.screen.height * g_state.screen.width,
+            g_state.screen.width,
+            g_state.screen.height,
         });
     }
 
-    echo("\\\n", .{});
+    echo_str8("\\\n", .{});
     while (true) {
         draw_prompt();
         @memcpy(g_state.screen.frame_buffer, g_state.screen.back_buffer);
@@ -120,11 +143,11 @@ pub fn echo_welcome_line(comptime fmt: []const u8, args: anytype) void {
 
     @memset(spaces, ' ');
 
-    echo("{s}{}{s}", .{ spaces, str, spaces });
+    echo_str8("{s}{}{s}", .{ spaces, str, spaces });
     carriage_return();
 }
 
-pub fn echo(comptime fmt: []const u8, args: anytype) void {
+pub fn echo_str8(comptime fmt: []const u8, args: anytype) void {
     const scratch_arena = &g_state.scratch_arena;
     const arena_save_point = scratch_arena.create_save_point();
     defer scratch_arena.restore_save_point(arena_save_point);

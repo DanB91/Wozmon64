@@ -3,6 +3,7 @@
 
 const toolbox = @import("toolbox");
 const amd64 = @import("amd64.zig");
+const kernel = @import("kernel.zig");
 pub usingnamespace @import("bitmaps.zig");
 
 pub const MEMORY_PAGE_SIZE = toolbox.mb(2);
@@ -139,4 +140,10 @@ pub fn now() Time {
 
 comptime {
     toolbox.static_assert(@sizeOf(Pixel) == 4, "Incorrect size for Pixel");
+}
+
+//userspace functions
+pub fn echo(bytes: [*c]u8, len: usize) void {
+    const str = toolbox.str8(bytes[0..len]);
+    kernel.echo_str8("{}", .{str});
 }

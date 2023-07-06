@@ -198,8 +198,9 @@ pub const PageMappingLevel4Entry = packed struct(u64) {
     present: bool, //P bit
     write_enable: bool, //R/W bit
     ring3_accessible: bool, //U/S bit
-    writethrough: bool, //PWT bit --  Writes always hit both memory and cache. Reads can hit just cache. Good for SMP
-    cache_disable: bool, //PCD bit -- Disable cache completely. Good for MMIO
+    //TODO look into if these bits are used at all
+    writethrough: bool, //PWT bit
+    cache_disable: bool, //PCD bit
     accessed: bool = false, //A bit -- was this page accessed? must by manually reset
     ignored: u1 = 0,
     must_be_zero1: u1 = 0,
@@ -230,14 +231,14 @@ pub const PageDirectoryEntry2MB = packed struct(u64) {
     present: bool, //P bit
     write_enable: bool, //R/W bit
     ring3_accessible: bool, //U/S bit
-    writethrough: bool, //PWT bit
-    cache_disable: bool, //PCD bit
+    pat_bit_0: u1, //PWT bit
+    pat_bit_1: u1, //PCD bit
     accessed: bool = false, //A bit
     dirty: bool = false, //D bit -- was this page written to? must be manually reset
     must_be_one: u1 = 1,
     global: bool, //G bit -- always resident in TLB
     free_bits1: u3 = 0, //AVL bits
-    page_attribute_table_bit: u1, //PAT bit
+    pat_bit_2: u1, //PAT bit
     must_be_zero: u8 = 0,
     physical_page_base_address: u31,
     free_bits2: u7 = 0, //AVL bits
@@ -266,11 +267,11 @@ pub const PageTableEntry = packed struct(u64) {
     present: bool, //P bit
     write_enable: bool, //R/W bit
     ring3_accessible: bool, //U/S bit
-    writethrough: bool, //PWT bit
-    cache_disable: bool, //PCD bit
+    pat_bit_0: u1, //PWT bit
+    pat_bit_1: u1, //PCD bit
     accessed: bool = false, //A bit
     dirty: bool = false, //D bit -- was this page written to? must be manually reset
-    page_attribute_table_bit: u1, //PAT bit
+    pat_bit_2: u1, //PAT bit
     global: bool, //G bit -- always resident in TLB
     free_bits1: u3 = 0, //AVL bits
     physical_page_base_address: u40,
@@ -278,6 +279,22 @@ pub const PageTableEntry = packed struct(u64) {
     memory_protection_key: u4, //MPK bits
     no_execute: bool, //NX bit
 };
+
+pub const PageAttributeTableEncodings = enum(u3) {
+    Uncachable = 0, //Disable cache completely. Good for MMIO
+    WriteCombining = 1,
+    WriteThrough = 4, //Writes always hit both memory and cache. Reads can hit just cache. Good for SMP
+    WriteProtect = 5,
+    Writeback = 6,
+    UncachableMinus = 7,
+};
+
+pub const PageAttributeTableEntry = packed struct(u8) {
+    cache_policy: PageAttributeTableEncodings,
+    reserved: u5 = 0,
+};
+
+pub const PageAttributeTable = [8]PageAttributeTableEntry;
 
 pub const CPUIDResult = struct {
     eax: u32,
@@ -306,6 +323,9 @@ pub inline fn cpuid(input_eax: u32) CPUIDResult {
         .edx = edx,
     };
 }
+pub const IA32_APIC_BASE_MSR = 0x1B;
+pub const PAT_MSR = 0x277; //Page attribute table MSR;
+
 pub inline fn rdmsr(msr: u32) u64 {
     var eax: u64 = 0;
     var edx: u64 = 0;
@@ -316,6 +336,18 @@ pub inline fn rdmsr(msr: u32) u64 {
         : [msr] "{ecx}" (msr),
     );
     return (edx << 32) | eax;
+}
+
+pub inline fn wrmsr(msr: u32, value: u64) void {
+    var eax: u32 = @intCast(value & 0xFFFF_FFFF);
+    var edx: u32 = @intCast(value >> 32);
+    asm volatile (
+        \\wrmsr
+        :
+        : [msr] "{ecx}" (msr),
+          [eax] "{eax}" (eax),
+          [edx] "{edx}" (edx),
+    );
 }
 pub inline fn rdtsc() u64 {
     var top: u64 = 0;

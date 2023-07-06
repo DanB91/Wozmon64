@@ -490,6 +490,20 @@ pub fn main() noreturn {
         kernel_start_context.global_arena.data,
         mapped_memory.items(),
     );
+    {
+        //Set up PAT for write combining
+        var pat: amd64.PageAttributeTable = .{
+            .{ .cache_policy = .Writeback }, //0b000
+            .{ .cache_policy = .WriteThrough }, //0b001
+            .{ .cache_policy = .UncachableMinus }, //0b010
+            .{ .cache_policy = .Uncachable }, //0b011
+            .{ .cache_policy = .WriteCombining }, //0b100
+            .{ .cache_policy = .WriteProtect }, //0b101
+            .{ .cache_policy = .UncachableMinus }, //0b110
+            .{ .cache_policy = .Uncachable }, //0b111
+        };
+        amd64.wrmsr(amd64.PAT_MSR, @bitCast(pat));
+    }
 
     start_kernel(
         pml4_table,
@@ -526,7 +540,6 @@ extern var processor_bootstrap_program_start: u8;
 extern var processor_bootstrap_program_end: u8;
 
 fn bootstrap_application_processors(arena: *toolbox.Arena, number_of_processors: u64) []*w64.BootloaderProcessorContext {
-    const IA32_APIC_BASE_MSR = 0x1B;
     const CPUID_FEAT_EDX_APIC = 1 << 9;
     const number_of_aps = number_of_processors - 1;
     var processor_contexts = arena.push_slice(*w64.BootloaderProcessorContext, number_of_aps);
@@ -582,7 +595,7 @@ fn bootstrap_application_processors(arena: *toolbox.Arena, number_of_processors:
             @memcpy(dest[dest.len - 8 ..], cr3_data[0..]);
         }
 
-        const apic_base_address = amd64.rdmsr(IA32_APIC_BASE_MSR) &
+        const apic_base_address = amd64.rdmsr(amd64.IA32_APIC_BASE_MSR) &
             toolbox.mask_for_bit_range(12, 63, u64);
         const InterruptControlRegisterLow = packed struct(u32) {
             vector: u8, //VEC
@@ -839,7 +852,7 @@ fn map_virtual_memory(
 
         const pd_index = (vaddr >> 21) & 0b1_1111_1111;
         switch (memory_type) {
-            .ConventionalMemory, .FrameBufferMemory => {
+            .ConventionalMemory => {
                 var pd = @as(
                     *amd64.PageDirectory2MB,
                     @ptrFromInt(
@@ -852,9 +865,43 @@ fn map_virtual_memory(
                         .present = true,
                         .write_enable = true,
                         .ring3_accessible = false,
-                        .writethrough = false,
-                        .cache_disable = false,
-                        .page_attribute_table_bit = 0,
+                        .pat_bit_0 = 0,
+                        .pat_bit_1 = 0,
+                        .pat_bit_2 = 0,
+                        .global = true,
+                        .physical_page_base_address = @intCast(
+                            paddr >> 21,
+                        ),
+                        .memory_protection_key = 0,
+                        .no_execute = false,
+                    };
+                } else {
+                    const mapped_paddr = @as(u64, pde.physical_page_base_address) << 21;
+                    if (mapped_paddr != aligned_physical_address) {
+                        toolbox.panic("Trying to map {X} to {X}, when it is already mapped to {X}!", .{
+                            vaddr,
+                            paddr,
+                            mapped_paddr,
+                        });
+                    }
+                }
+            },
+            .FrameBufferMemory => {
+                var pd = @as(
+                    *amd64.PageDirectory2MB,
+                    @ptrFromInt(
+                        @as(u64, pdpe.pd_base_address) << 12,
+                    ),
+                );
+                var pde = &pd.entries[pd_index];
+                if (!pde.present) {
+                    pde.* = .{
+                        .present = true,
+                        .write_enable = true,
+                        .ring3_accessible = false,
+                        .pat_bit_0 = 0,
+                        .pat_bit_1 = 0,
+                        .pat_bit_2 = 1, //enable write-combining
                         .global = true,
                         .physical_page_base_address = @intCast(
                             paddr >> 21,
@@ -915,9 +962,9 @@ fn map_virtual_memory(
                         .present = true,
                         .write_enable = true,
                         .ring3_accessible = false,
-                        .writethrough = false,
-                        .cache_disable = true, //disable cache for MMIO
-                        .page_attribute_table_bit = 0,
+                        .pat_bit_0 = 0,
+                        .pat_bit_1 = 1, //disable cache for MMIO
+                        .pat_bit_2 = 0,
                         .global = true,
                         .physical_page_base_address = @intCast(
                             paddr >> 12,
