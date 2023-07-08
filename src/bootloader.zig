@@ -12,8 +12,6 @@ const console = @import("bootloader_console.zig");
 const KERNEL_ELF = @embedFile("../zig-out/bin/kernel.elf");
 const UEFI_PAGE_SIZE = toolbox.kb(4);
 
-const ENABLE_CONSOLE = true;
-
 const KERNEL_STACK_BOTTOM_ADDRESS = 0x1_0000_0000_0000_0000 - w64.MEMORY_PAGE_SIZE;
 
 const ZSGraphicsOutputProtocol = std.os.uefi.protocols.GraphicsOutputProtocol;

@@ -379,3 +379,196 @@ pub inline fn rdtscp() RDTSCPResult {
         .processor_id = pid,
     };
 }
+//descriptor functions
+pub const GDTRegister = extern struct {
+    limit: u16 align(1),
+    gdt: [*]volatile GDTDescriptor align(1),
+};
+pub const GDTDescriptorType = enum(u4) {
+    ReadOnly,
+    ReadOnlyAccessed,
+    ReadWrite,
+    ReadWriteAccessed,
+    ReadOnlyExpandDown,
+    ReadOnlyExpandDownAccessed,
+    ReadWriteExpandDown,
+    ReadWriteExpandDownAccessed,
+    ExecuteOnly,
+    ExecuteOnlyAccessed,
+    ExecuteRead,
+    ExecuteReadAccessed,
+    ExcecuteOnlyConforming,
+    ExecuteOnlyConformingAccessed,
+    ExecuteReadConforming,
+    ExecuteReadConformingAccessed,
+};
+
+pub const GDTSystemDescriptorType32 = enum(u4) {
+    InvalidA = 0,
+    TSS16BitAvailable = 1,
+    LDT = 2,
+    TSS16BitBusy = 3,
+    CallGate16Bit = 4,
+    TaskGate = 5,
+    InterruptGate16Bit = 6,
+    TrapGate16Bit = 7,
+    InvalidB = 8,
+    TSS32BitAvailable = 9,
+    InvalidC = 10,
+    TSS32BitBusy = 11,
+    CallGate32Bit = 12,
+    InvalidD = 13,
+    InterruptGate32Bit = 14,
+    TrapGate32Bit = 15,
+};
+
+pub const GDTSystemDescriptorType64 = enum(u4) {
+    PartOfUpper8Bytes = 0,
+    Invalid1 = 1,
+    LDT = 2,
+    InvalidA,
+    InvalidB,
+    InvalidC,
+    InvalidD,
+    InvalidE,
+    InvalidF,
+    TSS64BitAvailable = 9,
+    InvalidG,
+    TSS64BitBusy = 11,
+    CallGate64Bit = 12,
+    InvalidH,
+    InterruptGate64Bit = 14,
+    TrapGate64Bit = 15,
+};
+
+pub const GDTTypeBits = packed union {
+    system_type_bits64: GDTSystemDescriptorType64, //when is_not_system_segment is false and is_for_long_mode is true
+    system_type_bits32: GDTSystemDescriptorType32, //when is_not_system_segment is false and is_for_long_mode is false
+    normal_type_bits: GDTDescriptorType, //when is_not_system_segment is true
+};
+
+pub const GDTDescriptor = packed struct(u64) {
+    segment_limit_bits_0_to_15: u16, //bits 0-15
+    base_addr_bits_0_to_23: u24, //bits 16-39
+    //TODO file bug with zig since this you cannot set this union properly
+    //type_bits: GDTTypeBits, //bits 40 - 43
+    type_bits: u4, //bits 40 - 43
+    is_not_system_segment: bool, //bit 44
+    privilege_bits: u2, //maximum ring level //bits 45-46
+    is_present: bool, //bit 47
+    segment_limit_bits_16_to_19: u4, //bits 48 - 51
+    unused: u1 = 0, //bit 52
+    is_for_long_mode_code: bool, //bit 53
+    is_big: bool, //must be false if is_for_long_mode is true //bit 54
+    is_granular: bool, //bit 55 //means limit is multiplied by 4096
+    base_addr_bits_24_to_31: u8, //bits 56-63
+};
+
+pub inline fn get_gdt_register() GDTRegister {
+    var ret: GDTRegister = undefined;
+    asm volatile ("sgdt %[ret]"
+        : [ret] "=m" (ret),
+    );
+    return ret;
+}
+pub fn set_gdt_register(gdtr: GDTRegister) void {
+    asm volatile ("lgdt %[gdtr]"
+        : [gdtr] "=m" (gdtr),
+    );
+}
+
+pub fn get_gdt() []volatile GDTDescriptor {
+    const gdtr = get_gdt_register();
+    return gdtr.gdt[0 .. (gdtr.limit + 1) / @sizeOf(GDTDescriptor)];
+}
+pub const IDTRegister = extern struct {
+    limit: u16 align(1),
+    idt: [*]volatile IDTDescriptor align(1),
+};
+pub const IDTTypeBits = enum(u4) {
+    InvalidA = 0,
+    InvalidB = 1,
+    InvalidC = 2,
+    InvalidD = 3,
+    InvalidE = 4,
+    TaskGate32Bit = 5, //invalid in long mode
+    TaskGate16Bit = 6, //invalid in long mode
+    TrapGate16Bit = 7, //invalid in long mode
+    InvalidF = 8,
+    InvalidG = 9,
+    InvalidH = 0xA,
+    InvalidI = 0xB,
+
+    CallGate64Bit = 0xC, //also 32-bit
+    InvalidJ = 0xD,
+    InterruptGate64Bit = 0xE, //also 32-bit
+    TrapGate64Bit = 0xF, //also 32 bit
+};
+
+pub const IDTDescriptor = packed struct {
+    //The offset is a 64 bit value, split in three parts. It represents the address of the entry point of the ISR.
+    offset_bits_0_to_15: u16, //bits 0-15
+    selector: u16, //bits 16-31 //a code segment selector in GDT or LDT
+    ist: u8, //bits 32-39       // bits 0-2 of this field hold Interrupt Stack Table offset, rest of bits zero.
+    type_attr: IDTTypeBits, //bits 40-43 // type and attributes
+    zeroA: u1, //should be zero bit 44
+    privilege_bits: u2, //maximum ring level //bits 45-46
+    is_present: bool, //bit 47
+    offset_bits_16_to_31: u16, //bits 48-63 // offset bits 16..31
+    offset_bits_32_to_63: u32, //bits 64-95 // offset bits 32..63
+    zeroB: u32, //bits 96-127 // reserved
+};
+
+pub const ExceptionCode = enum(usize) {
+    DivisionError = 0,
+    Debug = 1,
+    NMI = 2,
+    Breakpoint = 3,
+    Overflow = 4,
+    BoundRangeExceeded = 5,
+    InvalidOpcode = 6,
+    DeviceNotAvailable = 7,
+    DoubleFault = 8,
+
+    InvalidTSS = 10,
+
+    GeneralProtectionFault = 13,
+    PageFault = 14,
+};
+
+pub inline fn get_idt_register() IDTRegister {
+    var ret: IDTRegister = undefined;
+    asm volatile ("sidt %[ret]"
+        : [ret] "=m" (ret),
+    );
+    return ret;
+}
+
+pub fn get_idt() []volatile IDTDescriptor {
+    const idtr = get_idt_register();
+    return idtr.idt[0 .. (idtr.limit + 1) / @sizeOf(IDTDescriptor)];
+}
+
+pub fn register_exception_handler(
+    comptime handler: anytype,
+    comptime exception: ExceptionCode,
+    idt: []volatile IDTDescriptor,
+) void {
+    const handler_addr = @intFromPtr(handler);
+    idt[@intFromEnum(exception)] = .{
+        .offset_bits_0_to_15 = @as(u16, @truncate(handler_addr)),
+        .selector = asm volatile ("mov %%cs, %[ret]"
+            : [ret] "=r" (-> u16),
+            :
+            : "cs"
+        ),
+        .ist = 0,
+        .type_attr = .TrapGate64Bit,
+        .zeroA = 0,
+        .privilege_bits = 0,
+        .is_present = true,
+        .offset_bits_16_to_31 = @as(u16, @truncate(handler_addr >> 16)),
+        .offset_bits_32_to_63 = @as(u32, @truncate(handler_addr >> 32)),
+        .zeroB = 0,
+    };
+}

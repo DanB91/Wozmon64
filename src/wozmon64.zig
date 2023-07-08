@@ -99,6 +99,19 @@ pub fn physical_to_virtual(physical_address: u64, mappings: []VirtualMemoryMappi
     return error.PhysicalAddressNotMapped;
 }
 
+pub fn virtual_to_physical(virtual_address: u64, mappings: []VirtualMemoryMapping) !u64 {
+    //TODO use recursive mapping
+    for (mappings) |mapping| {
+        if (virtual_address >= mapping.virtual_address and
+            virtual_address < mapping.virtual_address + mapping.size)
+        {
+            const offset = virtual_address - mapping.virtual_address;
+            return mapping.virtual_address + offset;
+        }
+    }
+    return error.VirtualAddressNotMapped;
+}
+
 pub const Time = struct {
     ticks: i64,
 
