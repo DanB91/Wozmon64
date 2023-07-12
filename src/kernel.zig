@@ -77,6 +77,7 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
         //0xFFFFFF7F 80000000 - 0xFFFFFF7F BFFFFFFF   Page Mapping Level 2 (Page Directories)
         //0xFFFFFF7F BFC00000 - 0xFFFFFF7F BFDFFFFF   Page Mapping Level 3 (PDPTs / Page-Directory-Pointer Tables)
         //0xFFFFFF7F BFDFE000 - 0xFFFFFF7F BFDFEFFF   Page Mapping Level 4 (PML4)
+
     }
 
     //bring processors in to kernel space
@@ -125,13 +126,14 @@ pub fn draw_cursor() void {
     }
 
     const index = g_state.cursor_char - ' ';
-    const bitmap = w64.CHARACTERS[index];
-    for (0..w64.CharacterBitmap.HEIGHT) |y| {
-        const screen_y = (g_state.cursor_y * w64.CharacterBitmap.HEIGHT) + y;
-        for (0..w64.CharacterBitmap.WIDTH) |x| {
-            const screen_x = (g_state.cursor_x * w64.CharacterBitmap.KERNING) + x;
+    const font = g_state.screen.font;
+    const bitmap = font.character_bitmap(index);
+    for (0..font.height) |y| {
+        const screen_y = (g_state.cursor_y * font.height) + y;
+        for (0..font.width) |x| {
+            const screen_x = (g_state.cursor_x * font.kerning) + x;
             g_state.screen.back_buffer[screen_y * g_state.screen.stride + screen_x] =
-                bitmap.pixels[y * w64.CharacterBitmap.WIDTH + x];
+                bitmap[y * font.width + x];
         }
     }
 }
@@ -142,10 +144,12 @@ pub fn echo_welcome_line(comptime fmt: []const u8, args: anytype) void {
 
     const str = toolbox.str8fmt(fmt, args, scratch_arena);
 
-    const screen_midpont = @divTrunc(w64.SCREEN_CHARACTER_RESOLUTION.width, 2);
-    _ = screen_midpont;
-
-    const padding_each_side = @divTrunc((w64.SCREEN_CHARACTER_RESOLUTION.width - str.rune_length), 2);
+    toolbox.assert(
+        g_state.screen.width_in_characters > str.rune_length,
+        "Bad font scale. Try making it smaller",
+        .{},
+    );
+    const padding_each_side = @divTrunc(g_state.screen.width_in_characters - str.rune_length, 2);
     const spaces = scratch_arena.push_slice(u8, padding_each_side);
 
     @memset(spaces, ' ');
@@ -194,17 +198,19 @@ pub fn echo_str8(comptime fmt: []const u8, args: anytype) void {
 
         const index = byte - ' ';
 
-        const bitmap = w64.CHARACTERS[index];
-        for (0..w64.CharacterBitmap.HEIGHT) |y| {
-            const screen_y = (g_state.cursor_y * w64.CharacterBitmap.HEIGHT) + y;
-            for (0..w64.CharacterBitmap.WIDTH) |x| {
-                const screen_x = (g_state.cursor_x * w64.CharacterBitmap.KERNING) + x;
+        const font = g_state.screen.font;
+        const bitmap = font.character_bitmap(index);
+
+        for (0..font.height) |y| {
+            const screen_y = (g_state.cursor_y * font.height) + y;
+            for (0..font.width) |x| {
+                const screen_x = (g_state.cursor_x * font.kerning) + x;
                 g_state.screen.back_buffer[screen_y * g_state.screen.stride + screen_x] =
-                    bitmap.pixels[y * w64.CharacterBitmap.WIDTH + x];
+                    bitmap[y * font.width + x];
             }
         }
         g_state.cursor_x += 1;
-        if (g_state.cursor_x >= w64.SCREEN_CHARACTER_RESOLUTION.width) {
+        if (g_state.cursor_x >= g_state.screen.width_in_characters) {
             carriage_return();
         }
     }
@@ -222,22 +228,24 @@ fn carriage_return() void {
 
     g_state.cursor_x = 0;
     g_state.cursor_y += 1;
-    if (g_state.cursor_y >= w64.SCREEN_CHARACTER_RESOLUTION.height) {
-        for (0..w64.SCREEN_CHARACTER_RESOLUTION.height - 1) |cy| {
-            const srcy = (cy + 1) * w64.CharacterBitmap.HEIGHT;
-            const desty = cy * w64.CharacterBitmap.HEIGHT;
-            const src = g_state.screen.back_buffer[srcy * g_state.screen.stride .. (srcy + w64.CharacterBitmap.HEIGHT - 1) * g_state.screen.stride +
+    const font = g_state.screen.font;
+    const height_in_characters = g_state.screen.height_in_characters;
+    if (g_state.cursor_y >= height_in_characters) {
+        for (0..g_state.screen.height_in_characters - 1) |cy| {
+            const srcy = (cy + 1) * font.height;
+            const desty = cy * font.height;
+            const src = g_state.screen.back_buffer[srcy * g_state.screen.stride .. (srcy + font.height - 1) * g_state.screen.stride +
                 g_state.screen.width];
-            const dest = g_state.screen.back_buffer[desty * g_state.screen.stride .. (desty + w64.CharacterBitmap.HEIGHT - 1) * g_state.screen.stride +
+            const dest = g_state.screen.back_buffer[desty * g_state.screen.stride .. (desty + font.height - 1) * g_state.screen.stride +
                 g_state.screen.width];
             @memcpy(dest, src);
         }
         {
-            const y = (w64.SCREEN_CHARACTER_RESOLUTION.height - 1) * w64.CharacterBitmap.HEIGHT;
+            const y = (height_in_characters - 1) * font.height;
             const to_blank = g_state.screen.back_buffer[y * g_state.screen.stride ..];
             @memset(to_blank, .{ .data = 0 });
         }
-        g_state.cursor_y = w64.SCREEN_CHARACTER_RESOLUTION.height - 1;
+        g_state.cursor_y = height_in_characters - 1;
     }
 }
 
@@ -322,4 +330,23 @@ fn set_up_idt() void {
 
 fn invalid_opcode_handler() callconv(.Interrupt) void {
     toolbox.panic("Invalid opcode!", .{});
+}
+
+//for debugging within print routines
+fn print_serial(comptime fmt: []const u8, args: anytype) void {
+    const scratch_arena = &g_state.scratch_arena;
+    const arena_save_point = scratch_arena.create_save_point();
+    defer scratch_arena.restore_save_point(arena_save_point);
+    const to_print = toolbox.str8fmt(fmt, args, scratch_arena);
+
+    for (to_print.bytes) |byte| {
+        asm volatile (
+            \\mov $0x3F8, %%dx
+            \\mov %[char], %%al
+            \\outb %%al, %%dx
+            :
+            : [char] "r" (byte),
+            : "rax", "rdx"
+        );
+    }
 }

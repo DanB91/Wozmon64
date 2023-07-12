@@ -4,7 +4,7 @@
 const toolbox = @import("toolbox");
 const amd64 = @import("amd64.zig");
 const kernel = @import("kernel.zig");
-pub usingnamespace @import("bitmaps.zig");
+const bitmaps = @import("bitmaps.zig");
 
 pub const MEMORY_PAGE_SIZE = toolbox.mb(2);
 pub const MMIO_PAGE_SIZE = toolbox.kb(4);
@@ -13,15 +13,9 @@ pub const KERNEL_GLOBAL_ARENA_SIZE = toolbox.mb(128);
 pub const KERNEL_FRAME_ARENA_SIZE = toolbox.mb(4);
 pub const KERNEL_SCRATCH_ARENA_SIZE = toolbox.mb(4);
 
-//TODO change to 1920
-pub const TARGET_RESOLUTION = .{
-    .width = 1280,
-    .height = 720,
-    // .width = 3840,
-    // .height = 2160,
-};
-
 pub const FRAME_BUFFER_VIRTUAL_ADDRESS = 0x20_0000;
+
+pub const DisplayConfiguration = struct {};
 
 pub const Pixel = packed union {
     colors: packed struct(u32) {
@@ -33,12 +27,57 @@ pub const Pixel = packed union {
     data: u32,
 };
 
+pub const SUPPORTED_RESOLUTIONS = [_]struct { width: u32, height: u32 }{
+    .{ .width = 3840, .height = 2160 },
+    .{ .width = 1920, .height = 1080 },
+    .{ .width = 1280, .height = 720 },
+};
+
 pub const Screen = struct {
     frame_buffer: []volatile Pixel,
     back_buffer: []Pixel,
+    font: bitmaps.Font,
+
     width: usize,
     height: usize,
     stride: usize,
+
+    width_in_characters: usize,
+    height_in_characters: usize,
+
+    pub fn init(
+        width: usize,
+        height: usize,
+        stride: usize,
+        frame_buffer: []volatile Pixel,
+        arena: *toolbox.Arena,
+    ) Screen {
+        const scale: usize = b: {
+            if (width == 3840 and height == 2160) {
+                break :b 6;
+            } else if (width == 1920 and height == 1080) {
+                break :b 4;
+            } else if (width == 1280 and height == 720) {
+                break :b 2; //4;
+            } else {
+                toolbox.panic("Unsupported resolution: {}x{}", .{ width, height });
+            }
+        };
+        const back_buffer = arena.push_slice_clear(Pixel, frame_buffer.len);
+        const font = bitmaps.Font.init(scale, arena);
+        return .{
+            .frame_buffer = frame_buffer,
+            .back_buffer = back_buffer,
+            .font = font,
+
+            .width = width,
+            .height = height,
+            .stride = stride,
+
+            .width_in_characters = @divTrunc(width, font.kerning),
+            .height_in_characters = @divTrunc(height, font.height),
+        };
+    }
 };
 
 pub const BootloaderProcessorContext = struct {

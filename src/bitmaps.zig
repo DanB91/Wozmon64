@@ -1,50 +1,52 @@
 const w64 = @import("wozmon64.zig");
+const toolbox = @import("toolbox");
 
-pub const SCREEN_CHARACTER_RESOLUTION = .{
-    .width = w64.TARGET_RESOLUTION.width / CharacterBitmap.KERNING,
-    .height = w64.TARGET_RESOLUTION.height / CharacterBitmap.HEIGHT,
-};
-pub const CharacterBitmap = struct {
-    pixels: [SCALE * CHARACTER_HEIGHT * SCALE * CHARACTER_WIDTH]w64.Pixel,
-    pub const WIDTH = CHARACTER_WIDTH * SCALE;
-    pub const HEIGHT = CHARACTER_HEIGHT * SCALE;
-    pub const KERNING = WIDTH + SCALE;
-};
+pub const Font = struct {
+    width: usize,
+    height: usize,
+    kerning: usize,
 
-pub const CHARACTERS: [PRESCALED_CHARACTERS.len]CharacterBitmap = b: {
-    const BACKGROUND_COLOR = w64.Pixel{ .data = 0 };
-    const TEXT_COLOR = w64.Pixel{ .colors = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF } };
-    var ret: [PRESCALED_CHARACTERS.len]CharacterBitmap = undefined;
-    for (PRESCALED_CHARACTERS, 0..) |char, i| {
-        for (char, 0..) |row, cy| {
-            for (0..CHARACTER_WIDTH, 0..) |column, cx| {
-                @setEvalBranchQuota(100000);
-                const shift = (CHARACTER_WIDTH - 1 - column);
-                const pixel: w64.Pixel = if (row & (1 << shift) != 0)
-                    TEXT_COLOR
-                else
-                    BACKGROUND_COLOR;
-                for (0..SCALE) |dy| {
-                    for (0..SCALE) |dx| {
-                        ret[i].pixels[(cy * SCALE + dy) * CharacterBitmap.WIDTH + (cx * SCALE + dx)] = pixel;
+    bitmaps: []w64.Pixel,
+
+    pub fn init(scale: usize, arena: *toolbox.Arena) Font {
+        const width = scale * CHARACTER_WIDTH;
+        const height = scale * CHARACTER_HEIGHT;
+        const bitmaps = arena.push_slice(w64.Pixel, width * height * PRESCALED_CHARACTERS.len);
+        const ret = Font{
+            .width = width,
+            .height = height,
+            .kerning = width + scale,
+            .bitmaps = bitmaps,
+        };
+        const text_color = w64.Pixel{ .colors = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF } };
+        const background_color = w64.Pixel{ .data = 0 };
+
+        for (PRESCALED_CHARACTERS, 0..) |char, i| {
+            for (char, 0..) |row, cy| {
+                for (0..CHARACTER_WIDTH, 0..) |column, cx| {
+                    const shift: u6 = CHARACTER_WIDTH - 1 - @as(u6, @intCast(column));
+                    const pixel: w64.Pixel = if (row & (@as(usize, 1) << shift) != 0)
+                        text_color
+                    else
+                        background_color;
+                    const bitmap = ret.character_bitmap(i);
+                    for (0..scale) |dy| {
+                        for (0..scale) |dx| {
+                            bitmap[(cy * scale + dy) * width + (cx * scale + dx)] = pixel;
+                        }
                     }
                 }
             }
         }
+        return ret;
     }
 
-    break :b ret;
-};
-const SCALE = b: {
-    if (w64.TARGET_RESOLUTION.width == 1920 and w64.TARGET_RESOLUTION.height == 1080) {
-        break :b 6;
-    } else if (w64.TARGET_RESOLUTION.width == 1280 and w64.TARGET_RESOLUTION.height == 720) {
-        break :b 2; //4;
-    } else {
-        @compileError("Unsupported resolution");
+    pub fn character_bitmap(self: *const Font, index: usize) []w64.Pixel {
+        const start = index * self.width * self.height;
+        const end = start + self.width * self.height;
+        return self.bitmaps[start..end];
     }
 };
-// const SCALE = 1;
 
 const CHARACTER_WIDTH = 5;
 const CHARACTER_HEIGHT = 8;

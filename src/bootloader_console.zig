@@ -72,17 +72,18 @@ fn graphics_println(comptime fmt: []const u8, args: anytype) void {
         }
         const index = byte - ' ';
 
-        const bitmap = w64.CHARACTERS[index];
-        for (0..w64.CharacterBitmap.HEIGHT) |y| {
-            const screen_y = (g_state.cursor_y * w64.CharacterBitmap.HEIGHT) + y;
-            for (0..w64.CharacterBitmap.WIDTH) |x| {
-                const screen_x = (g_state.cursor_x * w64.CharacterBitmap.KERNING) + x;
+        const font = g_state.screen.font;
+        const bitmap = font.character_bitmap(index);
+        for (0..font.height) |y| {
+            const screen_y = (g_state.cursor_y * font.height) + y;
+            for (0..font.width) |x| {
+                const screen_x = (g_state.cursor_x * font.kerning) + x;
                 g_state.screen.back_buffer[screen_y * g_state.screen.stride + screen_x] =
-                    bitmap.pixels[y * w64.CharacterBitmap.WIDTH + x];
+                    bitmap[y * font.width + x];
             }
         }
         g_state.cursor_x += 1;
-        if (g_state.cursor_x >= w64.SCREEN_CHARACTER_RESOLUTION.width) {
+        if (g_state.cursor_x >= g_state.screen.width_in_characters) {
             carriage_return();
         }
     }
@@ -92,22 +93,23 @@ fn graphics_println(comptime fmt: []const u8, args: anytype) void {
 fn carriage_return() void {
     g_state.cursor_x = 0;
     g_state.cursor_y += 1;
-    if (g_state.cursor_y >= w64.SCREEN_CHARACTER_RESOLUTION.height) {
-        for (0..w64.SCREEN_CHARACTER_RESOLUTION.height - 1) |cy| {
-            const srcy = (cy + 1) * w64.CharacterBitmap.HEIGHT;
-            const desty = cy * w64.CharacterBitmap.HEIGHT;
-            const src = g_state.screen.back_buffer[srcy * g_state.screen.stride .. (srcy + w64.CharacterBitmap.HEIGHT - 1) * g_state.screen.stride +
+    const font = g_state.screen.font;
+    if (g_state.cursor_y >= g_state.screen.height_in_characters) {
+        for (0..g_state.screen.height_in_characters - 1) |cy| {
+            const srcy = (cy + 1) * font.height;
+            const desty = cy * font.height;
+            const src = g_state.screen.back_buffer[srcy * g_state.screen.stride .. (srcy + font.height - 1) * g_state.screen.stride +
                 g_state.screen.width];
-            const dest = g_state.screen.back_buffer[desty * g_state.screen.stride .. (desty + w64.CharacterBitmap.HEIGHT - 1) * g_state.screen.stride +
+            const dest = g_state.screen.back_buffer[desty * g_state.screen.stride .. (desty + font.height - 1) * g_state.screen.stride +
                 g_state.screen.width];
             @memcpy(dest, src);
         }
         {
-            const y = (w64.SCREEN_CHARACTER_RESOLUTION.height - 1) * w64.CharacterBitmap.HEIGHT;
+            const y = (g_state.screen.height_in_characters - 1) * font.height;
             const to_blank = g_state.screen.back_buffer[y * g_state.screen.stride ..];
             @memset(to_blank, .{ .data = 0 });
         }
-        g_state.cursor_y = w64.SCREEN_CHARACTER_RESOLUTION.height - 1;
+        g_state.cursor_y = g_state.screen.height_in_characters - 1;
     }
 }
 

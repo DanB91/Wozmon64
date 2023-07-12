@@ -15,6 +15,7 @@ const UEFI_PAGE_SIZE = toolbox.kb(4);
 const KERNEL_STACK_BOTTOM_ADDRESS = 0x1_0000_0000_0000_0000 - w64.MEMORY_PAGE_SIZE;
 
 const ZSGraphicsOutputProtocol = std.os.uefi.protocols.GraphicsOutputProtocol;
+const ZSGraphicsOutputProtocolMode = std.os.uefi.protocols.GraphicsOutputProtocolMode;
 const ZSGraphicsOutputModeInformation = std.os.uefi.protocols.GraphicsOutputModeInformation;
 const ZSUEFIStatus = std.os.uefi.Status;
 const ZSMemoryDescriptor = std.os.uefi.tables.MemoryDescriptor;
@@ -92,7 +93,7 @@ pub fn main() noreturn {
 
     var gop: *ZSGraphicsOutputProtocol = undefined;
     var found_valid_resolution = false;
-    var screen: w64.Screen = b: {
+    var gop_mode: ZSGraphicsOutputProtocolMode = b: {
         var status = bs.locateProtocol(&ZSGraphicsOutputProtocol.guid, null, @ptrCast(&gop));
         if (status != ZSUEFIStatus.Success) {
             fatal("Cannot init graphics system! Error locating GOP protocol: {}", .{status});
@@ -108,50 +109,42 @@ pub fn main() noreturn {
             }
         }
         var mode: u32 = 0;
-        for (0..gop.mode.max_mode + 1) |i| {
-            mode = @intCast(i);
-            var gop_mode_info: *ZSGraphicsOutputModeInformation = undefined;
-            var size_of_info: usize = 0;
-            const query_mode_status = gop.queryMode(mode, &size_of_info, &gop_mode_info);
-            if (query_mode_status == .Success) {
-                toolbox.assert(
-                    @sizeOf(ZSGraphicsOutputModeInformation) == size_of_info,
-                    "Wrong size for GOP mode info. Expected: {}, Actual: {}",
-                    .{
-                        @sizeOf(ZSGraphicsOutputModeInformation),
-                        size_of_info,
-                    },
-                );
-                if (gop_mode_info.horizontal_resolution == w64.TARGET_RESOLUTION.width and
-                    gop_mode_info.vertical_resolution == w64.TARGET_RESOLUTION.height)
-                {
-                    found_valid_resolution = true;
-                    status = gop.setMode(mode);
-                    if (status != ZSUEFIStatus.Success) {
-                        fatal("Cannot init graphics system! Error setting mode {}: {}", .{ mode, status });
+        resolution_loop: for (w64.SUPPORTED_RESOLUTIONS) |resolution| {
+            for (0..gop.mode.max_mode + 1) |i| {
+                mode = @intCast(i);
+                var gop_mode_info: *ZSGraphicsOutputModeInformation = undefined;
+                var size_of_info: usize = 0;
+                const query_mode_status = gop.queryMode(mode, &size_of_info, &gop_mode_info);
+                if (query_mode_status == .Success) {
+                    toolbox.assert(
+                        @sizeOf(ZSGraphicsOutputModeInformation) == size_of_info,
+                        "Wrong size for GOP mode info. Expected: {}, Actual: {}",
+                        .{
+                            @sizeOf(ZSGraphicsOutputModeInformation),
+                            size_of_info,
+                        },
+                    );
+                    if (gop_mode_info.horizontal_resolution == resolution.width and
+                        gop_mode_info.vertical_resolution == resolution.height)
+                    {
+                        found_valid_resolution = true;
+                        status = gop.setMode(mode);
+                        if (status != ZSUEFIStatus.Success) {
+                            fatal("Cannot init graphics system! Error setting mode {}: {}", .{ mode, status });
+                        }
+                        break :resolution_loop;
                     }
-                    break;
                 }
             }
         }
         if (!found_valid_resolution) {
+            //TODO fill out supported resolutions
             fatal(
-                "Failed to set screen to required resolution: {}x{}",
-                .{
-                    w64.TARGET_RESOLUTION.width,
-                    w64.TARGET_RESOLUTION.height,
-                },
+                "Failed to set screen to supported resolution!",
+                .{},
             );
         }
-
-        const frame_buffer = @as([*]w64.Pixel, @ptrFromInt(gop.mode.frame_buffer_base))[0 .. gop.mode.frame_buffer_size / @sizeOf(w64.Pixel)];
-        break :b .{
-            .frame_buffer = frame_buffer,
-            .back_buffer = undefined,
-            .width = gop.mode.info.horizontal_resolution,
-            .height = gop.mode.info.vertical_resolution,
-            .stride = gop.mode.info.pixels_per_scan_line,
-        };
+        break :b gop.mode.*;
     };
 
     var rsdp = b: {
@@ -277,8 +270,15 @@ pub fn main() noreturn {
     };
     var global_arena = toolbox.Arena.init_with_buffer(kernel_start_context_bytes);
 
-    //allocate back buffer
-    screen.back_buffer = global_arena.push_slice_clear(w64.Pixel, screen.frame_buffer.len);
+    //set up screen
+    const frame_buffer = @as([*]w64.Pixel, @ptrFromInt(gop_mode.frame_buffer_base))[0 .. gop_mode.frame_buffer_size / @sizeOf(w64.Pixel)];
+    const screen = w64.Screen.init(
+        gop_mode.info.horizontal_resolution,
+        gop_mode.info.vertical_resolution,
+        gop_mode.info.pixels_per_scan_line,
+        frame_buffer,
+        &global_arena,
+    );
     console.init_graphics_console(screen);
     println("back buffer len: {}, screen len: {}", .{ screen.back_buffer.len, screen.frame_buffer.len });
 
@@ -478,6 +478,10 @@ pub fn main() noreturn {
     };
     kernel_start_context.screen.back_buffer = physical_to_virtual_pointer(
         kernel_start_context.screen.back_buffer,
+        mapped_memory.items(),
+    );
+    kernel_start_context.screen.font.bitmaps = physical_to_virtual_pointer(
+        kernel_start_context.screen.font.bitmaps,
         mapped_memory.items(),
     );
     kernel_start_context.screen.frame_buffer = physical_to_virtual_pointer(
