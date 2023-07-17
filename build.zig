@@ -56,8 +56,7 @@ pub fn build(b: *std.Build) !void {
 
     //run bootloader in qemu
     {
-        const run_step = b.step("run", "Run Wozmon64 in qemu");
-        const qemu_command = b.addSystemCommand(&[_][]const u8{
+        const args_array = [_][]const u8{
             "qemu-system-x86_64",
             "-smp",
             "cores=4",
@@ -80,10 +79,24 @@ pub fn build(b: *std.Build) !void {
             "nvme,drive=nvme0,serial=deadbeaf1",
             "-drive",
             "format=raw,file=fat:rw:zig-out/img/,if=none,id=nvme0",
-        });
+            "-device",
+            "qemu-xhci,id=xhci",
+            "-device",
+            "usb-kbd,bus=xhci.0",
+            "-device",
+            "usb-mouse,bus=xhci.0",
+        };
+        const run_step = b.step("run", "Run Wozmon64 in qemu");
+        const qemu_command = b.addSystemCommand(&args_array);
         qemu_command.step.dependOn(b.getInstallStep());
 
         run_step.dependOn(&qemu_command.step);
+
+        const debug_step = b.step("debug", "Debug Wozmon64 in qemu");
+        const debug_qemu_command = b.addSystemCommand(&(args_array ++ [_][]const u8{ "-S", "-s" }));
+        debug_qemu_command.step.dependOn(b.getInstallStep());
+
+        debug_step.dependOn(&debug_qemu_command.step);
     }
 
     //clean step

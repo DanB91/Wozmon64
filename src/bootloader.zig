@@ -161,6 +161,12 @@ pub fn main() noreturn {
             fatal("Cannot find rsdp!", .{});
         }
     };
+    const root_xsdt_address = (@as(u64, rsdp.xsdt_address_high) << 32) |
+        @as(u64, rsdp.xsdt_address_low);
+    const root_xsdt: *amd64.XSDT = @ptrFromInt(root_xsdt_address);
+    if (!amd64.is_xsdt_checksum_valid(root_xsdt)) {
+        fatal("Root XSDT checksum failed!", .{});
+    }
 
     var number_of_enabled_processors: usize = 0;
     {
@@ -295,7 +301,7 @@ pub fn main() noreturn {
     //0xFFFFFF7F 80000000 - 0xFFFFFF7F BFFFFFFF   Page Mapping Level 2 (Page Directories)
     //0xFFFFFF7F BFC00000 - 0xFFFFFF7F BFDFFFFF   Page Mapping Level 3 (PDPTs / Page-Directory-Pointer Tables)
     //0xFFFFFF7F BFDFE000 - 0xFFFFFF7F BFDFEFFF   Page Mapping Level 4 (PML4)
-    pml4_table.entries[510] = .{
+    pml4_table.entries[w64.PAGE_TABLE_RECURSIVE_OFFSET] = .{
         .present = true,
         .write_enable = true,
         .ring3_accessible = false,
@@ -392,6 +398,7 @@ pub fn main() noreturn {
                 .ACPIReclaimMemory,
                 .MemoryMappedIO,
                 .MemoryMappedIOPortSpace,
+                .ReservedMemoryType,
                 => {
                     map_virtual_memory(
                         desc.physical_start,
@@ -404,7 +411,11 @@ pub fn main() noreturn {
                     );
                 },
                 else => {
-                    //TODO?
+                    println("Not mapping: address {X}, number of pages: {}, type: {}", .{
+                        desc.physical_start,
+                        desc.number_of_pages,
+                        desc.type,
+                    });
                 },
             }
         }
@@ -443,7 +454,7 @@ pub fn main() noreturn {
         //multiples of 100 or more.  we want to make sure we are getting the most
         //accurate clock rate
         for (0..10) |_| {
-            tmp = calculaute_tsc_mhz(rsdp, &bootloader_arena);
+            tmp = calculaute_tsc_mhz(root_xsdt, &bootloader_arena);
             if (tmp % 10 == 0) {
                 break :b tmp;
             }
@@ -468,10 +479,11 @@ pub fn main() noreturn {
 
     var kernel_start_context = global_arena.push(w64.KernelStartContext);
     kernel_start_context.* = .{
-        .rsdp = physical_to_virtual_pointer(rsdp, mapped_memory.items()),
+        .root_xsdt = physical_to_virtual_pointer(root_xsdt, mapped_memory.items()),
         .screen = screen,
         .mapped_memory = physical_to_virtual_pointer(mapped_memory.items(), mapped_memory.items()),
         .free_conventional_memory = physical_to_virtual_pointer(free_conventional_memory.items(), mapped_memory.items()),
+        .next_free_virtual_address = next_free_virtual_address,
         .global_arena = global_arena,
         .application_processor_contexts = application_processor_contexts,
         .tsc_mhz = tsc_mhz,
@@ -580,6 +592,7 @@ fn bootstrap_application_processors(arena: *toolbox.Arena, number_of_processors:
                 var context = arena.push_clear(w64.BootloaderProcessorContext);
                 context.* = .{
                     .is_booted = false,
+                    .processor_id = 0,
                     .pml4_table_address = cr3,
                     .application_processor_kernel_entry_data = null,
                 };
@@ -1067,19 +1080,44 @@ fn physical_to_virtual_pointer(physical: anytype, mappings: []w64.VirtualMemoryM
     else
         @intFromPtr(physical);
 
-    const virtual_address = w64.physical_to_virtual(
-        physical_address,
-        mappings,
-    ) catch
-        fatal(
-        "Failed to find mapping for physical address: {X}",
-        .{physical_address},
-    );
+    const virtual_address = b: {
+        for (mappings) |mapping| {
+            if (physical_address >= mapping.physical_address and
+                physical_address < mapping.physical_address + mapping.size)
+            {
+                const offset = physical_address - mapping.physical_address;
+                break :b mapping.virtual_address + offset;
+            }
+        } else {
+            fatal(
+                "Failed to find mapping for physical address: {X}",
+                .{physical_address},
+            );
+        }
+    };
+
     if (pointer_size == .Slice) {
         const Child = @typeInfo(T).Pointer.child;
         return @as([*]Child, @ptrFromInt(virtual_address))[0..physical.len];
     }
     return @as(T, @ptrFromInt(virtual_address));
+}
+pub fn find_acpi_table(root_xsdt: *const amd64.XSDT, comptime name: []const u8, comptime Table: type) !*align(4) const Table {
+    const entries = amd64.root_xsdt_entries(root_xsdt);
+    const table_xsdt = b: {
+        for (entries) |physical_address| {
+            const entry: *const amd64.XSDT = @ptrFromInt(physical_address);
+            if (std.mem.eql(u8, name, entry.signature[0..])) {
+                if (!amd64.is_xsdt_checksum_valid(entry)) {
+                    return error.ACPITableBadChecksum;
+                }
+                break :b entry;
+            }
+        } else {
+            return error.ACPITableNotFound;
+        }
+    };
+    return @ptrCast(table_xsdt);
 }
 
 //TODO:
@@ -1195,28 +1233,12 @@ fn physical_to_virtual_pointer(physical: anytype, mappings: []w64.VirtualMemoryM
 //     }
 //     uefiprintln("Started {} cores", .{cores_started});
 // }
-fn calculaute_tsc_mhz(rsdp: *const amd64.ACPI2RSDP, arena: *toolbox.Arena) u64 {
+fn calculaute_tsc_mhz(root_xsdt: *const amd64.XSDT, arena: *toolbox.Arena) u64 {
     const save_point = arena.create_save_point();
     defer arena.restore_save_point(save_point);
 
-    const root_xsdt_address = (@as(u64, rsdp.xsdt_address_high) << 32) |
-        @as(u64, rsdp.xsdt_address_low);
-    const root_xsdt: *amd64.XSDT = @ptrFromInt(root_xsdt_address);
-    if (!amd64.is_xsdt_checksum_valid(root_xsdt)) {
-        fatal("Root XSDT checksum failed!", .{});
-    }
-
-    const entries = amd64.root_xsdt_entries(root_xsdt);
-    const hpet_xsdt = b: {
-        for (entries) |entry| {
-            if (std.mem.eql(u8, "HPET", entry.signature[0..])) {
-                break :b entry;
-            }
-        } else {
-            fatal("Timer device not found!", .{});
-        }
-    };
-    const hpet = @as(*const amd64.HPET, @ptrCast(hpet_xsdt));
+    const hpet = find_acpi_table(root_xsdt, "HPET", amd64.HPET) catch
+        fatal("Cannot find HPET ACPI table", .{});
     const tick_rate = hpet.capabilities_and_id().counter_clock_period;
     const nano_seconds_per_tick: f64 = @as(f64, @floatFromInt(tick_rate)) / 1000000;
     println("tick_rate: {}, nano_seconds_per_tick: {d:.4}", .{ tick_rate, nano_seconds_per_tick });
@@ -1430,6 +1452,7 @@ export fn processor_entry(
 ) callconv(.C) noreturn {
     @setAlignStack(256);
     println("processor id: {}", .{processor_id});
+    @atomicStore(u64, &context.processor_id, processor_id, .SeqCst);
     @atomicStore(bool, &context.is_booted, true, .SeqCst);
     while (true) {
         if (context.application_processor_kernel_entry_data) |entry_data| {
@@ -1437,14 +1460,12 @@ export fn processor_entry(
                 \\movq %[cr3_data], %%cr3
                 \\movq %[stack_virtual_address], %%rsp
                 \\movq %[ksc_addr], %%rdi
-                \\movq %[processor_id], %%rsi
                 \\jmpq *%[entry_point] #here we go!!!!
                 \\ud2 #this instruction is for searchability in the disassembly
                 :
                 : [cr3_data] "r" (entry_data.cr3),
                   [stack_virtual_address] "r" (entry_data.rsp),
                   [ksc_addr] "r" (@intFromPtr(entry_data.start_context_data)),
-                  [processor_id] "r" (processor_id),
                   [entry_point] "r" (@intFromPtr(entry_data.entry)),
                 : "rdi", "rsp", "cr3"
             );

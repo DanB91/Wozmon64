@@ -5,6 +5,7 @@ const std = @import("std");
 const toolbox = @import("toolbox");
 const w64 = @import("wozmon64.zig");
 const amd64 = @import("amd64.zig");
+const pcie = @import("drivers/pcie.zig");
 
 const CURSOR_BLINK_TIME_MS = 500;
 const ENABLE_SERIAL = true;
@@ -16,9 +17,10 @@ const KernelState = struct {
     cursor_char: u8,
 
     screen: w64.Screen,
-    rsdp: *amd64.ACPI2RSDP,
-    mapped_memory: []w64.VirtualMemoryMapping,
+    root_xsdt: *const amd64.XSDT,
+    mapped_memory: toolbox.RandomRemovalLinkedList(w64.VirtualMemoryMapping),
     free_conventional_memory: []w64.ConventionalMemoryDescriptor,
+    next_free_virtual_address: u64,
     application_processor_contexts: []*w64.BootloaderProcessorContext,
 
     global_arena: toolbox.Arena,
@@ -45,7 +47,6 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
         const scratch_arena_bytes =
             kernel_start_context.global_arena.push_bytes_aligned(w64.KERNEL_SCRATCH_ARENA_SIZE, 8);
         w64.Time.init(kernel_start_context.tsc_mhz);
-
         g_state = .{
             .cursor_x = 0,
             .cursor_y = 0,
@@ -53,14 +54,22 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
             .cursor_char = '@',
 
             .screen = kernel_start_context.screen,
-            .rsdp = kernel_start_context.rsdp,
-            .mapped_memory = kernel_start_context.mapped_memory,
+            .root_xsdt = kernel_start_context.root_xsdt,
+            .mapped_memory = undefined,
             .free_conventional_memory = kernel_start_context.free_conventional_memory,
+            .next_free_virtual_address = kernel_start_context.next_free_virtual_address,
             .application_processor_contexts = kernel_start_context.application_processor_contexts,
 
             .global_arena = kernel_start_context.global_arena,
             .frame_arena = toolbox.Arena.init_with_buffer(frame_arena_bytes),
             .scratch_arena = toolbox.Arena.init_with_buffer(scratch_arena_bytes),
+        };
+        g_state.mapped_memory = b: {
+            var mapped_memory = toolbox.RandomRemovalLinkedList(w64.VirtualMemoryMapping).init(&g_state.global_arena);
+            for (kernel_start_context.mapped_memory) |mapping| {
+                _ = mapped_memory.append(mapping);
+            }
+            break :b mapped_memory;
         };
     }
     //set up GDT
@@ -72,11 +81,10 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
     //set up memory map
     {
         //TODO
-        //map recursive mapping
-        //0xFFFFFF00 00000000 - 0xFFFFFF7F FFFFFFFF   Page Mapping Level 1 (Page Tables)
-        //0xFFFFFF7F 80000000 - 0xFFFFFF7F BFFFFFFF   Page Mapping Level 2 (Page Directories)
-        //0xFFFFFF7F BFC00000 - 0xFFFFFF7F BFDFFFFF   Page Mapping Level 3 (PDPTs / Page-Directory-Pointer Tables)
-        //0xFFFFFF7F BFDFE000 - 0xFFFFFF7F BFDFEFFF   Page Mapping Level 4 (PML4)
+        // 0xFFFFFF7F BFDFE000 to 0xFFFFFF7F BFDFEFFF - mapping of all page map level 4 entries in the address space
+        // 0xFFFFFF7F BFC00000 to 0xFFFFFF7F BFDFFFFF - mapping of all page directory pointer table entries in the address space
+        // 0xFFFFFF7F 80000000 to 0xFFFFFF7F BFFFFFFF - mapping of all page directory entries in the address space
+        // 0xFFFFFF00 00000000 to 0xFFFFFF7F FFFFFFFF - mapping of all page table entries in the address space
 
     }
 
@@ -87,7 +95,113 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
 
     //set up drivers
     {
-        //TODO:
+        const pcie_devices = pcie.enumerate_devices(
+            kernel_start_context.root_xsdt,
+            &g_state.global_arena,
+            g_state.mapped_memory,
+        );
+        for (pcie_devices) |*dev| {
+            switch (dev.header) {
+                .EndPointDevice => |end_point_device_header| {
+                    if (end_point_device_header.class_code == pcie.MASS_STORAGE_CLASS_CODE and
+                        end_point_device_header.subclass_code == pcie.NVME_SUBCLASS_CODE)
+                    {
+                        const physical_bar0 = end_point_device_header.effective_bar0();
+                        const nvme_bar0 = w64.physical_to_virtual(physical_bar0, g_state.mapped_memory) catch b: {
+                            break :b w64.map_mmio_physical_address(
+                                physical_bar0,
+                                &g_state.next_free_virtual_address,
+                                1,
+                                &g_state.global_arena,
+                                &g_state.mapped_memory,
+                            );
+                        };
+                        _ = nvme_bar0;
+
+                        print_serial("Found NVMe drive!", .{});
+
+                        //TODO:
+                        // const nvme_device = nvme.init(dev, nvme_bar0) catch |e| {
+                        //     //TODO specify the nvme device id
+                        //     panic_fmt("Error initing NVMe device: {}", .{e});
+                        // };
+
+                        // const main_disk_serial_number = "osdisk";
+                        // if (utils.are_slices_equal(nvme_device.serial_number[0..main_disk_serial_number.len], main_disk_serial_number)) {
+                        //     osdisk_opt = nvme_device;
+                        // }
+                    } else if (end_point_device_header.class_code == pcie.SERIAL_BUS_CLASS_CODE and
+                        end_point_device_header.subclass_code == pcie.USB_SUBCLASS_CODE)
+                    {
+                        switch (end_point_device_header.programming_interface_byte) {
+                            pcie.EHCI_PROGRAMING_INTERFACE => {
+                                //TODO
+                                //const physical_bar0 = end_point_device_header.effective_bar0();
+                                //const virtual_bar0 = kernel_memory.map_physical_pages_to_next_free_address(physical_bar0, 2) catch |e| {
+                                //panic_fmt("Error mapping BAR0 address of USB EHCI controller {x}. Error: {} ", .{ end_point_device_header.bar0, e });
+                                //};
+                                //usb_ehci.init(virtual_bar0);
+                            },
+                            pcie.XHCI_PROGRAMING_INTERFACE => {
+                                print_serial("Found USB xHCI controller!", .{});
+                                const physical_bar0 = end_point_device_header.effective_bar0();
+                                const virtual_bar0 = w64.physical_to_virtual(physical_bar0, g_state.mapped_memory) catch b: {
+                                    break :b w64.map_mmio_physical_address(
+                                        physical_bar0,
+                                        &g_state.next_free_virtual_address,
+                                        1,
+                                        &g_state.global_arena,
+                                        &g_state.mapped_memory,
+                                    );
+                                };
+                                _ = virtual_bar0;
+                                //         var usb_controller = usb_xhci.init(dev, virtual_bar0) catch |e| {
+                                //             panic_fmt("Could not init xHCI adapter: {}", .{e});
+                                //         };
+                                //         usb_xhci_controllers.append(usb_controller) catch {
+                                //             println("Too many XHCI controllers!", .{});
+                                //             continue;
+                                //         };
+
+                                //         for (usb_controller.devices) |device| {
+                                //             if (!device.is_connected) {
+                                //                 continue;
+                                //             }
+                                //             for (device.interfaces) |*interface| {
+                                //                 switch (interface.class_data) {
+                                //                     .HID => |hid_data| {
+                                //                         usb_hid.init_hid_interface(interface, hid_data.hid_descriptor) catch |e| {
+                                //                             println("Error initing HID interface for device {}: {}!", .{ device.product, e });
+                                //                             //TODO: remove
+                                //                             switch (e) {
+                                //                                 error.HIDDeviceDoesNotHaveAnInterruptEndpoint, error.ReportIDsNotYetSupported => {},
+                                //                                 else => {
+                                //                                     amd64.hang();
+                                //                                 },
+                                //                             }
+                                //                         };
+                                //                     },
+                                //                     else => {},
+                                //                 }
+                                //             }
+                                //         }
+                            },
+                            else => {
+                                print_serial("USB controller: {}", .{end_point_device_header});
+                            },
+                        }
+                    }
+                },
+                .BridgeDevice => |_| {
+                    //TODO
+                },
+                else => {
+                    //TODO error handle
+                },
+            }
+        }
+
+        print_serial("PCIE devices len: {}", .{pcie_devices.len});
     }
 
     @memset(g_state.screen.back_buffer, .{ .data = 0 });

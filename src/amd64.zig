@@ -1,4 +1,6 @@
 const toolbox = @import("toolbox");
+const std = @import("std");
+const w64 = @import("wozmon64.zig");
 
 pub const ACPI2RSDP = extern struct {
     signature: [8]u8,
@@ -25,13 +27,43 @@ pub const XSDT = extern struct {
     creator_rev: u32,
 };
 
-pub fn root_xsdt_entries(xsdt: *const XSDT) []align(4) *const XSDT {
+pub fn root_xsdt_entries(xsdt: *const XSDT) []align(4) u64 {
     const len = (xsdt.length - @sizeOf(XSDT)) / 8;
     const ret = @as(
-        [*]align(4) *const XSDT,
+        [*]align(4) u64,
         @ptrFromInt(@intFromPtr(xsdt) + @sizeOf(XSDT)),
     )[0..len];
     return ret;
+}
+
+pub fn find_acpi_table(
+    root_xsdt: *const XSDT,
+    memory_mappings: toolbox.RandomRemovalLinkedList(w64.VirtualMemoryMapping),
+    comptime name: []const u8,
+    comptime Table: type,
+) !*align(4) const Table {
+    const entries = root_xsdt_entries(root_xsdt);
+    const table_xsdt = b: {
+        for (entries) |physical_address| {
+            const entry: *const XSDT = @ptrFromInt(
+                w64.physical_to_virtual(physical_address, memory_mappings) catch
+                    toolbox.panic(
+                    "Could not find mapping for ACPI physical address: {X}",
+                    .{physical_address},
+                ),
+            );
+            if (std.mem.eql(u8, name, entry.signature[0..])) {
+                if (!is_xsdt_checksum_valid(entry)) {
+                    return error.ACPITableBadChecksum;
+                }
+                break :b entry;
+            }
+        } else {
+            return error.ACPITableNotFound;
+        }
+    };
+
+    return @ptrCast(table_xsdt);
 }
 
 pub fn is_xsdt_checksum_valid(xsdt: *const XSDT) bool {
@@ -132,6 +164,46 @@ pub const HPET = extern struct {
 
     pub fn main_counter(self: *const HPET) *u64 {
         return @ptrFromInt(self.address + 0xF0);
+    }
+};
+
+pub const VirtualAddress2MBPage = packed struct(u64) {
+    page_offset: u21,
+    pd_offset: u9,
+    pdp_offset: u9,
+    pml4t_offset: u9,
+    signed_bits: u16,
+
+    pub fn make_canonical(self: *VirtualAddress2MBPage) void {
+        self.signed_bits = if (self.pml4t_offset & 0x100 != 0) 0xFFFF_FFFF else 0;
+    }
+
+    pub fn to(self: VirtualAddress2MBPage, comptime T: type) T {
+        if (comptime @typeInfo(T) != .Pointer) {
+            @compileError("Cannot convert an address into a non pointer value!");
+        }
+        return self.to(T);
+    }
+};
+
+pub const VirtualAddress4KBPage = packed struct(u64) {
+    page_offset: u12,
+    pt_offset: u9,
+    pd_offset: u9,
+    pdp_offset: u9,
+    pml4t_offset: u9,
+    signed_bits: u16,
+
+    pub fn make_canonical(self: *VirtualAddress4KBPage) void {
+        self.signed_bits = if (self.pml4t_offset & 0x100 != 0) 0xFFFF_FFFF else 0;
+    }
+
+    pub fn to(self: VirtualAddress4KBPage, comptime T: type) T {
+        if (comptime @typeInfo(T) != .Pointer) {
+            @compileError("Cannot convert an address into a non pointer value!");
+        }
+        const address_number: u64 = @bitCast(self);
+        return @ptrFromInt(address_number);
     }
 };
 

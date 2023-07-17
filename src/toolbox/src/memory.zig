@@ -71,7 +71,7 @@ pub fn PoolAllocator(comptime T: type) type {
     };
 }
 pub const Arena = struct {
-    pos: usize,
+    pos: usize = 0,
     data: []u8,
 
     pub const SavePoint = usize;
@@ -85,7 +85,6 @@ pub const Arena = struct {
             }
         }
         var ret = Arena{
-            .pos = 0,
             .data = os_allocate_memory(size),
         };
         return ret;
@@ -95,7 +94,6 @@ pub const Arena = struct {
             toolbox.panic("Arena size must be a power of 2! But was: {}", .{buffer.len});
         }
         var ret = Arena{
-            .pos = 0,
             .data = buffer[0..],
         };
         return ret;
