@@ -1,4 +1,5 @@
 const toolbox = @import("toolbox.zig");
+const root = @import("root");
 
 pub const PAGE_SIZE = switch (toolbox.THIS_PLATFORM) {
     .MacOS => toolbox.kb(16),
@@ -97,6 +98,16 @@ pub const Arena = struct {
             .data = buffer[0..],
         };
         return ret;
+    }
+
+    pub fn create_arena_from_arena(self: *Arena, comptime size: usize) Arena {
+        comptime {
+            if (!toolbox.is_power_of_2(size)) {
+                @compileError("Arena size must be a power of 2!");
+            }
+        }
+        const data = self.push_bytes_aligned(size, 8);
+        return .{ .data = data };
     }
 
     pub fn push(arena: *Arena, comptime T: type) *T {
@@ -205,6 +216,8 @@ const platform_allocate_memory = switch (toolbox.THIS_PLATFORM) {
     .MacOS => macos_allocate_memory,
     .BoksOS => boksos_allocate_memory,
     .Playdate => playdate_allocate_memory,
+    .Wozmon64 => root.allocate_memory,
+    else => @compileError("OS not supported"),
 };
 const platform_free_memory = switch (toolbox.THIS_PLATFORM) {
     //.MacOS => unix_free_memory,

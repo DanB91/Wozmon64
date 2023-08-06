@@ -3,9 +3,14 @@
 
 const std = @import("std");
 const toolbox = @import("toolbox");
+const page_allocator = @import("page_allocator.zig");
 const w64 = @import("wozmon64.zig");
 const amd64 = @import("amd64.zig");
 const pcie = @import("drivers/pcie.zig");
+//const usb_hid = @import("drivers/usb_hid.zig");
+//const usb_xhci = @import("drivers/usb_xhci.zig");
+
+pub const THIS_PLATFORM = toolbox.Platform.Wozmon64;
 
 const CURSOR_BLINK_TIME_MS = 500;
 const ENABLE_SERIAL = true;
@@ -19,20 +24,43 @@ const KernelState = struct {
     screen: w64.Screen,
     root_xsdt: *const amd64.XSDT,
     mapped_memory: toolbox.RandomRemovalLinkedList(w64.VirtualMemoryMapping),
-    free_conventional_memory: []w64.ConventionalMemoryDescriptor,
-    next_free_virtual_address: u64,
     application_processor_contexts: []*w64.BootloaderProcessorContext,
+    next_free_virtual_address: u64,
 
     global_arena: toolbox.Arena,
     frame_arena: toolbox.Arena,
     scratch_arena: toolbox.Arena,
 };
+
+const StackUnwinder = struct {
+    fp: usize,
+    fn init() StackUnwinder {
+        return .{ .fp = @frameAddress() };
+    }
+    fn next(self: *StackUnwinder) ?usize {
+        if (self.fp == 0 or !toolbox.is_aligned_to(self.fp, @alignOf(usize))) {
+            return null;
+        }
+        const ip = @as(*const usize, @ptrFromInt(self.fp + @sizeOf(usize))).*;
+        const new_fp = @as(*const usize, @ptrFromInt(self.fp)).*;
+        if (new_fp <= self.fp) {
+            return null;
+        }
+        self.fp = new_fp;
+        return ip;
+    }
+};
+
 pub fn panic(msg: []const u8, error_return_trace: ?*std.builtin.StackTrace, ret_addr: ?usize) noreturn {
     //not set
     _ = ret_addr;
     _ = error_return_trace;
 
     echo_str8("{s}", .{msg});
+    var it = StackUnwinder.init();
+    while (it.next()) |address| {
+        echo_str8("At {X}\n", .{address});
+    }
     @memcpy(g_state.screen.frame_buffer, g_state.screen.back_buffer);
     toolbox.hang();
 }
@@ -56,7 +84,6 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
             .screen = kernel_start_context.screen,
             .root_xsdt = kernel_start_context.root_xsdt,
             .mapped_memory = undefined,
-            .free_conventional_memory = kernel_start_context.free_conventional_memory,
             .next_free_virtual_address = kernel_start_context.next_free_virtual_address,
             .application_processor_contexts = kernel_start_context.application_processor_contexts,
 
@@ -71,6 +98,15 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
             }
             break :b mapped_memory;
         };
+        page_allocator.init(
+            &g_state.global_arena,
+            &g_state.next_free_virtual_address,
+            kernel_start_context.free_conventional_memory,
+            &g_state.mapped_memory,
+        );
+        //TODO: remove
+        g_state.frame_arena = toolbox.Arena.init(w64.KERNEL_FRAME_ARENA_SIZE);
+        g_state.scratch_arena = toolbox.Arena.init(w64.KERNEL_SCRATCH_ARENA_SIZE);
     }
     //set up GDT
     set_up_gdt();
@@ -81,10 +117,6 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
     //set up memory map
     {
         //TODO
-        // 0xFFFFFF7F BFDFE000 to 0xFFFFFF7F BFDFEFFF - mapping of all page map level 4 entries in the address space
-        // 0xFFFFFF7F BFC00000 to 0xFFFFFF7F BFDFFFFF - mapping of all page directory pointer table entries in the address space
-        // 0xFFFFFF7F 80000000 to 0xFFFFFF7F BFFFFFFF - mapping of all page directory entries in the address space
-        // 0xFFFFFF00 00000000 to 0xFFFFFF7F FFFFFFFF - mapping of all page table entries in the address space
 
     }
 
@@ -116,9 +148,8 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
                                 &g_state.mapped_memory,
                             );
                         };
-                        _ = nvme_bar0;
 
-                        print_serial("Found NVMe drive!", .{});
+                        print_serial("Found NVMe drive! Virtual BAR0: {X}", .{nvme_bar0});
 
                         //TODO:
                         // const nvme_device = nvme.init(dev, nvme_bar0) catch |e| {
@@ -143,7 +174,6 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
                                 //usb_ehci.init(virtual_bar0);
                             },
                             pcie.XHCI_PROGRAMING_INTERFACE => {
-                                print_serial("Found USB xHCI controller!", .{});
                                 const physical_bar0 = end_point_device_header.effective_bar0();
                                 const virtual_bar0 = w64.physical_to_virtual(physical_bar0, g_state.mapped_memory) catch b: {
                                     break :b w64.map_mmio_physical_address(
@@ -154,7 +184,7 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
                                         &g_state.mapped_memory,
                                     );
                                 };
-                                _ = virtual_bar0;
+                                print_serial("Found USB xHCI controller! Virtual BAR0: {X}", .{virtual_bar0});
                                 //         var usb_controller = usb_xhci.init(dev, virtual_bar0) catch |e| {
                                 //             panic_fmt("Could not init xHCI adapter: {}", .{e});
                                 //         };
@@ -208,12 +238,8 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
 
     echo_welcome_line("*** Wozmon64 ***\n", .{});
     {
-        var bytes_free: usize = 0;
-        for (g_state.free_conventional_memory) |desc| {
-            bytes_free += desc.number_of_pages * w64.MEMORY_PAGE_SIZE;
-        }
         echo_welcome_line("{} bytes free *** {} processors free *** {} x {} pixels free\n", .{
-            bytes_free,
+            page_allocator.pages_free() * w64.MEMORY_PAGE_SIZE,
             g_state.application_processor_contexts.len,
             g_state.screen.width,
             g_state.screen.height,
@@ -227,6 +253,11 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
     }
 
     toolbox.hang();
+}
+pub inline fn allocate_memory(n: usize) []u8 {
+    return page_allocator.allocate(
+        @divTrunc(toolbox.align_up(n, w64.MEMORY_PAGE_SIZE), w64.MEMORY_PAGE_SIZE),
+    );
 }
 
 pub fn draw_cursor() void {
@@ -463,4 +494,12 @@ fn print_serial(comptime fmt: []const u8, args: anytype) void {
             : "rax", "rdx"
         );
     }
+    asm volatile (
+        \\mov $0x3F8, %%dx
+        \\mov %[char], %%al
+        \\outb %%al, %%dx
+        :
+        : [char] "r" (@as(u8, '\n')),
+        : "rax", "rdx"
+    );
 }

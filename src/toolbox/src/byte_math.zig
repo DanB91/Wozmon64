@@ -18,9 +18,9 @@ pub inline fn align_up(n: anytype, alignment: usize) @TypeOf(n) {
         if (@typeInfo(@TypeOf(n)) != .Int) {
             @compileError("align_up only supports ints!");
         }
-        if (!(alignment == 0 or (alignment & (alignment - 1)) == 0)) {
-            @compileError("Alignment is not a power of 2!");
-        }
+        // if (!(alignment == 0 or (alignment & (alignment - 1)) == 0)) {
+        //     @compileError("Alignment is not a power of 2!");
+        // }
     }
 
     if (alignment == 0 or (n % alignment) == 0) {

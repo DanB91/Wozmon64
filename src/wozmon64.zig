@@ -1,6 +1,7 @@
 //Copyright Daniel Bokser 2023
 //See LICENSE file for permissible source code usage
 
+const std = @import("std");
 const toolbox = @import("toolbox");
 const amd64 = @import("amd64.zig");
 const kernel = @import("kernel.zig");
@@ -9,6 +10,7 @@ const bitmaps = @import("bitmaps.zig");
 pub const MEMORY_PAGE_SIZE = toolbox.mb(2);
 pub const MMIO_PAGE_SIZE = toolbox.kb(4);
 pub const PAGE_TABLE_PAGE_SIZE = toolbox.kb(4);
+pub const PHYSICAL_ADDRESS_ALIGNMENT = toolbox.kb(4);
 
 pub const KERNEL_GLOBAL_ARENA_SIZE = toolbox.mb(512);
 pub const KERNEL_FRAME_ARENA_SIZE = toolbox.mb(4);
@@ -30,8 +32,8 @@ pub const Pixel = packed union {
 };
 
 pub const SUPPORTED_RESOLUTIONS = [_]struct { width: u32, height: u32 }{
-    // .{ .width = 3840, .height = 2160 },
-    // .{ .width = 1920, .height = 1080 },
+    .{ .width = 3840, .height = 2160 },
+    .{ .width = 1920, .height = 1080 },
     .{ .width = 1280, .height = 720 },
 };
 
@@ -154,29 +156,160 @@ pub fn virtual_to_physical(
             virtual_address < mapping.virtual_address + mapping.size)
         {
             const offset = virtual_address - mapping.virtual_address;
-            return mapping.virtual_address + offset;
+            return mapping.physical_address + offset;
         }
     }
     return error.VirtualAddressNotMapped;
 }
-
-//returns mapped address
-pub fn map_mmio_physical_address(
+pub fn map_conventional_memory_physical_address(
     starting_physical_address: u64,
-    starting_virtual_address: *u64, //increments to next free address
+    starting_virtual_address_ptr: *u64, //increments to next free address
     number_of_pages: usize,
     arena: *toolbox.Arena,
     mappings: *toolbox.RandomRemovalLinkedList(VirtualMemoryMapping),
 ) u64 {
-    const out_virtual_address = starting_virtual_address;
+    starting_virtual_address_ptr.* = toolbox.align_up(starting_virtual_address_ptr.*, MEMORY_PAGE_SIZE);
+    const starting_virtual_address = starting_virtual_address_ptr.*;
     for (0..number_of_pages) |i| {
-        const virtual_address = starting_virtual_address.* + i * MMIO_PAGE_SIZE;
-        const physical_address = starting_physical_address + i * MMIO_PAGE_SIZE;
+        const virtual_address = starting_virtual_address + i * MEMORY_PAGE_SIZE;
+        const physical_address = starting_physical_address + i * MEMORY_PAGE_SIZE;
 
-        defer out_virtual_address.* += MMIO_PAGE_SIZE;
+        defer starting_virtual_address_ptr.* += MEMORY_PAGE_SIZE;
 
         toolbox.assert(
-            virtual_address > 0xFFFF_FF7F_FFFF_FFFF or virtual_address < 0xFFFF_FF00_0000_0000,
+            virtual_address > 0xFFFF_FF7F_FFFF_FFFF or virtual_address < 0xFFFF_FF80_0000_0000,
+            "Mapping page table virtual address! physical address: {x}, virtual_address: {x}",
+            .{ virtual_address, physical_address },
+        );
+        // if (comptime toolbox.IS_DEBUG) {
+        //     var it = mappings.iterator();
+        //     while (it.next()) |mapping| {
+        //         toolbox.assert(
+        //             virtual_address + MEMORY_PAGE_SIZE <= mapping.virtual_address or virtual_address >= mapping.virtual_address + mapping.size,
+        //             "Mapping virtual address {X}, when it is already mapped to {X}!",
+        //             .{ virtual_address, mapping.physical_address },
+        //         );
+        //     }
+        // }
+        const vaddr_bits: amd64.VirtualAddress2MBPage = @bitCast(virtual_address);
+        const pdp = b: {
+            const pml4t = get_pml4t();
+            const entry = &pml4t.entries[vaddr_bits.pml4t_offset];
+            if (!entry.present) {
+                const pdp = arena.push_clear(amd64.PageDirectoryPointer);
+                const page_physical_address = virtual_to_physical(
+                    @intFromPtr(pdp),
+                    mappings,
+                ) catch unreachable;
+                entry.* = .{
+                    .present = true,
+                    .write_enable = true,
+                    .ring3_accessible = false,
+                    .writethrough = false,
+                    .cache_disable = false,
+                    .pdp_base_address = @intCast(page_physical_address >> 24),
+                    .no_execute = true,
+                };
+                break :b pdp;
+            } else {
+                break :b get_pdp(virtual_address);
+            }
+        };
+        const pd = b: {
+            const entry = &pdp.entries[vaddr_bits.pdp_offset];
+            if (!entry.present) {
+                const pd = arena.push_clear(amd64.PageDirectory2MB);
+                const page_physical_address = virtual_to_physical(
+                    @intFromPtr(pd),
+                    mappings,
+                ) catch unreachable;
+                entry.* = .{
+                    .present = true,
+                    .write_enable = true,
+                    .ring3_accessible = false,
+                    .writethrough = false,
+                    .cache_disable = false,
+                    .pd_base_address = @intCast(page_physical_address >> 24),
+                    .no_execute = true,
+                };
+                break :b pd;
+            } else {
+                break :b get_pd_2mb(virtual_address);
+            }
+        };
+        //Finally map the actual page
+        {
+            const entry = &pd.entries[vaddr_bits.pd_offset];
+            if (!entry.present) {
+                entry.* = .{
+                    .present = true,
+                    .write_enable = true,
+                    .ring3_accessible = false,
+                    .pat_bit_0 = 0, //cachable
+                    .pat_bit_1 = 0,
+                    .pat_bit_2 = 0,
+                    .global = (virtual_address & (1 << 63)) != 0,
+                    .physical_page_base_address = @intCast(physical_address >> 24),
+                    .memory_protection_key = 0,
+                    .no_execute = false,
+                };
+            } else {
+                toolbox.assert(
+                    entry.must_be_one == 1,
+                    "Expected 2MB PD, but was 4KB! Attempted virtual address to map: {X}",
+                    .{virtual_address},
+                );
+                toolbox.assert(
+                    false,
+                    "Trying map {x} to {x}, which is already mapped to {x}. Starting virtual address: {x}. Entry: {}",
+                    .{
+                        virtual_address,
+                        physical_address,
+                        entry.physical_page_base_address,
+                        starting_virtual_address,
+                        entry.*,
+                    },
+                );
+            }
+        }
+    }
+    return starting_virtual_address;
+}
+
+fn print_serial(comptime fmt: []const u8, args: anytype) void {
+    var buf: [1024]u8 = undefined;
+    const to_print = std.fmt.bufPrint(&buf, fmt ++ "\n", args) catch unreachable;
+
+    for (to_print) |byte| {
+        asm volatile (
+            \\mov $0x3F8, %%dx
+            \\mov %[char], %%al
+            \\outb %%al, %%dx
+            :
+            : [char] "r" (byte),
+            : "rax", "rdx"
+        );
+    }
+}
+//returns mapped address
+pub fn map_mmio_physical_address(
+    starting_physical_address: u64,
+    starting_virtual_address_ptr: *u64, //increments to next free address
+    number_of_pages: usize,
+    arena: *toolbox.Arena,
+    mappings: *toolbox.RandomRemovalLinkedList(VirtualMemoryMapping),
+) u64 {
+    starting_virtual_address_ptr.* = toolbox.align_up(starting_virtual_address_ptr.*, MMIO_PAGE_SIZE);
+
+    const starting_virtual_address = starting_virtual_address_ptr.*;
+    for (0..number_of_pages) |i| {
+        const virtual_address = starting_virtual_address + i * MMIO_PAGE_SIZE;
+        const physical_address = starting_physical_address + i * MMIO_PAGE_SIZE;
+
+        defer starting_virtual_address_ptr.* += MMIO_PAGE_SIZE;
+
+        toolbox.assert(
+            virtual_address > 0xFFFF_FF7F_FFFF_FFFF or virtual_address < 0xFFFF_FF80_0000_0000,
             "Mapping page table virtual address! physical address: {x}, virtual_address: {x}",
             .{ virtual_address, physical_address },
         );
@@ -245,6 +378,11 @@ pub fn map_mmio_physical_address(
                 };
                 break :b pt;
             } else {
+                toolbox.assert(
+                    entry.must_be_zero == 0,
+                    "Expected 4KB PD, but was 2MB! Attempted virtual address to map: {X}",
+                    .{virtual_address},
+                );
                 break :b get_pt(virtual_address);
             }
         };
@@ -272,13 +410,13 @@ pub fn map_mmio_physical_address(
                         virtual_address,
                         physical_address,
                         entry.physical_page_base_address,
-                        starting_virtual_address.*,
+                        starting_virtual_address,
                     },
                 );
             }
         }
     }
-    return starting_virtual_address.*;
+    return starting_virtual_address;
 }
 
 pub fn get_pml4t() *amd64.PageMappingLevel4Table {
@@ -319,7 +457,7 @@ pub fn get_pd_4kb(virtual_address: u64) *amd64.PageDirectory4KB {
 }
 pub fn get_pd_2mb(virtual_address: u64) *amd64.PageDirectory2MB {
     const vaddr_bits: amd64.VirtualAddress4KBPage = @bitCast(virtual_address);
-    const pdp_address = amd64.VirtualAddress4KBPage{
+    const pd_address = amd64.VirtualAddress4KBPage{
         .signed_bits = 0xFFFF,
         .pml4t_offset = PAGE_TABLE_RECURSIVE_OFFSET,
         .pdp_offset = PAGE_TABLE_RECURSIVE_OFFSET,
@@ -327,11 +465,11 @@ pub fn get_pd_2mb(virtual_address: u64) *amd64.PageDirectory2MB {
         .pt_offset = vaddr_bits.pdp_offset,
         .page_offset = 0,
     };
-    return pdp_address.to(*amd64.PageDirectory2MB);
+    return pd_address.to(*amd64.PageDirectory2MB);
 }
 pub fn get_pt(virtual_address: u64) *amd64.PageTable {
     const vaddr_bits: amd64.VirtualAddress4KBPage = @bitCast(virtual_address);
-    const pd_address = amd64.VirtualAddress4KBPage{
+    const pt_address = amd64.VirtualAddress4KBPage{
         .signed_bits = 0xFFFF,
         .pml4t_offset = PAGE_TABLE_RECURSIVE_OFFSET,
         .pdp_offset = vaddr_bits.pml4t_offset,
@@ -339,14 +477,13 @@ pub fn get_pt(virtual_address: u64) *amd64.PageTable {
         .pt_offset = vaddr_bits.pd_offset,
         .page_offset = 0,
     };
-    return pd_address.to(*amd64.PageTable);
+    return pt_address.to(*amd64.PageTable);
 }
 
 pub fn pdp_from_virtual_address(virtual_address: u64) *amd64.PageDirectoryPointer {
     const pdp_index = (virtual_address >> (12 + 9 + 9)) & 0xFF8;
     return @ptrFromInt(0xFFFF_FF7F_BF80_0000 | (pdp_index << (12 + 9 + 9)));
 }
-
 pub const Time = struct {
     ticks: i64,
 

@@ -19,6 +19,7 @@ const ZSGraphicsOutputProtocolMode = std.os.uefi.protocols.GraphicsOutputProtoco
 const ZSGraphicsOutputModeInformation = std.os.uefi.protocols.GraphicsOutputModeInformation;
 const ZSUEFIStatus = std.os.uefi.Status;
 const ZSMemoryDescriptor = std.os.uefi.tables.MemoryDescriptor;
+const ZSLoadedImageProtocol = std.os.uefi.protocols.LoadedImageProtocol;
 
 const SmallUEFIMemoryDescriptor = ZSMemoryDescriptor;
 
@@ -59,11 +60,12 @@ pub fn panic(msg: []const u8, error_return_trace: ?*std.builtin.StackTrace, ret_
     _ = ret_addr;
     _ = error_return_trace;
 
-    println("PANIC: {s}", .{msg});
+    println("{s}", .{msg});
     toolbox.hang();
 }
 
 var bootloader_arena_buffer = [_]u8{0} ** toolbox.kb(512);
+var image_load_address: usize = 0;
 pub fn main() noreturn {
     //disable interrupts
     asm volatile ("cli");
@@ -80,13 +82,14 @@ pub fn main() noreturn {
 
     var bootloader_arena = toolbox.Arena.init_with_buffer(&bootloader_arena_buffer);
 
-    //calibrate rdtscp
+    //get image load address
     {
-        // var timestamp_protocol: *tsp.TimestampProtocol = undefined;
-        // var status = bs.locateProtocol(&tsp.TimestampProtocol.guid, null, @ptrCast(&timestamp_protocol));
-        // if (status != ZSUEFIStatus.Success) {
-        //     fatal("Cannot init timing system! Error locating Timestamp Protocol: {}", .{status});
-        // }
+        var loaded_image_protocol: *ZSLoadedImageProtocol = undefined;
+        var status = bs.handleProtocol(std.os.uefi.handle, &ZSLoadedImageProtocol.guid, @ptrCast(&loaded_image_protocol));
+        if (status != ZSUEFIStatus.Success) {
+            fatal("Cannot init timing system! Error locating Loaded Image Protocol: {}", .{status});
+        }
+        image_load_address = @intFromPtr(loaded_image_protocol.image_base);
     }
 
     //graphics
@@ -346,20 +349,20 @@ pub fn main() noreturn {
         //need to identity map the start_kernel function since we load CR3 there
         //kernel should unmap this
         {
-            var virtual_address = @intFromPtr(&start_kernel);
+            var address = toolbox.align_down(@intFromPtr(&start_kernel), w64.MMIO_PAGE_SIZE);
             map_virtual_memory(
-                @intFromPtr(&start_kernel),
-                &virtual_address,
+                address,
+                &address,
                 1,
                 .ToBeUnmapped,
                 &mapped_memory,
                 pml4_table,
                 &global_arena,
             );
-            virtual_address = @intFromPtr(&processor_entry);
+            address = toolbox.align_down(@intFromPtr(&processor_entry), w64.MMIO_PAGE_SIZE);
             map_virtual_memory(
-                @intFromPtr(&processor_entry),
-                &virtual_address,
+                address,
+                &address,
                 1,
                 .ToBeUnmapped,
                 &mapped_memory,
@@ -483,7 +486,7 @@ pub fn main() noreturn {
         .screen = screen,
         .mapped_memory = physical_to_virtual_pointer(mapped_memory.items(), mapped_memory.items()),
         .free_conventional_memory = physical_to_virtual_pointer(free_conventional_memory.items(), mapped_memory.items()),
-        .next_free_virtual_address = next_free_virtual_address,
+        .next_free_virtual_address = toolbox.align_up(next_free_virtual_address, w64.MEMORY_PAGE_SIZE),
         .global_arena = global_arena,
         .application_processor_contexts = application_processor_contexts,
         .tsc_mhz = tsc_mhz,
@@ -785,8 +788,20 @@ fn map_virtual_memory(
         .ConventionalMemory, .FrameBufferMemory => w64.MEMORY_PAGE_SIZE,
         .MMIOMemory, .ToBeUnmapped => w64.MMIO_PAGE_SIZE,
     };
+
+    toolbox.assert(
+        toolbox.is_aligned_to(physical_address, w64.PHYSICAL_ADDRESS_ALIGNMENT),
+        "Physical address {X}, must be aligned to {}",
+        .{ physical_address, w64.PHYSICAL_ADDRESS_ALIGNMENT },
+    );
+    toolbox.assert(
+        toolbox.is_aligned_to(physical_address, w64.PHYSICAL_ADDRESS_ALIGNMENT),
+        "Virtual address {X}, must be aligned to {}",
+        .{ physical_address, page_size },
+    );
+
     virtual_address.* = toolbox.align_down(virtual_address.*, page_size);
-    const aligned_physical_address = toolbox.align_down(physical_address, page_size);
+    const aligned_physical_address = physical_address; //toolbox.align_down(physical_address, page_size);
 
     const size = number_of_pages * page_size;
     //NOTE proabably unnecessary.  We map the kernel in 2 different virtual addresses and that's fine
@@ -891,6 +906,12 @@ fn map_virtual_memory(
                         .no_execute = false,
                     };
                 } else {
+                    if (pde.must_be_one != 1) {
+                        toolbox.panic(
+                            "Expected 2MB but was 4KB for virtual address: {X}, type: {}",
+                            .{ virtual_address.*, memory_type },
+                        );
+                    }
                     const mapped_paddr = @as(u64, pde.physical_page_base_address) << 21;
                     if (mapped_paddr != aligned_physical_address) {
                         toolbox.panic("Trying to map {X} to {X}, when it is already mapped to {X}!", .{
@@ -925,6 +946,12 @@ fn map_virtual_memory(
                         .no_execute = false,
                     };
                 } else {
+                    if (pde.must_be_one != 1) {
+                        toolbox.panic(
+                            "Expected 2MB but was 4KB for virtual address: {X}, type: {}",
+                            .{ virtual_address.*, memory_type },
+                        );
+                    }
                     const mapped_paddr = @as(u64, pde.physical_page_base_address) << 21;
                     if (mapped_paddr != aligned_physical_address) {
                         toolbox.panic("Trying to map {X} to {X}, when it is already mapped to {X}!", .{
@@ -963,6 +990,13 @@ fn map_virtual_memory(
                         ),
                         .no_execute = false,
                     };
+                } else {
+                    if (pde.must_be_zero != 0) {
+                        toolbox.panic(
+                            "Expected 4KB but was 2MB for virtual address: {X}, type: {}",
+                            .{ virtual_address.*, memory_type },
+                        );
+                    }
                 }
                 var pt = @as(
                     *amd64.PageTable,
