@@ -32,6 +32,7 @@ pub const Platform = enum {
     BoksOS,
     Wozmon64,
     UEFI,
+    WASM,
 };
 pub const THIS_PLATFORM = if (@hasDecl(root, "THIS_PLATFORM"))
     root.THIS_PLATFORM

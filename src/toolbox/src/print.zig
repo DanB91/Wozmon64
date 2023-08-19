@@ -1,6 +1,7 @@
 const std = @import("std");
 const toolbox = @import("toolbox.zig");
 
+extern fn write(filedes: c_int, buffer: ?*anyopaque, len: usize) isize;
 pub fn println_string(string: toolbox.String8) void {
     platform_print_to_console("{s}", .{string.bytes}, false);
 }
@@ -19,7 +20,7 @@ pub fn panic(comptime fmt: []const u8, args: anytype) noreturn {
 
 fn platform_print_to_console(comptime fmt: []const u8, args: anytype, comptime is_err: bool) void {
     switch (comptime toolbox.THIS_PLATFORM) {
-        .MacOS => {
+        .WASM, .MacOS => {
             var buffer = [_]u8{0} ** 2048;
             //TODO dynamically allocate buffer for printing.  use std.fmt.count to count the size
 
@@ -28,7 +29,7 @@ fn platform_print_to_console(comptime fmt: []const u8, args: anytype, comptime i
             else
                 std.fmt.bufPrint(&buffer, fmt ++ "\n", args) catch return;
 
-            _ = std.os.write(if (is_err) 2 else 1, to_print) catch {};
+            _ = write(if (is_err) 2 else 1, to_print.ptr, to_print.len);
         },
         .Playdate => {
             var buffer = [_]u8{0} ** 128;

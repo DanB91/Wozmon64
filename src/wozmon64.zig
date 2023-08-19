@@ -103,7 +103,7 @@ pub const ApplicationProcessorKernelStartContext = struct {};
 pub const KernelStartContext = struct {
     screen: Screen,
     root_xsdt: *const amd64.XSDT,
-    global_arena: toolbox.Arena,
+    global_arena: *toolbox.Arena,
     mapped_memory: []VirtualMemoryMapping,
     free_conventional_memory: []ConventionalMemoryDescriptor,
     next_free_virtual_address: u64,

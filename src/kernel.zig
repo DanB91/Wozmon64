@@ -27,9 +27,9 @@ const KernelState = struct {
     application_processor_contexts: []*w64.BootloaderProcessorContext,
     next_free_virtual_address: u64,
 
-    global_arena: toolbox.Arena,
-    frame_arena: toolbox.Arena,
-    scratch_arena: toolbox.Arena,
+    global_arena: *toolbox.Arena,
+    frame_arena: *toolbox.Arena,
+    scratch_arena: *toolbox.Arena,
 };
 
 const StackUnwinder = struct {
@@ -92,14 +92,14 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
             .scratch_arena = toolbox.Arena.init_with_buffer(scratch_arena_bytes),
         };
         g_state.mapped_memory = b: {
-            var mapped_memory = toolbox.RandomRemovalLinkedList(w64.VirtualMemoryMapping).init(&g_state.global_arena);
+            var mapped_memory = toolbox.RandomRemovalLinkedList(w64.VirtualMemoryMapping).init(g_state.global_arena);
             for (kernel_start_context.mapped_memory) |mapping| {
                 _ = mapped_memory.append(mapping);
             }
             break :b mapped_memory;
         };
         page_allocator.init(
-            &g_state.global_arena,
+            g_state.global_arena,
             &g_state.next_free_virtual_address,
             kernel_start_context.free_conventional_memory,
             &g_state.mapped_memory,
@@ -129,7 +129,7 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
     {
         const pcie_devices = pcie.enumerate_devices(
             kernel_start_context.root_xsdt,
-            &g_state.global_arena,
+            g_state.global_arena,
             g_state.mapped_memory,
         );
         for (pcie_devices) |*dev| {
@@ -144,7 +144,7 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
                                 physical_bar0,
                                 &g_state.next_free_virtual_address,
                                 1,
-                                &g_state.global_arena,
+                                g_state.global_arena,
                                 &g_state.mapped_memory,
                             );
                         };
@@ -180,7 +180,7 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
                                         physical_bar0,
                                         &g_state.next_free_virtual_address,
                                         1,
-                                        &g_state.global_arena,
+                                        g_state.global_arena,
                                         &g_state.mapped_memory,
                                     );
                                 };
@@ -283,7 +283,7 @@ pub fn draw_cursor() void {
     }
 }
 pub fn echo_welcome_line(comptime fmt: []const u8, args: anytype) void {
-    const scratch_arena = &g_state.scratch_arena;
+    const scratch_arena = g_state.scratch_arena;
     const arena_save_point = scratch_arena.create_save_point();
     defer scratch_arena.restore_save_point(arena_save_point);
 
@@ -304,7 +304,7 @@ pub fn echo_welcome_line(comptime fmt: []const u8, args: anytype) void {
 }
 
 pub fn echo_str8(comptime fmt: []const u8, args: anytype) void {
-    const scratch_arena = &g_state.scratch_arena;
+    const scratch_arena = g_state.scratch_arena;
     const arena_save_point = scratch_arena.create_save_point();
     defer scratch_arena.restore_save_point(arena_save_point);
 
@@ -479,7 +479,7 @@ fn invalid_opcode_handler() callconv(.Interrupt) void {
 
 //for debugging within print routines
 fn print_serial(comptime fmt: []const u8, args: anytype) void {
-    const scratch_arena = &g_state.scratch_arena;
+    const scratch_arena = g_state.scratch_arena;
     const arena_save_point = scratch_arena.create_save_point();
     defer scratch_arena.restore_save_point(arena_save_point);
     const to_print = toolbox.str8fmt(fmt, args, scratch_arena);

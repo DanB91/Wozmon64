@@ -11,7 +11,7 @@ const PageAllocatorState = struct {
     free_conventional_memory: []w64.ConventionalMemoryDescriptor,
     virtual_address_mappings: *toolbox.RandomRemovalLinkedList(w64.VirtualMemoryMapping),
     next_free_virtual_address: *u64,
-    arena: toolbox.Arena,
+    arena: *toolbox.Arena,
 };
 
 var g_state: PageAllocatorState = undefined;
@@ -23,7 +23,7 @@ pub fn init(
     virtual_address_mappings: *toolbox.RandomRemovalLinkedList(w64.VirtualMemoryMapping),
 ) void {
     g_state.arena = global_arena.create_arena_from_arena(toolbox.kb(128));
-    const arena = &g_state.arena;
+    const arena = g_state.arena;
     const allocated_blocks = toolbox.HashMap(u64, PageAllocatorBlock)
         .init(128, arena);
     const free_blocks = toolbox.RandomRemovalLinkedList(PageAllocatorBlock).init(arena);
@@ -76,7 +76,7 @@ pub fn allocate(number_of_pages: usize) []u8 {
                     desc.physical_address,
                     g_state.next_free_virtual_address,
                     number_of_pages,
-                    &g_state.arena,
+                    g_state.arena,
                     g_state.virtual_address_mappings,
                 );
                 //  2) update descriptor

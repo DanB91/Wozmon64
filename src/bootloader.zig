@@ -60,7 +60,7 @@ pub fn panic(msg: []const u8, error_return_trace: ?*std.builtin.StackTrace, ret_
     _ = ret_addr;
     _ = error_return_trace;
 
-    println("{s}", .{msg});
+    println("PANIC: {s}", .{msg});
     toolbox.hang();
 }
 
@@ -286,12 +286,12 @@ pub fn main() noreturn {
         gop_mode.info.vertical_resolution,
         gop_mode.info.pixels_per_scan_line,
         frame_buffer,
-        &global_arena,
+        global_arena,
     );
     console.init_graphics_console(screen);
     println("back buffer len: {}, screen len: {}", .{ screen.back_buffer.len, screen.frame_buffer.len });
 
-    var kernel_parse_result = parse_kernel_elf(&global_arena) catch |e| {
+    var kernel_parse_result = parse_kernel_elf(global_arena) catch |e| {
         //TODO: proper fatal function
         println("failed to parse kernel elf: {}", .{e});
         toolbox.hang();
@@ -317,9 +317,9 @@ pub fn main() noreturn {
     };
 
     var free_conventional_memory = toolbox.DynamicArray(w64.ConventionalMemoryDescriptor)
-        .init(&global_arena, memory_map.len);
+        .init(global_arena, memory_map.len);
     var mapped_memory = toolbox.DynamicArray(w64.VirtualMemoryMapping)
-        .init(&global_arena, memory_map.len);
+        .init(global_arena, memory_map.len);
     {
 
         //map kernel global arena
@@ -330,7 +330,7 @@ pub fn main() noreturn {
             .ConventionalMemory,
             &mapped_memory,
             pml4_table,
-            &global_arena,
+            global_arena,
         );
 
         //map frame buffer
@@ -343,7 +343,7 @@ pub fn main() noreturn {
             .FrameBufferMemory,
             &mapped_memory,
             pml4_table,
-            &global_arena,
+            global_arena,
         );
 
         //need to identity map the start_kernel function since we load CR3 there
@@ -357,7 +357,7 @@ pub fn main() noreturn {
                 .ToBeUnmapped,
                 &mapped_memory,
                 pml4_table,
-                &global_arena,
+                global_arena,
             );
             address = toolbox.align_down(@intFromPtr(&processor_entry), w64.MMIO_PAGE_SIZE);
             map_virtual_memory(
@@ -367,7 +367,7 @@ pub fn main() noreturn {
                 .ToBeUnmapped,
                 &mapped_memory,
                 pml4_table,
-                &global_arena,
+                global_arena,
             );
         }
 
@@ -381,7 +381,7 @@ pub fn main() noreturn {
                 .ConventionalMemory,
                 &mapped_memory,
                 pml4_table,
-                &global_arena,
+                global_arena,
             );
         }
 
@@ -410,7 +410,7 @@ pub fn main() noreturn {
                         .MMIOMemory,
                         &mapped_memory,
                         pml4_table,
-                        &global_arena,
+                        global_arena,
                     );
                 },
                 else => {
@@ -457,7 +457,7 @@ pub fn main() noreturn {
         //multiples of 100 or more.  we want to make sure we are getting the most
         //accurate clock rate
         for (0..10) |_| {
-            tmp = calculaute_tsc_mhz(root_xsdt, &bootloader_arena);
+            tmp = calculaute_tsc_mhz(root_xsdt, bootloader_arena);
             if (tmp % 10 == 0) {
                 break :b tmp;
             }
@@ -468,7 +468,7 @@ pub fn main() noreturn {
     println("tsc mhz: {}", .{tsc_mhz});
 
     const application_processor_contexts =
-        bootstrap_application_processors(&global_arena, number_of_enabled_processors);
+        bootstrap_application_processors(global_arena, number_of_enabled_processors);
 
     //wait for application processors to come up
     {
@@ -507,6 +507,10 @@ pub fn main() noreturn {
         kernel_start_context.global_arena.data,
         mapped_memory.items(),
     );
+    kernel_start_context.global_arena = physical_to_virtual_pointer(
+        kernel_start_context.global_arena,
+        mapped_memory.items(),
+    );
     {
         //Set up PAT for write combining
         var pat: amd64.PageAttributeTable = .{
@@ -539,7 +543,7 @@ fn start_kernel(
         \\movq %[cr3_data], %%cr3
         \\movq %[stack_virtual_address], %%rsp
         \\movq %[ksc_addr], %%rdi
-        \\jmpq *%[entry_point] #here we go!!!!
+        \\call *%[entry_point] #here we go!!!!
         \\ud2 #this instruction is for searchability in the disassembly
         :
         : [cr3_data] "r" (@intFromPtr(pml4_table)),

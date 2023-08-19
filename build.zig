@@ -35,6 +35,7 @@ pub fn build(b: *std.Build) !void {
             .root_source_file = .{ .path = "src/bootloader.zig" },
             .target = uefi_target,
             .optimize = optimize,
+            .main_pkg_path = .{ .path = "." },
         });
         //exe.addAssemblyFile("src/processor_bootstrap_program.s");
         exe.addModule("toolbox", toolbox_module);
@@ -42,11 +43,11 @@ pub fn build(b: *std.Build) !void {
         exe.red_zone = false;
 
         //allows @embedFile("../zig-out/bin/kernel.elf") to work
-        exe.setMainPkgPath(".");
+        //exe.setMainPkgPath(".");
         exe.step.dependOn(&kernel_step.step);
 
-        const kernel_install_step = b.addInstallArtifact(kernel_step);
-        const bootloader_install_step = b.addInstallArtifact(exe);
+        const kernel_install_step = b.addInstallArtifact(kernel_step, .{});
+        const bootloader_install_step = b.addInstallArtifact(exe, .{});
         bootloader_install_step.dest_dir = .{ .custom = "img/EFI/BOOT/" };
         bootloader_install_step.step.dependOn(&kernel_install_step.step);
 

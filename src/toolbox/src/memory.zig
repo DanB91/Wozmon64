@@ -6,6 +6,7 @@ pub const PAGE_SIZE = switch (toolbox.THIS_PLATFORM) {
     .UEFI, .BoksOS => toolbox.kb(4), //boksos.PAGE_SIZE,
     .Playdate => 4, //Playdate is embeded, so no concept of pages, but everything should be 4-byte aligned
     .Wozmon64 => toolbox.mb(2),
+    .WASM => toolbox.kb(64),
 };
 
 pub fn PoolAllocator(comptime T: type) type {
@@ -72,11 +73,12 @@ pub fn PoolAllocator(comptime T: type) type {
     };
 }
 pub const Arena = struct {
-    pos: usize = 0,
     data: []u8,
+    pos: usize = 0,
+    to_free: ?[]u8 = null,
 
     pub const SavePoint = usize;
-    pub fn init(comptime size: usize) Arena {
+    pub fn init(comptime size: usize) *Arena {
         comptime {
             if (size < PAGE_SIZE) {
                 @compileError("Arena size must be at least " ++ PAGE_SIZE ++ " bytes!");
@@ -85,29 +87,41 @@ pub const Arena = struct {
                 @compileError("Arena size must be a power of 2!");
             }
         }
-        var ret = Arena{
-            .data = os_allocate_memory(size),
+        const data = os_allocate_memory(size);
+        var tmp_arena = Arena{
+            .data = data,
+            .pos = 0,
+        };
+        const ret = tmp_arena.push(Arena);
+        ret.* = .{
+            .data = data[tmp_arena.pos..],
+            .to_free = data,
         };
         return ret;
     }
-    pub fn init_with_buffer(buffer: []u8) Arena {
+    pub fn init_with_buffer(buffer: []u8) *Arena {
         if (!toolbox.is_power_of_2(buffer.len)) {
             toolbox.panic("Arena size must be a power of 2! But was: {}", .{buffer.len});
         }
-        var ret = Arena{
-            .data = buffer[0..],
+        var tmp_arena = Arena{
+            .data = buffer,
+            .pos = 0,
+        };
+        const ret = tmp_arena.push(Arena);
+        ret.* = .{
+            .data = buffer[tmp_arena.pos..],
         };
         return ret;
     }
 
-    pub fn create_arena_from_arena(self: *Arena, comptime size: usize) Arena {
+    pub fn create_arena_from_arena(self: *Arena, comptime size: usize) *Arena {
         comptime {
             if (!toolbox.is_power_of_2(size)) {
                 @compileError("Arena size must be a power of 2!");
             }
         }
         const data = self.push_bytes_aligned(size, 8);
-        return .{ .data = data };
+        return init_with_buffer(data);
     }
 
     pub fn push(arena: *Arena, comptime T: type) *T {
@@ -140,9 +154,11 @@ pub const Arena = struct {
         toolbox.panic("Arena allocation request is too large. {} bytes", .{n});
     }
     pub fn push_bytes_aligned(arena: *Arena, n: usize, comptime alignment: usize) []align(alignment) u8 {
-        const aligned_pos = toolbox.align_up(arena.pos, alignment);
+        const data_address = @intFromPtr(arena.data.ptr);
+        const aligned_address = toolbox.align_up(arena.pos + data_address, alignment);
+        const aligned_pos = aligned_address - data_address;
         const total_size = (aligned_pos - arena.pos) + n;
-        if (arena.data.len - arena.pos >= total_size) {
+        if (arena.data.len - aligned_pos >= total_size) {
             var ret: []align(alignment) u8 = @alignCast(arena.data[aligned_pos .. aligned_pos + n]);
             arena.pos += total_size;
             toolbox.assert(toolbox.is_aligned_to(@intFromPtr(ret.ptr), alignment), "Alignment of return value is wrong!", .{});
@@ -180,7 +196,9 @@ pub const Arena = struct {
     }
 
     pub fn free_all(arena: *Arena) void {
-        os_free_memory(arena.data);
+        if (arena.to_free) |data| {
+            os_free_memory(data);
+        }
     }
 };
 
@@ -217,6 +235,7 @@ const platform_allocate_memory = switch (toolbox.THIS_PLATFORM) {
     .BoksOS => boksos_allocate_memory,
     .Playdate => playdate_allocate_memory,
     .Wozmon64 => root.allocate_memory,
+    .WASM => posix_allocate_memory,
     else => @compileError("OS not supported"),
 };
 const platform_free_memory = switch (toolbox.THIS_PLATFORM) {
@@ -225,6 +244,7 @@ const platform_free_memory = switch (toolbox.THIS_PLATFORM) {
     .MacOS => macos_free_memory,
     .BoksOS => boksos_free_memory,
     .Playdate => playdate_free_memory,
+    .WASM => posix_free_memory,
 };
 
 ///Unix functions
@@ -279,7 +299,7 @@ fn posix_allocate_memory(n: usize) []u8 {
     //const data_opt = calloc(1, n);
     const data_opt = malloc(n);
     if (data_opt) |data| {
-        return data[0..n];
+        return @as([*]u8, @ptrCast(data))[0..n];
     }
     toolbox.panic("Error allocating {} bytes of OS memory.", .{n});
 }
