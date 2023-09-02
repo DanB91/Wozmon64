@@ -1,21 +1,16 @@
+const std = @import("std");
 const toolbox = @import("toolbox");
 //TODO remove in favor of toolbox
-const utils = @import("../common/utils.zig");
-const fmt = @import("../common/print.zig");
 const kernel = @import("../kernel.zig");
-const amd64 = @import("../common/ring0/amd64.zig");
-const kernel_memory = @import("../memory.zig");
+const amd64 = @import("../amd64.zig");
 const pcie = @import("pcie.zig");
 const usb_hid = @import("usb_hid.zig");
-const static_assert = utils.static_assert;
-const print_to_serial = fmt.print_to_serial;
-
-fn println(comptime format: []const u8, args: anytype) void {
-    if (true) fmt.println(format, args);
-}
+const w64 = @import("../wozmon64.zig");
+const static_assert = toolbox.static_assert;
+const print_serial = kernel.print_serial;
 
 pub const Controller = struct {
-    arena: kernel_memory.GrowingPhysicalArena,
+    arena: *toolbox.Arena,
     capability_registers: *volatile CapabilityRegisters,
     interrupter_registers: *volatile InterrupterRegisters,
     operational_registers: *volatile OperationalRegisters,
@@ -35,7 +30,7 @@ pub const EventResponseMap = toolbox.HashMap(usize, PollEventRingResult);
 pub const Device = struct {
     is_connected: bool,
     parent_controller: *Controller,
-    arena: kernel_memory.GrowingPhysicalArena,
+    arena: *toolbox.Arena,
     port_registers: *volatile PortRegisters,
     input_context: InputContext,
     output_device_context: DeviceContext,
@@ -48,7 +43,7 @@ pub const Device = struct {
     number_of_unsupported_interfaces: usize,
     endpoint_0_transfer_ring: *TransferRing,
     interfaces: []Interface,
-    hid_devices: utils.FixedCapacityList(usb_hid.USBHIDDevice, 64),
+    hid_devices: toolbox.RandomRemovalLinkedList(usb_hid.USBHIDDevice),
 };
 
 pub const Interface = struct {
@@ -231,7 +226,6 @@ const EndpointContext = packed struct {
     reserved5: u32,
     reserved6: u32,
 };
-
 const CapabilityRegisters = packed struct {
     length: u8, //CAPLENGTH
     reserved: u8,
@@ -313,7 +307,7 @@ const OperationalRegisters = extern struct {
     device_context_base_address_array_pointer_hi: u32 align(4), //DCBAAP 0x34
     config: u32 align(4), //CONFIG 0x38
 
-    const USBCommand = packed struct { //USBCMD
+    const USBCommand = packed struct(u32) { //USBCMD
         run_stop: bool, //R/S - read-write
         host_controller_reset: bool, //HCRST - read-write
         interrupter_enable: bool, //INTE - read-write
@@ -331,7 +325,7 @@ const OperationalRegisters = extern struct {
         vtio_enable: bool, //VTIOE read-write
         reserved3: u15,
     };
-    const USBStatus = packed struct { //USBSTS
+    const USBStatus = packed struct(u32) { //USBSTS
         hc_halted: bool, //HCH - read-only
         reserved1: u1,
         host_system_error: bool, //HSE - write "true" to clear
@@ -351,7 +345,7 @@ const OperationalRegisters = extern struct {
         reserved6: u16,
     };
 
-    const Config = packed struct { //CONFIG
+    const Config = packed struct(u32) { //CONFIG
         max_slots_enabled: u8, //MaxSlotsEn read-write
         u3_entry_enable: bool, //U3E read-write
         configuration_information_enable: bool, //CIE - read-write
@@ -788,45 +782,45 @@ const DeviceSlotDataStructures = struct {
     endpoint_0_transfer_ring_physical_address: u64,
 };
 comptime {
-    static_assert(@offsetOf(OperationalRegisters, "status") == 4);
-    static_assert(@sizeOf(CapabilityRegisters) == 32);
-    static_assert(@sizeOf(OperationalRegisters) == 60);
-    static_assert(@sizeOf(InterrupterRegisters) == 32);
-    static_assert(@sizeOf(TransferRequestBlock) == 16);
-    static_assert(@sizeOf(USBDeviceDescriptor) == 18);
-    //static_assert(@sizeOf(USBDeviceDescriptor) == 8);
-    static_assert(@sizeOf(USBConfigurationDescriptor) == 9);
-    static_assert(@sizeOf(USBInterfaceDescriptor) == 9);
+    static_assert(@offsetOf(OperationalRegisters, "status") == 4, "Static assert failed");
+    static_assert(@sizeOf(CapabilityRegisters) == 32, "Static assert failed");
+    static_assert(@sizeOf(OperationalRegisters) == 60, "Static assert failed");
+    static_assert(@sizeOf(InterrupterRegisters) == 32, "Static assert failed");
+    static_assert(@sizeOf(TransferRequestBlock) == 16, "Static assert failed");
+    static_assert(@sizeOf(USBDeviceDescriptor) == 18, "Static assert failed");
+    //static_assert(@sizeOf(USBDeviceDescriptor) == 8, "Static assert failed");
+    static_assert(@sizeOf(USBConfigurationDescriptor) == 9, "Static assert failed");
+    static_assert(@sizeOf(USBInterfaceDescriptor) == 9, "Static assert failed");
 
     //bitSizeOf
-    static_assert(@bitSizeOf(OperationalRegisters.USBCommand) == 32);
-    static_assert(@bitSizeOf(OperationalRegisters.USBStatus) == 32);
-    static_assert(@bitSizeOf(CapabilityRegisters.StructuralParameters1) == 32);
-    static_assert(@bitSizeOf(CapabilityRegisters.StructuralParameters2) == 32);
-    static_assert(@bitSizeOf(CapabilityRegisters.HCCPARAMS1) == 32);
-    static_assert(@bitSizeOf(OperationalRegisters.Config) == 32);
-    static_assert(@bitSizeOf(PortRegisters.StatusAndControlRegister) == 32);
-    static_assert(@bitSizeOf(PortRegisters) == 128);
+    static_assert(@bitSizeOf(OperationalRegisters.USBCommand) == 32, "Static assert failed");
+    static_assert(@bitSizeOf(OperationalRegisters.USBStatus) == 32, "Static assert failed");
+    static_assert(@bitSizeOf(CapabilityRegisters.StructuralParameters1) == 32, "Static assert failed");
+    static_assert(@bitSizeOf(CapabilityRegisters.StructuralParameters2) == 32, "Static assert failed");
+    static_assert(@bitSizeOf(CapabilityRegisters.HCCPARAMS1) == 32, "Static assert failed");
+    static_assert(@bitSizeOf(OperationalRegisters.Config) == 32, "Static assert failed");
+    static_assert(@bitSizeOf(PortRegisters.StatusAndControlRegister) == 32, "Static assert failed");
+    static_assert(@bitSizeOf(PortRegisters) == 128, "Static assert failed");
 
-    static_assert(@offsetOf(EventRing, "event_ring_segment_entry") & 0x1F == 0);
-    static_assert(@bitSizeOf(TransferRequestBlock) == 128);
-    static_assert(@bitSizeOf(SetupStageTRB) == 128);
-    static_assert(@bitSizeOf(StatusStageTRB) == 128);
-    static_assert(@bitSizeOf(DataStageTRB) == 128);
-    static_assert(@bitSizeOf(NormalTRB) == 128);
-    static_assert(@bitSizeOf(EndpointContext) == 32 * 8);
-    static_assert(@bitSizeOf(SlotContext) == 32 * 8);
-    static_assert(@bitSizeOf(InputControlContext) == 32 * 8);
+    static_assert(@offsetOf(EventRing, "event_ring_segment_entry") & 0x1F == 0, "Static assert failed");
+    static_assert(@bitSizeOf(TransferRequestBlock) == 128, "Static assert failed");
+    static_assert(@bitSizeOf(SetupStageTRB) == 128, "Static assert failed");
+    static_assert(@bitSizeOf(StatusStageTRB) == 128, "Static assert failed");
+    static_assert(@bitSizeOf(DataStageTRB) == 128, "Static assert failed");
+    static_assert(@bitSizeOf(NormalTRB) == 128, "Static assert failed");
+    static_assert(@bitSizeOf(EndpointContext) == 32 * 8, "Static assert failed");
+    static_assert(@bitSizeOf(SlotContext) == 32 * 8, "Static assert failed");
+    static_assert(@bitSizeOf(InputControlContext) == 32 * 8, "Static assert failed");
 }
 
-//TODO: Global for now.  Needs to be moved ASAP
-
-pub fn init(pcie_device: *pcie.Device, bar0: u64) !*Controller {
-    var scratch_arena = try kernel_memory.init_arena(utils.kb(512));
-    defer kernel_memory.free_all_in_arena(&scratch_arena);
-
-    var controller_arena = try kernel_memory.init_arena(utils.kb(512));
-    errdefer kernel_memory.free_all_in_arena(&controller_arena);
+pub fn init(
+    pcie_device: *const pcie.Device,
+    bar0: u64,
+    scratch_arena: *toolbox.Arena,
+    mapped_memory: *const toolbox.RandomRemovalLinkedList(w64.VirtualMemoryMapping),
+) !*Controller {
+    var controller_arena = toolbox.Arena.init(toolbox.mb(2));
+    errdefer controller_arena.free_all();
     {
         var pcie_device_header = pcie_device.header.EndPointDevice;
         var command = pcie_device_header.command;
@@ -840,12 +834,16 @@ pub fn init(pcie_device: *pcie.Device, bar0: u64) !*Controller {
     const capability_registers = @as(*volatile CapabilityRegisters, @ptrFromInt(bar0));
     const interrupter_registers = @as(*volatile InterrupterRegisters, @ptrFromInt(bar0 + capability_registers.runtime_registers_space_offset + 0x20));
 
+    print_serial("BAR0: {X}, CR Len: {}", .{ bar0, capability_registers.length });
     const operational_registers = @as(*volatile OperationalRegisters, @ptrFromInt(bar0 + capability_registers.length));
 
     const hcsparams1 = capability_registers.read_register(CapabilityRegisters.StructuralParameters1);
     const hccparams1 = capability_registers.read_register(CapabilityRegisters.HCCPARAMS1);
 
-    println("Detected xHCI device at address {x} with {} ports and {} slots", .{ bar0, hcsparams1.max_ports, hcsparams1.max_device_slots });
+    print_serial(
+        "Detected xHCI device at address {X} with {} ports and {} slots.",
+        .{ bar0, hcsparams1.max_ports, hcsparams1.max_device_slots },
+    );
     {
         var i: usize = 0;
         //stop the controller
@@ -858,7 +856,7 @@ pub fn init(pcie_device: *pcie.Device, bar0: u64) !*Controller {
         while (!status.hc_halted and i < 20) : (i += 1) {
             status = operational_registers
                 .read_register(OperationalRegisters.USBStatus);
-            amd64.delay(5);
+            w64.delay_milliseconds(5);
         }
         if (!status.hc_halted) {
             return error.TimeOutWaitingForControllerToBeHalted;
@@ -873,13 +871,13 @@ pub fn init(pcie_device: *pcie.Device, bar0: u64) !*Controller {
         while (command.host_controller_reset and i < 20) : (i += 1) {
             command = operational_registers
                 .read_register(OperationalRegisters.USBCommand);
-            amd64.delay(5);
+            w64.delay_milliseconds(5);
         }
         if (command.host_controller_reset) {
             return error.TimeOutWaitingForControllerToBeReset;
         }
 
-        println("xHCI controller reset!", .{});
+        print_serial("xHCI controller reset!", .{});
     }
 
     //After Chip Hardware Reset wait until the Controller Not Ready (CNR) flag in the USBSTS is ‘0’
@@ -899,7 +897,7 @@ pub fn init(pcie_device: *pcie.Device, bar0: u64) !*Controller {
     }
 
     //make sure that we support the kernel's page size
-    if (kernel.PHYSICAL_PAGE_SIZE != (operational_registers.page_size << 12)) {
+    if (w64.MMIO_PAGE_SIZE != (operational_registers.page_size << 12)) {
         return error.DoesNotSupportNativePageSize;
     }
 
@@ -920,8 +918,12 @@ pub fn init(pcie_device: *pcie.Device, bar0: u64) !*Controller {
     //inititalize Command Transfer Request Block Ring
     var command_trb_ring: *volatile CommandRing = undefined;
     {
-        //TODO: arena allocator??
-        var command_trb_ring_allocation_result = try kernel_memory.allocate_single_object_page_aligned_from_arena(CommandRing, &controller_arena);
+        var command_trb_ring_allocation_result = alloc_object_aligned(
+            CommandRing,
+            w64.MMIO_PAGE_SIZE,
+            controller_arena,
+            mapped_memory,
+        );
         command_trb_ring = command_trb_ring_allocation_result.data;
 
         var ring: TransferRequestBlockRing = .{};
@@ -940,7 +942,12 @@ pub fn init(pcie_device: *pcie.Device, bar0: u64) !*Controller {
     //TODO Event Ring Segment Table Base Address Register (ERSTDBA) -- xhci->eseg
     var event_trb_ring: *volatile EventRing = undefined;
     {
-        var event_trb_ring_allocation_result = try kernel_memory.allocate_single_object_page_aligned_from_arena(EventRing, &controller_arena);
+        var event_trb_ring_allocation_result = alloc_object_aligned(
+            EventRing,
+            w64.MMIO_PAGE_SIZE,
+            controller_arena,
+            mapped_memory,
+        );
 
         event_trb_ring = event_trb_ring_allocation_result.data;
 
@@ -967,19 +974,21 @@ pub fn init(pcie_device: *pcie.Device, bar0: u64) !*Controller {
 
         //TODO: xhci does not start up on old desktop.  but will start if erstdba is not set
         //@fence(.SeqCst);
-        //println("interrupter_registers.erstsz: {x}", .{interrupter_registers.erstsz});
-        //println("interrupter_registers.erdp: {x}", .{interrupter_registers.erdp});
-        //println("interrupter_registers.erstba: {x}", .{interrupter_registers.erstba});
-        //println("event_trb_ring.event_ring_segment_entry: {x}", .{event_trb_ring.event_ring_segment_entry});
+        //print_serial("interrupter_registers.erstsz: {x}", .{interrupter_registers.erstsz});
+        //print_serial("interrupter_registers.erdp: {x}", .{interrupter_registers.erdp});
+        //print_serial("interrupter_registers.erstba: {x}", .{interrupter_registers.erstba});
+        //print_serial("event_trb_ring.event_ring_segment_entry: {x}", .{event_trb_ring.event_ring_segment_entry});
     }
 
     //set up device slots (but don't enable them, yet)
     var device_slots: []DeviceContextPointer = undefined;
     {
-        var device_slots_allocation_result = try kernel_memory.allocate_multiple_objects_page_aligned_from_arena(
+        var device_slots_allocation_result = alloc_slice_aligned(
             DeviceContextPointer,
             hcsparams1.max_device_slots + 1,
-            &controller_arena,
+            w64.MMIO_PAGE_SIZE,
+            controller_arena,
+            mapped_memory,
         );
         device_slots = device_slots_allocation_result.data;
         const hcsparams2 = capability_registers.read_register(CapabilityRegisters.StructuralParameters2);
@@ -988,22 +997,30 @@ pub fn init(pcie_device: *pcie.Device, bar0: u64) !*Controller {
             @as(u64, hcsparams2.max_scratchpad_buffers_lo);
 
         if (number_of_scratch_pad_buffers > 0) {
-            println("Creating {} scratch pad buffers for xHCI controller...", .{number_of_scratch_pad_buffers});
-            var scratch_pad_buffer_pointer_array_allocation_result = try kernel_memory.allocate_multiple_objects_page_aligned_from_arena(ScratchPadBufferPointer, number_of_scratch_pad_buffers, &controller_arena);
-            var scratch_pad_buffers_allocation_result = try kernel_memory.allocate_multiple_objects_page_aligned_from_arena(
+            print_serial("Creating {} scratch pad buffers for xHCI controller...", .{number_of_scratch_pad_buffers});
+            var scratch_pad_buffer_pointer_array_allocation_result = alloc_slice_aligned(
+                ScratchPadBufferPointer,
+                number_of_scratch_pad_buffers,
+                w64.MMIO_PAGE_SIZE,
+                controller_arena,
+                mapped_memory,
+            );
+            var scratch_pad_buffers_allocation_result = alloc_slice_aligned(
                 u8,
-                kernel.PHYSICAL_PAGE_SIZE * number_of_scratch_pad_buffers,
-                &controller_arena,
+                w64.MMIO_PAGE_SIZE * number_of_scratch_pad_buffers,
+                w64.MMIO_PAGE_SIZE,
+                controller_arena,
+                mapped_memory,
             );
             var scratch_pad_buffer_pointer_array = scratch_pad_buffer_pointer_array_allocation_result.data;
             for (scratch_pad_buffer_pointer_array, 0..) |*spbp, i| {
-                spbp.* = scratch_pad_buffers_allocation_result.physical_address_start + i * kernel.PHYSICAL_PAGE_SIZE; //@ptrToInt(&scratch_pad_buffers[i * kernel.PHYSICAL_PAGE_SIZE]);
+                spbp.* = scratch_pad_buffers_allocation_result.physical_address_start + i * w64.MMIO_PAGE_SIZE; //@ptrToInt(&scratch_pad_buffers[i * kernel.PHYSICAL_PAGE_SIZE]);
             }
 
             device_slots[0] = scratch_pad_buffer_pointer_array_allocation_result.physical_address_start;
-            println("Done!", .{});
+            print_serial("Done!", .{});
         } else {
-            println("No scratch pad buffers for xHCI controller!", .{});
+            print_serial("No scratch pad buffers for xHCI controller!", .{});
         }
         operational_registers.write_device_context_base_address_array_pointer(
             device_slots_allocation_result.physical_address_start,
@@ -1023,21 +1040,21 @@ pub fn init(pcie_device: *pcie.Device, bar0: u64) !*Controller {
         //const preboot_console = @import("../preboot_console.zig");
         //preboot_console.clear();
         //while (true) {
-        //println("status: {x}", .{event_trb_ring.ring.ring[0]});
+        //print_serial("status: {x}", .{event_trb_ring.ring.ring[0]});
         ////asm volatile ("pause");
         //}
         //}
 
         //wait 20ms
-        amd64.delay(20);
-        println("xHCI controller started!", .{});
+        w64.delay_milliseconds(20);
+        print_serial("xHCI controller started!", .{});
     }
 
     //check if there was an error starting it up
     {
         const status = operational_registers.read_register(OperationalRegisters.USBStatus);
         if (status.host_controller_error) {
-            println("Status: {}", .{status});
+            print_serial("Status: {}", .{status});
             return error.ErrorStartingXHCIController;
         }
     }
@@ -1045,10 +1062,10 @@ pub fn init(pcie_device: *pcie.Device, bar0: u64) !*Controller {
     //TODO set up a USB hub object to represent the root hub
     //A usb hub contains ports and other information including the global reset lock
 
-    const hash_map_arena = try kernel_memory.toolbox_arena_from_kernel_arena(toolbox.kb(32), &controller_arena);
+    const hash_map_arena = controller_arena.create_arena_from_arena(toolbox.kb(32));
     var root_hub_usb_ports = @as([*]volatile PortRegisters, @ptrFromInt(bar0 + capability_registers.length + 0x400))[0..hcsparams1.max_ports];
-    var devices = (try kernel_memory.allocate_multiple_objects_from_arena(Device, root_hub_usb_ports.len, &controller_arena)).data;
-    var controller = (try kernel_memory.allocate_single_object_from_arena(Controller, &controller_arena)).data;
+    var devices = controller_arena.push_slice(Device, root_hub_usb_ports.len);
+    var controller = controller_arena.push(Controller);
     controller.* = .{
         .arena = controller_arena,
         .capability_registers = capability_registers,
@@ -1078,10 +1095,11 @@ pub fn init(pcie_device: *pcie.Device, bar0: u64) !*Controller {
             &controller.event_response_map,
             device_slots,
             doorbells,
-            &scratch_arena,
+            scratch_arena,
             device,
+            mapped_memory,
         ) catch |e| {
-            println("Error initializing device! {}", .{e});
+            print_serial("Error initializing device! {}", .{e});
             continue;
         };
         device.parent_controller = controller;
@@ -1098,11 +1116,12 @@ fn init_device(
     event_response_map: *EventResponseMap,
     device_slots: []DeviceContextPointer,
     doorbells: []volatile u32,
-    scratch_arena: *kernel_memory.GrowingPhysicalArena,
+    scratch_arena: *toolbox.Arena,
     out_device: *Device,
+    mapped_memory: *const toolbox.RandomRemovalLinkedList(w64.VirtualMemoryMapping),
 ) !void {
-    var device_arena = try kernel_memory.init_arena(utils.mb(1));
-    errdefer kernel_memory.free_all_in_arena(&device_arena);
+    var device_arena = toolbox.Arena.init(toolbox.mb(2));
+    errdefer device_arena.free_all();
 
     const port_number = port_index + 1;
     var portsc = port_registers.read_register(PortRegisters.StatusAndControlRegister);
@@ -1112,11 +1131,11 @@ fn init_device(
     {
         var i: usize = 0;
         while (!portsc.current_connect_status and i < 20) : (i += 1) {
-            amd64.delay(5);
+            w64.delay_milliseconds(5);
             portsc = port_registers.read_register(PortRegisters.StatusAndControlRegister);
         }
         if (!portsc.current_connect_status) {
-            println("No device on port {}", .{port_number});
+            print_serial("No device on port {}", .{port_number});
             return;
         }
     }
@@ -1137,7 +1156,7 @@ fn init_device(
             port_registers.write_register(portsc);
         },
         else => {
-            println("Unexpected state for USB device!", .{});
+            print_serial("Unexpected state for USB device!", .{});
 
             //TODO report error and give up on port
             return error.UnexpectedStateForUSBDevice;
@@ -1151,7 +1170,7 @@ fn init_device(
         while (i < 20) : (i += 1) {
             if (portsc.port_enabled_disabled) {
                 //reset done!
-                println("USB device deteced on port {}! Port Speed: {}", .{ port_number, portsc.port_speed });
+                print_serial("USB device deteced on port {}! Port Speed: {}", .{ port_number, portsc.port_speed });
 
                 reset_success = true;
                 break;
@@ -1160,13 +1179,13 @@ fn init_device(
                 //TODO report error and give up on port
                 return error.UnknownErrorWaitingUSBPortToReset;
             }
-            //println("Waiting for USB...", .{});
-            amd64.delay(5);
+            //print_serial("Waiting for USB...", .{});
+            w64.delay_milliseconds(5);
             portsc = port_registers.read_register(PortRegisters.StatusAndControlRegister);
         }
 
         if (!reset_success) {
-            println("Failed to reset USB port", .{});
+            print_serial("Failed to reset USB port", .{});
             //TODO report error and give up on port
             return error.TimedOutWaitingUSBPortToReset;
         }
@@ -1185,11 +1204,11 @@ fn init_device(
             //TODO get slot type and OR into control
             .control = @as(u32, @intFromEnum(TransferRequestBlock.Type.EnableSlotCommand)) << 10,
         }, command_trb_ring, event_trb_ring, event_response_map) catch |e| {
-            println("Error enabling slot: {}", .{e});
+            print_serial("Error enabling slot: {}", .{e});
             return e;
         };
         if (command_response.number_of_bytes_not_transferred != 0) {
-            println("Error enabling slot, due to short packet", .{});
+            print_serial("Error enabling slot, due to short packet", .{});
             return error.ShortPacketError;
         }
 
@@ -1208,7 +1227,8 @@ fn init_device(
                 slot_id,
                 device_slots,
                 &doorbells[slot_id],
-                &device_arena,
+                device_arena,
+                mapped_memory,
             );
         } else {
             device_slot_data_structures = try initialize_device_slot_data_structures(
@@ -1218,7 +1238,8 @@ fn init_device(
                 slot_id,
                 device_slots,
                 &doorbells[slot_id],
-                &device_arena,
+                device_arena,
+                mapped_memory,
             );
         }
     }
@@ -1232,7 +1253,7 @@ fn init_device(
         };
         //TODO verify no error from submit command.  verify output context is addressed
         _ = submit_command(command, command_trb_ring, event_trb_ring, event_response_map) catch |e| {
-            println("Error setting input context: {}", .{e});
+            print_serial("Error setting input context: {}", .{e});
             return e;
         };
     }
@@ -1247,7 +1268,11 @@ fn init_device(
     const endpoint_0_transfer_ring = device_slot_data_structures.endpoint_0_transfer_ring;
 
     //Get Device Descriptor
-    const device_descriptor_result = try kernel_memory.allocate_single_object_from_arena(USBDeviceDescriptor, scratch_arena);
+    const device_descriptor_result = alloc_object(
+        USBDeviceDescriptor,
+        scratch_arena,
+        mapped_memory,
+    );
     const device_descriptor = device_descriptor_result.data;
     const device_descriptor_physical_address = device_descriptor_result.physical_address_start;
     {
@@ -1262,7 +1287,7 @@ fn init_device(
             event_trb_ring,
             event_response_map,
         ) catch |e| {
-            println("Error getting device descriptor: {x}", .{e});
+            print_serial("Error getting device descriptor: {}", .{e});
             return e;
         };
 
@@ -1289,14 +1314,14 @@ fn init_device(
                     .control = @as(u32, slot_id) << 24 | @as(u32, @intFromEnum(TransferRequestBlock.Type.EvaluateContextCommand)) << 10,
                 };
                 _ = submit_command(command, command_trb_ring, event_trb_ring, event_response_map) catch |e| {
-                    println("Error setting max packet on input context: {}", .{e});
+                    print_serial("Error setting max packet on input context: {}", .{e});
                     return e;
                 };
 
                 const output_device_context = device_slot_data_structures.output_device_context;
                 const output_control_endpoint_context = get_endpoint_context_from_output_device_context(1, output_device_context);
 
-                println("old packet size: {}, new packet size: {}", .{ old_max_packet, output_control_endpoint_context.max_packet_size });
+                print_serial("old packet size: {}, new packet size: {}", .{ old_max_packet, output_control_endpoint_context.max_packet_size });
             }
         }
     }
@@ -1311,7 +1336,7 @@ fn init_device(
         event_trb_ring,
         event_response_map,
     ) catch |e| {
-        println("Error getting device descriptor: {x}", .{e});
+        print_serial("Error getting device descriptor: {}", .{e});
         return e;
     };
 
@@ -1324,7 +1349,8 @@ fn init_device(
             event_trb_ring,
             event_response_map,
             scratch_arena,
-            &device_arena,
+            device_arena,
+            mapped_memory,
         );
     }
     //Get product string
@@ -1336,20 +1362,14 @@ fn init_device(
             event_trb_ring,
             event_response_map,
             scratch_arena,
-            &device_arena,
+            device_arena,
+            mapped_memory,
         );
     }
     //Get serial number string
     var serial_number_string: ?[]const u8 = null;
     if (device_descriptor.serial_number_index > 0) {
-        serial_number_string = try get_string_descriptor(
-            device_descriptor.serial_number_index,
-            endpoint_0_transfer_ring,
-            event_trb_ring,
-            event_response_map,
-            scratch_arena,
-            &device_arena,
-        );
+        serial_number_string = try get_string_descriptor(device_descriptor.serial_number_index, endpoint_0_transfer_ring, event_trb_ring, event_response_map, scratch_arena, device_arena, mapped_memory);
     }
 
     //Get Config Descriptor
@@ -1362,7 +1382,7 @@ fn init_device(
         const input_control_context = get_input_control_context_from_input_context(input_context);
         //const output_device_context = device_slot_data_structures.output_device_context;
 
-        const configuration_descriptor_result = try kernel_memory.allocate_single_object_from_arena(USBConfigurationDescriptor, scratch_arena);
+        const configuration_descriptor_result = alloc_object(USBConfigurationDescriptor, scratch_arena, mapped_memory);
         const configuration_descriptor = configuration_descriptor_result.data;
         const configuration_descriptor_physical_address = configuration_descriptor_result.physical_address_start;
         get_descriptor_from_endpoint0(
@@ -1376,10 +1396,15 @@ fn init_device(
             event_trb_ring,
             event_response_map,
         ) catch |e| {
-            println("Error getting config descriptor: {}", .{e});
+            print_serial("Error getting config descriptor: {}", .{e});
             return e;
         };
-        const configuration_and_interface_descriptor_result = try kernel_memory.allocate_multiple_objects_from_arena(u8, configuration_descriptor.total_length, &device_arena);
+        const configuration_and_interface_descriptor_result = alloc_slice(
+            u8,
+            configuration_descriptor.total_length,
+            device_arena,
+            mapped_memory,
+        );
         configuration_and_interface_descriptor = configuration_and_interface_descriptor_result.data;
         const configuration_and_interface_descriptor_physical_address = configuration_and_interface_descriptor_result.physical_address_start;
         for (configuration_and_interface_descriptor) |*b| b.* = 0;
@@ -1394,23 +1419,23 @@ fn init_device(
             event_trb_ring,
             event_response_map,
         ) catch |e| {
-            println("Error getting full config descriptor: {}", .{e});
+            print_serial("Error getting full config descriptor: {}", .{e});
             return e;
         };
         //TODO set configuration for endpoint
 
-        println("Device {} (Serial Number: {}) by {} has {} interfaces and {} configs", .{ product_string, serial_number_string, manufacturer_string, configuration_descriptor.num_interfaces, device_descriptor.num_configurations });
+        print_serial("Device {?s} (Serial Number: {?s}) by {?s} has {} interfaces and {} configs", .{ product_string, serial_number_string, manufacturer_string, configuration_descriptor.num_interfaces, device_descriptor.num_configurations });
 
         //TODO store configuration descriptors in a list and retrieve them with a generic function that takes in a descriptor struct type?
         if (configuration_descriptor.num_interfaces <= 0) {
             //free all data structures associated with this device since this seems to be a useless device
-            kernel_memory.free_all_in_arena(&device_arena);
+            device_arena.free_all();
             return;
         }
         var max_device_context_index: u5 = 0;
         var i: usize = 0;
 
-        interfaces = (try kernel_memory.allocate_multiple_objects_from_arena(Interface, configuration_descriptor.num_interfaces, &device_arena)).data;
+        interfaces = device_arena.push_slice(Interface, configuration_descriptor.num_interfaces);
         var current_interface: *Interface = undefined;
         var endpoints: []Endpoint = undefined;
         var current_endpoint: *Endpoint = undefined;
@@ -1419,7 +1444,7 @@ fn init_device(
             const length = configuration_and_interface_descriptor[i];
             const descriptor_type = configuration_and_interface_descriptor[i + 1];
             if (length == 0) {
-                println("Zero length descriptor, aborting enumerating this device...", .{});
+                print_serial("Zero length descriptor, aborting enumerating this device...", .{});
                 break;
             }
             defer i += length;
@@ -1433,7 +1458,7 @@ fn init_device(
                         *USBInterfaceDescriptor,
                         @ptrCast(configuration_and_interface_descriptor.ptr + i),
                     );
-                    println("    {} interface {}, setting {} with {} endpoints", .{ interface_descriptor.interface_class, interface_descriptor.interface_number, interface_descriptor.alternate_setting, interface_descriptor.num_endpoints });
+                    print_serial("    {} interface {}, setting {} with {} endpoints", .{ interface_descriptor.interface_class, interface_descriptor.interface_number, interface_descriptor.alternate_setting, interface_descriptor.num_endpoints });
 
                     //TODO
                     const class_data: Interface.ClassData = switch (interface_descriptor.interface_class) {
@@ -1472,7 +1497,7 @@ fn init_device(
                         current_interface.endpoints = endpoints[0..endpoint_index];
                     }
 
-                    endpoints = (try kernel_memory.allocate_multiple_objects_from_arena(Endpoint, interface_descriptor.num_endpoints, &device_arena)).data;
+                    endpoints = device_arena.push_slice(Endpoint, interface_descriptor.num_endpoints);
 
                     current_interface = &interfaces[interface_index];
                     interface_index += 1;
@@ -1497,7 +1522,7 @@ fn init_device(
 
                     if (endpoint_descriptor.transfer_type() != .Interrupt) {
                         //TODO support Bulk and Isochronous endpoints
-                        //println("    Endpoint {x}, direction: {}, Transfer type: {} -- Currently unsupported", .{
+                        //print_serial("    Endpoint {x}, direction: {}, Transfer type: {} -- Currently unsupported", .{
                         //endpoint_descriptor.endpoint_number(),
                         //endpoint_descriptor.direction(),
                         //endpoint_descriptor.transfer_type(),
@@ -1518,7 +1543,7 @@ fn init_device(
                             input_context,
                         );
 
-                        endpoint_context.* = utils.zero_init(EndpointContext);
+                        endpoint_context.* = std.mem.zeroes(EndpointContext);
 
                         //TODO this will be true regardless because we only support Interrupt transfer type now
                         if (endpoint_descriptor.transfer_type() == .Interrupt) {
@@ -1535,7 +1560,12 @@ fn init_device(
                         var endpoint_transfer_ring: *TransferRing = undefined;
                         var endpoint_transfer_ring_physical_address: u64 = 0;
                         {
-                            var transfer_trb_ring_allocation_result = try kernel_memory.allocate_single_object_page_aligned_from_arena(TransferRing, &device_arena);
+                            var transfer_trb_ring_allocation_result = alloc_object_aligned(
+                                TransferRing,
+                                w64.MMIO_PAGE_SIZE,
+                                device_arena,
+                                mapped_memory,
+                            );
                             endpoint_transfer_ring = transfer_trb_ring_allocation_result.data;
 
                             var trb_ring: TransferRequestBlockRing = undefined;
@@ -1575,7 +1605,7 @@ fn init_device(
                 },
                 @intFromEnum(DescriptorType.Configuration) => {},
                 else => {
-                    //println("    Unknown descriptor: type: {x}, length: {}", .{ descriptor_type, length });
+                    //print_serial("    Unknown descriptor: type: {x}, length: {}", .{ descriptor_type, length });
                 },
             }
         } //end  while (i < configuration_and_interface_descriptor.len)
@@ -1608,10 +1638,10 @@ fn init_device(
             .control = @as(u32, slot_id) << 24 | @as(u32, @intFromEnum(TransferRequestBlock.Type.ConfigureEndpointCommand)) << 10,
         };
         _ = submit_command(command, command_trb_ring, event_trb_ring, event_response_map) catch |e| {
-            println("Error running Configure Endpoint Command: {}", .{e});
+            print_serial("Error running Configure Endpoint Command: {}", .{e});
             return e;
         };
-        println("Successfully ran Configure Endpoint Command!", .{});
+        print_serial("Successfully ran Configure Endpoint Command!", .{});
 
         set_configuration_on_endpoint0(
             configuration_descriptor.configuration_value,
@@ -1619,10 +1649,10 @@ fn init_device(
             event_trb_ring,
             event_response_map,
         ) catch |e| {
-            println("Error running SET_CONFIGURATION: {}", .{e});
+            print_serial("Error running SET_CONFIGURATION: {}", .{e});
             return e;
         };
-        println("Successfully ran SET_CONFIGURATION!", .{});
+        print_serial("Successfully ran SET_CONFIGURATION!", .{});
 
         //TODO send SET_FEATURE for remote wake up and others if supported
 
@@ -1641,7 +1671,7 @@ fn init_device(
         .interfaces = interfaces[0..interface_index],
         .endpoint_0_transfer_ring = device_slot_data_structures.endpoint_0_transfer_ring,
         .number_of_unsupported_interfaces = interfaces.len - interface_index,
-        .hid_devices = utils.FixedCapacityList(usb_hid.USBHIDDevice, 64).init(),
+        .hid_devices = toolbox.RandomRemovalLinkedList(usb_hid.USBHIDDevice).init(device_arena),
     };
     out_device.* = ret;
 }
@@ -1650,10 +1680,15 @@ fn get_string_descriptor(
     endpoint_0_transfer_ring: *volatile TransferRing,
     event_trb_ring: *volatile EventRing,
     event_response_map: *EventResponseMap,
-    scratch_arena: *kernel_memory.GrowingPhysicalArena,
-    device_arena: *kernel_memory.GrowingPhysicalArena,
+    scratch_arena: *toolbox.Arena,
+    device_arena: *toolbox.Arena,
+    mapped_memory: *const toolbox.RandomRemovalLinkedList(w64.VirtualMemoryMapping),
 ) ![]const u8 {
-    const descriptor_header_result = try kernel_memory.allocate_single_object_from_arena(USBDescriptorHeader, scratch_arena);
+    const descriptor_header_result = alloc_object(
+        USBDescriptorHeader,
+        scratch_arena,
+        mapped_memory,
+    );
     const descriptor_header = descriptor_header_result.data;
     const descriptor_header_physical_address = descriptor_header_result.physical_address_start;
     get_descriptor_from_endpoint0(
@@ -1667,12 +1702,13 @@ fn get_string_descriptor(
         event_trb_ring,
         event_response_map,
     ) catch |e| {
-        println("Failed to get string descriptor header: {}", .{e});
+        print_serial("Failed to get string descriptor header: {}", .{e});
     };
-    const string_descriptor_result = try kernel_memory.allocate_multiple_objects_from_arena(
+    const string_descriptor_result = alloc_slice(
         u8,
         descriptor_header.length,
         device_arena,
+        mapped_memory,
     );
     const string_descriptor = string_descriptor_result.data;
     const string_descriptor_physical_address = string_descriptor_result.physical_address_start;
@@ -1689,7 +1725,7 @@ fn get_string_descriptor(
         event_trb_ring,
         event_response_map,
     ) catch |e| {
-        println("Failed to get string descriptor: {}", .{e});
+        print_serial("Failed to get string descriptor: {}", .{e});
     };
     return string_descriptor[@sizeOf(USBDescriptorHeader)..];
 }
@@ -1946,7 +1982,7 @@ pub fn send_setup_command_endpoint0(
 ////TODO
 //},
 //else => {
-//println("Unhandled USB event: {} -- {x}", .{ trb.read_trb_type(), trb });
+//print_serial("Unhandled USB event: {} -- {x}", .{ trb.read_trb_type(), trb });
 //},
 //}
 //}
@@ -1984,7 +2020,11 @@ pub fn poll_event_ring(event_trb_ring: *volatile EventRing, event_response_map: 
                     .number_of_bytes_not_transferred = trb.read_number_of_bytes_not_transferred(),
                     .err = err_opt,
                 };
-                utils.assert(event_response_map.get(trb.data_pointer) == null);
+                toolbox.assert(
+                    event_response_map.get(trb.data_pointer) == null,
+                    "Event ring response should not be full",
+                    .{},
+                );
                 event_response_map.put(trb.data_pointer, ret);
                 return true;
             },
@@ -1992,7 +2032,7 @@ pub fn poll_event_ring(event_trb_ring: *volatile EventRing, event_response_map: 
                 //TODO
             },
             else => {
-                println("Unhandled USB event: {} -- {x}", .{ trb.read_trb_type(), trb });
+                print_serial("Unhandled USB event: {} -- {}", .{ trb.read_trb_type(), trb });
             },
         }
     }
@@ -2006,13 +2046,16 @@ fn initialize_device_slot_data_structures(
     slot_id: u8,
     device_slots: []DeviceContextPointer,
     doorbell: *volatile u32,
-    device_arena: *kernel_memory.GrowingPhysicalArena,
+    device_arena: *toolbox.Arena,
+    mapped_memory: *const toolbox.RandomRemovalLinkedList(w64.VirtualMemoryMapping),
 ) !DeviceSlotDataStructures {
     //1. Allocate an Input Context data structure (6.2.5) and initialize all fields to ‘0’.
-    const input_context_allocation_result = try kernel_memory.allocate_multiple_objects_page_aligned_from_arena(
+    const input_context_allocation_result = alloc_slice_aligned(
         u32,
         context_size_in_words * 33,
+        w64.MMIO_PAGE_SIZE,
         device_arena,
+        mapped_memory,
     );
 
     //2. Initialize the Input Control Context (6.2.5.1) of the Input Context by setting the A0 and A1 flags to ‘1’. These flags indicate that the Slot Context and the Endpoint 0 Context of the Input Context are affected by the command.
@@ -2050,9 +2093,11 @@ fn initialize_device_slot_data_structures(
     var endpoint_0_transfer_ring: *TransferRing = undefined;
     var endpoint_0_transfer_ring_physical_address: u64 = 0;
     {
-        var transfer_trb_ring_allocation_result = try kernel_memory.allocate_single_object_page_aligned_from_arena(
+        var transfer_trb_ring_allocation_result = alloc_object_aligned(
             TransferRing,
+            w64.MMIO_PAGE_SIZE,
             device_arena,
+            mapped_memory,
         );
         endpoint_0_transfer_ring = transfer_trb_ring_allocation_result.data;
 
@@ -2102,10 +2147,12 @@ fn initialize_device_slot_data_structures(
     control_endpoint_context.max_esit_payload_lo = 0;
     //6. Allocate the Output Device Context data structure (6.2.1) and initialize it to ‘0’.
 
-    var output_device_context_allocation_result = try kernel_memory.allocate_multiple_objects_page_aligned_from_arena(
+    var output_device_context_allocation_result = alloc_slice_aligned(
         u32,
         context_size_in_words * 32,
+        w64.MMIO_PAGE_SIZE,
         device_arena,
+        mapped_memory,
     );
     const output_device_context = DeviceContext{
         .context_size_in_words = context_size_in_words,
@@ -2171,7 +2218,7 @@ fn wait_for_transfer_response(
                 return response;
             }
         }
-        amd64.delay(10);
+        w64.delay_milliseconds(10);
     }
 }
 
@@ -2236,5 +2283,68 @@ pub fn completion_code_to_error(completion_code: u8) anyerror {
         12 => return error.EndpointNotEnabledError,
         13 => return error.ShortPacketError,
         else => return error.UnknownCompletionCodeError,
+    };
+}
+
+fn AllocationResultObject(comptime T: type, comptime alignment: usize) type {
+    return struct {
+        data: *align(alignment) T,
+        physical_address_start: usize,
+    };
+}
+fn AllocationResultSlice(comptime T: type, comptime alignment: usize) type {
+    return struct {
+        data: []align(alignment) T,
+        physical_address_start: usize,
+    };
+}
+inline fn alloc_object(
+    comptime T: type,
+    arena: *toolbox.Arena,
+    mapped_memory: *const toolbox.RandomRemovalLinkedList(w64.VirtualMemoryMapping),
+) AllocationResultObject(T, @alignOf(T)) {
+    return alloc_object_aligned(T, @alignOf(T), arena, mapped_memory);
+}
+
+fn alloc_object_aligned(
+    comptime T: type,
+    comptime alignment: usize,
+    arena: *toolbox.Arena,
+    mapped_memory: *const toolbox.RandomRemovalLinkedList(w64.VirtualMemoryMapping),
+) AllocationResultObject(T, alignment) {
+    const obj = arena.push_clear_aligned(T, alignment);
+    const physical_address = w64.virtual_to_physical(@intFromPtr(obj), mapped_memory) catch
+        toolbox.panic("Could not find physical address for virtual address {X}", .{@intFromPtr(obj)});
+    return .{
+        .data = obj,
+        .physical_address_start = physical_address,
+    };
+}
+inline fn alloc_slice(
+    comptime T: type,
+    n: usize,
+    arena: *toolbox.Arena,
+    mapped_memory: *const toolbox.RandomRemovalLinkedList(w64.VirtualMemoryMapping),
+) AllocationResultSlice(T, @alignOf(T)) {
+    return alloc_slice_aligned(T, n, @alignOf(T), arena, mapped_memory);
+}
+
+fn alloc_slice_aligned(
+    comptime T: type,
+    n: usize,
+    comptime alignment: usize,
+    arena: *toolbox.Arena,
+    mapped_memory: *const toolbox.RandomRemovalLinkedList(w64.VirtualMemoryMapping),
+) AllocationResultSlice(T, @alignOf(T)) {
+    const slice = arena.push_slice_clear_aligned(
+        T,
+        n,
+        alignment,
+    );
+    const physical_address = w64.virtual_to_physical(@intFromPtr(slice.ptr), mapped_memory) catch
+        toolbox.panic("Could not find physical address for virtual address {X}", .{@intFromPtr(slice.ptr)});
+    return .{
+        .data = slice,
+        .physical_address_start = physical_address,
     };
 }

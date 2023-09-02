@@ -7,8 +7,8 @@ const page_allocator = @import("page_allocator.zig");
 const w64 = @import("wozmon64.zig");
 const amd64 = @import("amd64.zig");
 const pcie = @import("drivers/pcie.zig");
-//const usb_hid = @import("drivers/usb_hid.zig");
-//const usb_xhci = @import("drivers/usb_xhci.zig");
+const usb_xhci = @import("drivers/usb_xhci.zig");
+const usb_hid = @import("drivers/usb_hid.zig");
 
 pub const THIS_PLATFORM = toolbox.Platform.Wozmon64;
 
@@ -26,6 +26,8 @@ const KernelState = struct {
     mapped_memory: toolbox.RandomRemovalLinkedList(w64.VirtualMemoryMapping),
     application_processor_contexts: []*w64.BootloaderProcessorContext,
     next_free_virtual_address: u64,
+
+    usb_xhci_controllers: toolbox.RandomRemovalLinkedList(*usb_xhci.Controller),
 
     global_arena: *toolbox.Arena,
     frame_arena: *toolbox.Arena,
@@ -86,6 +88,8 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
             .mapped_memory = undefined,
             .next_free_virtual_address = kernel_start_context.next_free_virtual_address,
             .application_processor_contexts = kernel_start_context.application_processor_contexts,
+
+            .usb_xhci_controllers = toolbox.RandomRemovalLinkedList(*usb_xhci.Controller).init(kernel_start_context.global_arena),
 
             .global_arena = kernel_start_context.global_arena,
             .frame_arena = toolbox.Arena.init_with_buffer(frame_arena_bytes),
@@ -149,7 +153,7 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
                             );
                         };
 
-                        print_serial("Found NVMe drive! Virtual BAR0: {X}", .{nvme_bar0});
+                        print_serial("Found NVMe drive! Virtual BAR0: {X}, Physical BAR0: {X}", .{ nvme_bar0, physical_bar0 });
 
                         //TODO:
                         // const nvme_device = nvme.init(dev, nvme_bar0) catch |e| {
@@ -175,46 +179,53 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
                             },
                             pcie.XHCI_PROGRAMING_INTERFACE => {
                                 const physical_bar0 = end_point_device_header.effective_bar0();
+                                print_serial("XCHI physical bar0: {X}", .{physical_bar0});
                                 const virtual_bar0 = w64.physical_to_virtual(physical_bar0, g_state.mapped_memory) catch b: {
                                     break :b w64.map_mmio_physical_address(
                                         physical_bar0,
                                         &g_state.next_free_virtual_address,
-                                        1,
+                                        3,
                                         g_state.global_arena,
                                         &g_state.mapped_memory,
                                     );
                                 };
-                                print_serial("Found USB xHCI controller! Virtual BAR0: {X}", .{virtual_bar0});
-                                //         var usb_controller = usb_xhci.init(dev, virtual_bar0) catch |e| {
-                                //             panic_fmt("Could not init xHCI adapter: {}", .{e});
-                                //         };
-                                //         usb_xhci_controllers.append(usb_controller) catch {
-                                //             println("Too many XHCI controllers!", .{});
-                                //             continue;
-                                //         };
+                                print_serial("Found USB xHCI controller! Virtual BAR0: {X}, Physical BAR0: {X}", .{ virtual_bar0, physical_bar0 });
+                                var usb_controller = usb_xhci.init(
+                                    dev,
+                                    virtual_bar0,
+                                    g_state.scratch_arena,
+                                    &g_state.mapped_memory,
+                                ) catch |e| {
+                                    toolbox.panic("Could not init xHCI adapter: {}", .{e});
+                                };
+                                _ = g_state.usb_xhci_controllers.append(usb_controller);
 
-                                //         for (usb_controller.devices) |device| {
-                                //             if (!device.is_connected) {
-                                //                 continue;
-                                //             }
-                                //             for (device.interfaces) |*interface| {
-                                //                 switch (interface.class_data) {
-                                //                     .HID => |hid_data| {
-                                //                         usb_hid.init_hid_interface(interface, hid_data.hid_descriptor) catch |e| {
-                                //                             println("Error initing HID interface for device {}: {}!", .{ device.product, e });
-                                //                             //TODO: remove
-                                //                             switch (e) {
-                                //                                 error.HIDDeviceDoesNotHaveAnInterruptEndpoint, error.ReportIDsNotYetSupported => {},
-                                //                                 else => {
-                                //                                     amd64.hang();
-                                //                                 },
-                                //                             }
-                                //                         };
-                                //                     },
-                                //                     else => {},
-                                //                 }
-                                //             }
-                                //         }
+                                for (usb_controller.devices) |device| {
+                                    if (!device.is_connected) {
+                                        continue;
+                                    }
+                                    for (device.interfaces) |*interface| {
+                                        switch (interface.class_data) {
+                                            .HID => |hid_data| {
+                                                usb_hid.init_hid_interface(
+                                                    interface,
+                                                    hid_data.hid_descriptor,
+                                                    g_state.scratch_arena,
+                                                    &g_state.mapped_memory,
+                                                ) catch |e| {
+                                                    //TODO: remove
+                                                    switch (e) {
+                                                        error.HIDDeviceDoesNotHaveAnInterruptEndpoint, error.ReportIDsNotYetSupported => {},
+                                                        else => {
+                                                            toolbox.panic("Error initing HID interface for device {?s}: {}!", .{ device.product, e });
+                                                        },
+                                                    }
+                                                };
+                                            },
+                                            else => {},
+                                        }
+                                    }
+                                }
                             },
                             else => {
                                 print_serial("USB controller: {}", .{end_point_device_header});
@@ -248,6 +259,12 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
 
     echo_str8("\\\n", .{});
     while (true) {
+        var it = g_state.usb_xhci_controllers.iterator();
+        while (it.next()) |controller_ptr| {
+            const controller = controller_ptr.*;
+
+            usb_hid.poll_events(controller.devices, controller.event_ring, &controller.event_response_map);
+        }
         draw_cursor();
         @memcpy(g_state.screen.frame_buffer, g_state.screen.back_buffer);
     }
@@ -258,6 +275,10 @@ pub inline fn allocate_memory(n: usize) []u8 {
     return page_allocator.allocate(
         @divTrunc(toolbox.align_up(n, w64.MEMORY_PAGE_SIZE), w64.MEMORY_PAGE_SIZE),
     );
+}
+
+pub inline fn free_memory(data: []u8) void {
+    page_allocator.free(data);
 }
 
 pub fn draw_cursor() void {
@@ -465,6 +486,7 @@ fn set_up_idt() void {
         .limit = @intCast(idt.len - 1),
         .idt = idt.ptr,
     };
+    amd64.register_exception_handler(&page_fault_handler, .PageFault, idt);
     amd64.register_exception_handler(&invalid_opcode_handler, .InvalidOpcode, idt);
     asm volatile (
         \\lidt (%[idtr])
@@ -476,9 +498,54 @@ fn set_up_idt() void {
 fn invalid_opcode_handler() callconv(.Interrupt) void {
     toolbox.panic("Invalid opcode!", .{});
 }
+const ExceptionRegisters = packed struct {
+    error_code: u64,
+    return_rip: u64,
+    return_cs: u64,
+    return_rflags: u64,
+    return_rsp: u64,
+    return_ss: u64,
+};
+
+comptime {
+    const SAVE_FRAME_POINTER = if (toolbox.IS_DEBUG)
+        \\push %rbp
+        \\mov %rsp, %rbp
+    else
+        "";
+    asm (
+        \\.global page_fault_handler
+        \\.extern page_fault_handler_inner
+        \\page_fault_handler:
+        \\
+        \\#TODO: save all registers
+        \\mov (%rsp), %rdi #save error code
+        \\add $8,%rsp
+        \\mov %cr2, %rsi
+        \\
+        ++ SAVE_FRAME_POINTER ++
+            \\
+            \\call page_fault_handler_inner
+    );
+}
+
+extern fn page_fault_handler() void;
+
+export fn page_fault_handler_inner(error_code: u64, unmapped_address: u64) callconv(.C) void {
+    //return address should have something likeFFFFFFFF80008D70
+    toolbox.panic(
+        "Page fault! Error code: {}, Unmapped address: {X}",
+        .{
+            error_code,
+            unmapped_address,
+        },
+    );
+
+    //TODO as of now, we cannot return since we destroy all registers
+}
 
 //for debugging within print routines
-fn print_serial(comptime fmt: []const u8, args: anytype) void {
+pub fn print_serial(comptime fmt: []const u8, args: anytype) void {
     const scratch_arena = g_state.scratch_arena;
     const arena_save_point = scratch_arena.create_save_point();
     defer scratch_arena.restore_save_point(arena_save_point);

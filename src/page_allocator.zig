@@ -1,5 +1,6 @@
 const toolbox = @import("toolbox");
 const w64 = @import("wozmon64.zig");
+const std = @import("std");
 
 const PageAllocatorBlock = struct {
     virtual_address: u64,
@@ -96,4 +97,17 @@ pub fn allocate(number_of_pages: usize) []u8 {
         }
     }
     toolbox.panic("Out of page memory!", .{});
+}
+
+pub fn free(data: []u8) void {
+    const virtual_address = @intFromPtr(data.ptr);
+    const block_opt = g_state.allocated_blocks.get(virtual_address);
+    if (block_opt) |block| {
+        _ = g_state.free_blocks.prepend(block);
+    } else {
+        toolbox.panic(
+            "Trying to free address {X} which has not been allocated",
+            .{virtual_address},
+        );
+    }
 }

@@ -175,7 +175,7 @@ pub fn enumerate_devices(
     root_xsdt: *const amd64.XSDT,
     arena: *toolbox.Arena,
     memory_mappings: toolbox.RandomRemovalLinkedList(w64.VirtualMemoryMapping),
-) []Device {
+) []const Device {
     var ret = toolbox.DynamicArray(Device).init(arena, 32);
     const mcfg = amd64.find_acpi_table(root_xsdt, memory_mappings, "MCFG", MCFG) catch
         toolbox.panic("Could not find MCFG table!", .{});

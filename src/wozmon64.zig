@@ -32,8 +32,8 @@ pub const Pixel = packed union {
 };
 
 pub const SUPPORTED_RESOLUTIONS = [_]struct { width: u32, height: u32 }{
-    .{ .width = 3840, .height = 2160 },
-    .{ .width = 1920, .height = 1080 },
+    //.{ .width = 3840, .height = 2160 },
+    //.{ .width = 1920, .height = 1080 },
     .{ .width = 1280, .height = 720 },
 };
 
@@ -149,6 +149,43 @@ pub fn virtual_to_physical(
     virtual_address: u64,
     mappings: *const toolbox.RandomRemovalLinkedList(VirtualMemoryMapping),
 ) !u64 {
+    //TODO: enable
+    // {
+    //     {
+    //         const vaddr_2mb: amd64.VirtualAddress2MBPage = @bitCast(virtual_address);
+    //         const pd_entry_2mb = get_pd_2mb(virtual_address).entries[vaddr_2mb.pd_offset];
+    //         if (!pd_entry_2mb.present) {
+    //             return error.VirtualAddressNotMapped;
+    //         }
+
+    //         //is it actually a 2MB page?
+    //         if (pd_entry_2mb.must_be_one == 1) {
+    //             const base_physical_address = @as(
+    //                 u64,
+    //                 pd_entry_2mb.physical_page_base_address,
+    //             ) << 21;
+    //             const effective_address = base_physical_address + (virtual_address &
+    //                 toolbox.mask_for_bit_range(0, 21, u64));
+    //             return effective_address;
+    //         }
+    //     }
+
+    //     //It is a 4KB page
+    //     {
+    //         const vaddr_4kb: amd64.VirtualAddress4KBPage = @bitCast(virtual_address);
+    //         const pt_entry = get_pt(virtual_address).entries[vaddr_4kb.pt_offset];
+    //         if (!pt_entry.present) {
+    //             return error.VirtualAddressNotMapped;
+    //         }
+    //         const base_physical_address = @as(
+    //             u64,
+    //             pt_entry.physical_page_base_address,
+    //         ) << 12;
+    //         const effective_address = base_physical_address + (virtual_address &
+    //             toolbox.mask_for_bit_range(0, 12, u64));
+    //         return effective_address;
+    //     }
+    // }
     //TODO use recursive mapping
     var it = mappings.iterator();
     while (it.next()) |mapping| {
@@ -170,6 +207,11 @@ pub fn map_conventional_memory_physical_address(
 ) u64 {
     starting_virtual_address_ptr.* = toolbox.align_up(starting_virtual_address_ptr.*, MEMORY_PAGE_SIZE);
     const starting_virtual_address = starting_virtual_address_ptr.*;
+    toolbox.assert(
+        toolbox.is_aligned_to(starting_physical_address, MEMORY_PAGE_SIZE),
+        "Physical address should be 2MB page aligned, but was {X}.",
+        .{starting_physical_address},
+    );
     for (0..number_of_pages) |i| {
         const virtual_address = starting_virtual_address + i * MEMORY_PAGE_SIZE;
         const physical_address = starting_physical_address + i * MEMORY_PAGE_SIZE;
@@ -207,7 +249,7 @@ pub fn map_conventional_memory_physical_address(
                     .ring3_accessible = false,
                     .writethrough = false,
                     .cache_disable = false,
-                    .pdp_base_address = @intCast(page_physical_address >> 24),
+                    .pdp_base_address = @intCast(page_physical_address >> 12),
                     .no_execute = true,
                 };
                 break :b pdp;
@@ -229,7 +271,7 @@ pub fn map_conventional_memory_physical_address(
                     .ring3_accessible = false,
                     .writethrough = false,
                     .cache_disable = false,
-                    .pd_base_address = @intCast(page_physical_address >> 24),
+                    .pd_base_address = @intCast(page_physical_address >> 12),
                     .no_execute = true,
                 };
                 break :b pd;
@@ -249,7 +291,7 @@ pub fn map_conventional_memory_physical_address(
                     .pat_bit_1 = 0,
                     .pat_bit_2 = 0,
                     .global = (virtual_address & (1 << 63)) != 0,
-                    .physical_page_base_address = @intCast(physical_address >> 24),
+                    .physical_page_base_address = @intCast(physical_address >> 21),
                     .memory_protection_key = 0,
                     .no_execute = false,
                 };
@@ -273,6 +315,12 @@ pub fn map_conventional_memory_physical_address(
             }
         }
     }
+    _ = mappings.append(.{
+        .physical_address = starting_physical_address,
+        .virtual_address = starting_virtual_address,
+        .size = number_of_pages * MEMORY_PAGE_SIZE,
+        .memory_type = .ConventionalMemory,
+    });
     return starting_virtual_address;
 }
 
@@ -329,7 +377,7 @@ pub fn map_mmio_physical_address(
                     .ring3_accessible = false,
                     .writethrough = false,
                     .cache_disable = false,
-                    .pdp_base_address = @intCast(page_physical_address >> 24),
+                    .pdp_base_address = @intCast(page_physical_address >> 12),
                     .no_execute = true,
                 };
                 break :b pdp;
@@ -351,7 +399,7 @@ pub fn map_mmio_physical_address(
                     .ring3_accessible = false,
                     .writethrough = false,
                     .cache_disable = false,
-                    .pd_base_address = @intCast(page_physical_address >> 24),
+                    .pd_base_address = @intCast(page_physical_address >> 12),
                     .no_execute = true,
                 };
                 break :b pd;
@@ -373,7 +421,7 @@ pub fn map_mmio_physical_address(
                     .ring3_accessible = false,
                     .writethrough = false,
                     .cache_disable = false,
-                    .pt_base_address = @intCast(page_physical_address >> 24),
+                    .pt_base_address = @intCast(page_physical_address >> 12),
                     .no_execute = true,
                 };
                 break :b pt;
@@ -398,7 +446,7 @@ pub fn map_mmio_physical_address(
                     .pat_bit_1 = 1,
                     .pat_bit_2 = 0,
                     .global = true,
-                    .physical_page_base_address = @intCast(physical_address >> 24),
+                    .physical_page_base_address = @intCast(physical_address >> 12),
                     .memory_protection_key = 0,
                     .no_execute = true,
                 };
@@ -416,6 +464,12 @@ pub fn map_mmio_physical_address(
             }
         }
     }
+    _ = mappings.append(.{
+        .physical_address = starting_physical_address,
+        .virtual_address = starting_virtual_address,
+        .size = number_of_pages * MMIO_PAGE_SIZE,
+        .memory_type = .MMIOMemory,
+    });
     return starting_virtual_address;
 }
 
@@ -523,6 +577,13 @@ pub fn now() Time {
     return .{ .ticks = @intCast(amd64.rdtsc()) };
 }
 
+pub fn delay_milliseconds(n: i64) void {
+    const start = now();
+    while (now().sub(start).milliseconds() < n) {
+        std.atomic.spinLoopHint();
+    }
+}
+
 comptime {
     toolbox.static_assert(@sizeOf(Pixel) == 4, "Incorrect size for Pixel");
 }
@@ -532,3 +593,121 @@ pub fn echo(bytes: [*c]u8, len: usize) void {
     const str = toolbox.str8(bytes[0..len]);
     kernel.echo_str8("{}", .{str});
 }
+
+pub const ScanCode = enum {
+    Unknown,
+    A,
+    B,
+    C,
+    D,
+    E,
+    F,
+    G,
+    H,
+    I,
+    J,
+    K,
+    L,
+    M,
+    N,
+    O,
+    P,
+    Q,
+    R,
+    S,
+    T,
+    U,
+    V,
+    W,
+    X,
+    Y,
+    Z,
+
+    Zero,
+    One,
+    Two,
+    Three,
+    Four,
+    Five,
+    Six,
+    Seven,
+    Eight,
+    Nine,
+
+    CapsLock,
+    ScrollLock,
+    NumLock,
+    LeftShift,
+    LeftCtrl,
+    LeftAlt,
+    LeftFlag,
+    RightShift,
+    RightCtrl,
+    RightAlt,
+    RightFlag,
+    Pause,
+    ContextMenu,
+
+    Backspace,
+    Escape,
+    Insert,
+    Home,
+    PageUp,
+    Delete,
+    End,
+    PageDown,
+    UpArrow,
+    LeftArrow,
+    DownArrow,
+    RightArrow,
+
+    Space,
+    Tab,
+    Enter,
+
+    Slash,
+    Backslash,
+    LeftBracket,
+    RightBracket,
+    Equals,
+    Backtick,
+    Hyphen,
+    Semicolon,
+    Quote,
+    Comma,
+    Period,
+
+    NumDivide,
+    NumMultiply,
+    NumSubtract,
+    NumAdd,
+    NumEnter,
+    NumPoint,
+    Num0,
+    Num1,
+    Num2,
+    Num3,
+    Num4,
+    Num5,
+    Num6,
+    Num7,
+    Num8,
+    Num9,
+
+    PrintScreen,
+    PrintScreen1,
+    PrintScreen2,
+
+    F1,
+    F2,
+    F3,
+    F4,
+    F5,
+    F6,
+    F7,
+    F8,
+    F9,
+    F10,
+    F11,
+    F12,
+};

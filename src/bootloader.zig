@@ -389,10 +389,16 @@ pub fn main() noreturn {
             const descriptor_size = desc.number_of_pages * UEFI_PAGE_SIZE;
             switch (desc.type) {
                 .ConventionalMemory => {
-                    if (descriptor_size >= w64.MEMORY_PAGE_SIZE) {
-                        const number_of_pages = descriptor_size / w64.MEMORY_PAGE_SIZE;
+                    const aligned_physical_address = toolbox.align_up(
+                        desc.physical_start,
+                        w64.MEMORY_PAGE_SIZE,
+                    );
+                    const effective_size = @as(i64, @intCast(descriptor_size)) -
+                        @as(i64, @intCast(aligned_physical_address - desc.physical_start));
+                    if (effective_size >= w64.MEMORY_PAGE_SIZE) {
+                        const number_of_pages = @as(usize, @intCast(effective_size)) / w64.MEMORY_PAGE_SIZE;
                         free_conventional_memory.append(.{
-                            .physical_address = desc.physical_start,
+                            .physical_address = aligned_physical_address,
                             .number_of_pages = number_of_pages,
                         });
                     }

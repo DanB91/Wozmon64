@@ -2,7 +2,7 @@ const std = @import("std");
 const toolbox = @import("toolbox.zig");
 pub fn DynamicArray(comptime T: type) type {
     return struct {
-        store: []T,
+        store: []T = @as([*]T, undefined)[0..0],
         _len: usize = 0,
 
         arena: *toolbox.Arena,
@@ -18,7 +18,7 @@ pub fn DynamicArray(comptime T: type) type {
             };
         }
 
-        pub fn items(self: *Self) []T {
+        pub fn items(self: *const Self) []T {
             return self.store[0..self._len];
         }
 

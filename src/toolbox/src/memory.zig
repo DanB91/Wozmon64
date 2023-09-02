@@ -81,7 +81,7 @@ pub const Arena = struct {
     pub fn init(comptime size: usize) *Arena {
         comptime {
             if (size < PAGE_SIZE) {
-                @compileError("Arena size must be at least " ++ PAGE_SIZE ++ " bytes!");
+                @compileError("Arena size must be at least the size of a page!");
             }
             if (!toolbox.is_power_of_2(size)) {
                 @compileError("Arena size must be a power of 2!");
@@ -120,29 +120,34 @@ pub const Arena = struct {
                 @compileError("Arena size must be a power of 2!");
             }
         }
-        const data = self.push_bytes_aligned(size, 8);
+        const data = self.push_bytes_unaligned(size);
         return init_with_buffer(data);
     }
 
-    pub fn push(arena: *Arena, comptime T: type) *T {
-        const ret_bytes = arena.push_bytes_aligned(@sizeOf(T), @alignOf(T));
-        return @as(*T, @ptrCast(ret_bytes.ptr));
+    pub inline fn push(self: *Arena, comptime T: type) *T {
+        return self.push_single(T, false, @alignOf(T));
     }
-    pub fn push_clear(arena: *Arena, comptime T: type) *T {
-        const ret_bytes = arena.push_bytes_aligned(@sizeOf(T), @alignOf(T));
-        @memset(ret_bytes, 0);
-        return @ptrCast(ret_bytes.ptr);
+    pub inline fn push_aligned(self: *Arena, comptime T: type, comptime alignment: usize) *align(alignment) T {
+        return self.push_single(T, false, alignment);
     }
-    pub fn push_slice(arena: *Arena, comptime T: type, n: usize) []T {
-        const ret_bytes = arena.push_bytes_aligned(@sizeOf(T) * n, @alignOf(T));
-        return @as([*]T, @ptrCast(ret_bytes.ptr))[0..n];
+    pub inline fn push_clear(self: *Arena, comptime T: type) *T {
+        return self.push_single(T, true, @alignOf(T));
     }
-    pub fn push_slice_clear(arena: *Arena, comptime T: type, n: usize) []T {
-        const ret_bytes = arena.push_bytes_aligned(@sizeOf(T) * n, @alignOf(T));
-        @memset(ret_bytes, 0);
-        return @as([*]T, @ptrCast(ret_bytes.ptr))[0..n];
+    pub inline fn push_clear_aligned(self: *Arena, comptime T: type, comptime alignment: usize) *align(alignment) T {
+        return self.push_single(T, true, alignment);
     }
-
+    pub inline fn push_slice(self: *Arena, comptime T: type, n: usize) []T {
+        return self.push_multiple(T, n, false, @alignOf(T));
+    }
+    pub inline fn push_slice_aligned(self: *Arena, comptime T: type, n: usize, comptime alignment: usize) []align(alignment) T {
+        return self.push_multiple(T, n, false, alignment);
+    }
+    pub inline fn push_slice_clear(self: *Arena, comptime T: type, n: usize) []T {
+        return self.push_multiple(T, n, true, @alignOf(T));
+    }
+    pub inline fn push_slice_clear_aligned(self: *Arena, comptime T: type, n: usize, comptime alignment: usize) []align(alignment) T {
+        return self.push_multiple(T, n, true, alignment);
+    }
     pub fn push_bytes_unaligned(arena: *Arena, n: usize) []u8 {
         if (arena.data.len - arena.pos >= n) {
             var ret = arena.data[arena.pos .. arena.pos + n];
@@ -166,6 +171,32 @@ pub const Arena = struct {
             return ret;
         }
         toolbox.panic("Arena allocation request is too large. {} bytes", .{n});
+    }
+
+    fn push_single(
+        self: *Arena,
+        comptime T: type,
+        comptime should_clear: bool,
+        comptime alignment: usize,
+    ) *align(alignment) T {
+        const ret_bytes = self.push_bytes_aligned(@sizeOf(T), alignment);
+        if (comptime should_clear) {
+            @memset(ret_bytes, 0);
+        }
+        return @ptrCast(ret_bytes.ptr);
+    }
+    fn push_multiple(
+        self: *Arena,
+        comptime T: type,
+        n: usize,
+        comptime should_clear: bool,
+        comptime alignment: usize,
+    ) []align(alignment) T {
+        const ret_bytes = self.push_bytes_aligned(@sizeOf(T) * n, alignment);
+        if (comptime should_clear) {
+            @memset(ret_bytes, 0);
+        }
+        return @as([*]align(alignment) T, @ptrCast(ret_bytes.ptr))[0..n];
     }
 
     pub fn expand(arena: *Arena, ptr: anytype, new_size: usize) @TypeOf(ptr) {
@@ -245,6 +276,8 @@ const platform_free_memory = switch (toolbox.THIS_PLATFORM) {
     .BoksOS => boksos_free_memory,
     .Playdate => playdate_free_memory,
     .WASM => posix_free_memory,
+    .Wozmon64 => root.free_memory,
+    else => @compileError("OS not supported"),
 };
 
 ///Unix functions

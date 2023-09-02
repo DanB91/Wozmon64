@@ -1,5 +1,9 @@
 const usb_xhci = @import("usb_xhci.zig");
-const toolbox = @import("toolbox.zig");
+const toolbox = @import("toolbox");
+const w64 = @import("../wozmon64.zig");
+const kernel = @import("../kernel.zig");
+
+const print_serial = kernel.print_serial;
 
 pub const USBHIDDevice = struct {
     device_types: []Type,
@@ -226,7 +230,7 @@ fn within_usage_range(
     toolbox.assert(
         min_usages.len() == max_usages.len(),
         "# of usage numbers mismatch. Max usage numbers len: {}, Min usage numbers len: {}",
-        .{min_usages.len() == max_usages.len()},
+        .{ min_usages.len(), max_usages.len() },
     );
     for (min_usages.items(), max_usages.items()) |min, max| {
         if (usage.usage_page == min.usage_page and usage.usage_page == max.usage_page and
@@ -241,6 +245,7 @@ pub fn init_hid_interface(
     hid_interface: *usb_xhci.Interface,
     hid_descriptor: Descriptor,
     scratch_arena: *toolbox.Arena,
+    mapped_memory: *const toolbox.RandomRemovalLinkedList(w64.VirtualMemoryMapping),
 ) !void {
     const save_point = scratch_arena.create_save_point();
     defer scratch_arena.restore_save_point(save_point);
@@ -255,7 +260,8 @@ pub fn init_hid_interface(
     };
     const controller = hid_interface.parent_device.parent_controller;
     const device = hid_interface.parent_device;
-    const full_hid_descriptor_result = scratch_arena.push_bytes(hid_descriptor.report_descriptor_length);
+    const full_hid_descriptor_result =
+        alloc_slice(u8, hid_descriptor.report_descriptor_length, scratch_arena, mapped_memory);
     const full_hid_descriptor = full_hid_descriptor_result.data;
     const full_hid_descriptor_physical_address = full_hid_descriptor_result.physical_address_start;
     const initial_array_size = 8;
@@ -271,7 +277,7 @@ pub fn init_hid_interface(
         controller.event_ring,
         &controller.event_response_map,
     );
-    toolbox.println("Device {} Interface: {} Number of endpoints: {}", .{
+    print_serial("Device {?s} Interface: {} Number of endpoints: {}", .{
         device.product,
         hid_interface.interface_number,
         hid_interface.endpoints.len,
@@ -294,11 +300,11 @@ pub fn init_hid_interface(
     var keyboard_to_build: ?USBHIDKeyboardScaffold = null;
     var bit_index: u32 = 0;
 
-    var device_types_parsed = toolbox.DynamicArray(USBHIDDevice.Type).init(&device.arena, initial_array_size);
-    var items = toolbox.DynamicArray(Item).init(&device.arena, initial_array_size);
+    var device_types_parsed = toolbox.DynamicArray(USBHIDDevice.Type).init(device.arena, initial_array_size);
+    var items = toolbox.DynamicArray(Item).init(device.arena, initial_array_size);
 
     while (item != .End) : (item = try next_item(&byte_stream)) {
-        _ = try items.append(item);
+        items.append(item);
         switch (item) {
             .GlobalUsagePage => |data| {
                 usage_page = data_to_usage_page(data);
@@ -319,7 +325,7 @@ pub fn init_hid_interface(
                 if (usage_page == null) {
                     return error.MissingUsagePageForUsage;
                 }
-                _ = try usages.append(Usage{
+                usages.append(Usage{
                     .usage_page = usage_page.?,
                     .usage = data,
                 });
@@ -328,7 +334,7 @@ pub fn init_hid_interface(
                 if (usage_page == null) {
                     return error.MissingUsagePageForUsageMinimum;
                 }
-                _ = try usage_minimums.append(Usage{
+                usage_minimums.append(Usage{
                     .usage_page = usage_page.?,
                     .usage = data,
                 });
@@ -337,7 +343,7 @@ pub fn init_hid_interface(
                 if (usage_page == null) {
                     return error.MissingUsagePageForUsageMaximum;
                 }
-                _ = try usage_maximums.append(Usage{
+                usage_maximums.append(Usage{
                     .usage_page = usage_page.?,
                     .usage = data,
                 });
@@ -368,10 +374,10 @@ pub fn init_hid_interface(
                 if (report_count == null) {
                     return error.MissingReportCount;
                 }
-                if (usage_minimums.items.len != usage_maximums.items.len) {
+                if (usage_minimums.len() != usage_maximums.len()) {
                     return error.InvalidNumberOfUsageMinimumsAndMaximums;
                 }
-                if (usages.items.len > 0) {
+                if (usages.len() > 0) {
                     if (contains_usage(.{ .usage_page = .GenericDesktopControls, .usage = 2 }, usages)) {
                         if (mouse_to_build != null) {
                             return error.MoreThanOneMouseInInterfaceNotSupported;
@@ -394,7 +400,7 @@ pub fn init_hid_interface(
                     }
                     var local_bit_index = bit_index;
                     if (mouse_to_build) |*scaffold| {
-                        for (usages.items) |usage| {
+                        for (usages.items()) |usage| {
                             if (usage.usage_page == .GenericDesktopControls) {
                                 switch (usage.usage) {
                                     0x30 => {
@@ -423,7 +429,7 @@ pub fn init_hid_interface(
                         if (scaffold.button_report != null and scaffold.x_report != null and scaffold.y_report != null and
                             scaffold.scroll_report != null)
                         {
-                            _ = try device_types_parsed.append(.{ .Mouse = .{
+                            device_types_parsed.append(.{ .Mouse = .{
                                 .button_report = scaffold.button_report.?,
                                 .x_report = scaffold.x_report.?,
                                 .y_report = scaffold.y_report.?,
@@ -434,7 +440,7 @@ pub fn init_hid_interface(
                     }
                     usages.clear();
                 }
-                if (usage_minimums.items.len > 0) {
+                if (usage_minimums.len() > 0) {
                     if (keyboard_to_build) |*scaffold| {
                         //0xEO is Left Control
                         if (within_usage_range(.{ .usage_page = .KeyboardOrKeypad, .usage = 0xE0 }, usage_minimums, usage_maximums) and
@@ -449,7 +455,7 @@ pub fn init_hid_interface(
                             scaffold.keys_pressed_report = .{ .index = bit_index / 8, .size = bits_to_bytes(report_size.? * report_count.?) };
                         }
                         if (scaffold.keys_pressed_report != null and scaffold.modifier_report != null) {
-                            _ = try device_types_parsed.append(.{ .Keyboard = .{
+                            device_types_parsed.append(.{ .Keyboard = .{
                                 .keys_pressed_report = scaffold.keys_pressed_report.?,
                                 .modifier_report = scaffold.modifier_report.?,
                                 .modifier_keys_held = 0,
@@ -466,7 +472,7 @@ pub fn init_hid_interface(
                         if (scaffold.button_report != null and scaffold.x_report != null and scaffold.y_report != null and
                             scaffold.scroll_report != null)
                         {
-                            _ = try device_types_parsed.append(.{ .Mouse = .{
+                            device_types_parsed.append(.{ .Mouse = .{
                                 .button_report = scaffold.button_report.?,
                                 .x_report = scaffold.x_report.?,
                                 .y_report = scaffold.y_report.?,
@@ -520,20 +526,24 @@ pub fn init_hid_interface(
         }
     }
 
-    const endpoint_packet_buffer = device.arena.push_bytes(
+    const endpoint_packet_buffer_result = alloc_slice(
+        u8,
         in_endpoint.endpoint_context.max_packet_size,
+        device.arena,
+        mapped_memory,
     );
+
     var hid_device = USBHIDDevice{
-        .items = items.items,
-        .device_types = device_types_parsed.items,
+        .items = items.items(),
+        .device_types = device_types_parsed.items(),
         .interface = hid_interface,
         .input_endpoint = in_endpoint,
-        .packet_buffer = endpoint_packet_buffer.data,
-        .packet_buffer_physical_address = endpoint_packet_buffer.physical_address_start,
+        .packet_buffer = endpoint_packet_buffer_result.data,
+        .packet_buffer_physical_address = endpoint_packet_buffer_result.physical_address_start,
         .last_transfer_request_physical_address = 0,
     };
     queue_transfer_trb(&hid_device);
-    try device.hid_devices.append(hid_device);
+    _ = device.hid_devices.append(hid_device);
 }
 fn bits_to_bytes(bits: u32) u32 {
     return bits / 8 + (if (bits % 8 > 0) @as(u32, 1) else @as(u32, 0));
@@ -678,12 +688,13 @@ pub fn poll_events(
     if (usb_xhci.poll_event_ring(event_ring, event_response_map)) {
         //TODO have hash map instead of this double loop nonsense
         for (devices) |*device| {
-            for (device.hid_devices.items) |*hid_device| {
+            var it = device.hid_devices.iterator();
+            while (it.next()) |hid_device| {
                 if (event_response_map.get(
                     hid_device.last_transfer_request_physical_address,
                 )) |event_response| {
                     if (event_response.err) |e| {
-                        toolbox.println("Error polling device: {}", .{e});
+                        print_serial("Error polling device: {}", .{e});
                         continue;
                     }
                     var number_of_bytes_not_transferred = event_response.number_of_bytes_not_transferred;
@@ -703,13 +714,13 @@ pub fn poll_events(
 }
 fn mouse_report_to_int(data: []const u8) i16 {
     switch (data.len) {
-        1 => return @as(i16, utils.data_to_int(data, i8)),
-        2 => return @as(i16, utils.data_to_int(data, i16)),
+        1 => return @as(i16, toolbox.data_to_int(data, i8)),
+        2 => return @as(i16, toolbox.data_to_int(data, i16)),
         else => unreachable,
     }
 }
-fn usb_scancode_to_boksos_scancode(usb_scancode: u8) ?boksos.ScanCode {
-    const ret: ?boksos.ScanCode = switch (usb_scancode) {
+fn usb_scancode_to_boksos_scancode(usb_scancode: u8) ?w64.ScanCode {
+    const ret: ?w64.ScanCode = switch (usb_scancode) {
         0x4 => .A,
         0x5 => .B,
         0x6 => .C,
@@ -848,13 +859,17 @@ fn handle_input_data(data: []const u8, device_type: *USBHIDDevice.Type) void {
                 //0000_1001 & 1111_0101 ->
                 const key_modifiers_pressed = key_modifiers_held_now & ~key_modifiers_held_before;
                 const key_modifiers_released = ~key_modifiers_held_now & key_modifiers_held_before;
-                const modifier_scancodes = [_]boksos.ScanCode{ .LeftCtrl, .LeftShift, .LeftAlt, .LeftFlag, .RightCtrl, .RightShift, .RightAlt, .RightFlag };
+                const modifier_scancodes = [_]w64.ScanCode{ .LeftCtrl, .LeftShift, .LeftAlt, .LeftFlag, .RightCtrl, .RightShift, .RightAlt, .RightFlag };
                 inline for (modifier_scancodes, 0..) |scancode, i| {
                     if ((key_modifiers_pressed & (1 << i)) != 0) {
-                        boksos_input.put_keyboard_event(.{ .KeyDown = scancode });
+                        //TODO: handle key pressed event
+                        print_serial("Key down scan code: {}", .{scancode});
+                        //boksos_input.put_keyboard_event(.{ .KeyDown = scancode });
                     }
                     if ((key_modifiers_released & (1 << i)) != 0) {
-                        boksos_input.put_keyboard_event(.{ .KeyUp = scancode });
+                        //TODO: handle key released event
+                        print_serial("Key up scan code: {}", .{scancode});
+                        //boksos_input.put_keyboard_event(.{ .KeyUp = scancode });
                     }
                 }
                 keyboard.modifier_keys_held = key_modifiers_held_now;
@@ -870,12 +885,16 @@ fn handle_input_data(data: []const u8, device_type: *USBHIDDevice.Type) void {
 
             for (keys_pressed) |key| {
                 if (usb_scancode_to_boksos_scancode(key)) |scancode| {
-                    boksos_input.put_keyboard_event(.{ .KeyDown = scancode });
+                    //TODO: handle key pressed event
+                    print_serial("Key down scan code: {}", .{scancode});
+                    //boksos_input.put_keyboard_event(.{ .KeyDown = scancode });
                 }
             }
             for (keys_released) |key| {
                 if (usb_scancode_to_boksos_scancode(key)) |scancode| {
-                    boksos_input.put_keyboard_event(.{ .KeyUp = scancode });
+                    //TODO: handle key released event
+                    print_serial("Key up scan code: {}", .{scancode});
+                    //boksos_input.put_keyboard_event(.{ .KeyUp = scancode });
                 }
             }
 
@@ -883,16 +902,17 @@ fn handle_input_data(data: []const u8, device_type: *USBHIDDevice.Type) void {
         },
 
         .Mouse => |_| {
-            var mouse = &device_type.Mouse;
-            const mouse_event = boksos_input.MouseEvent{
-                .dx = mouse_report_to_int(data[mouse.x_report.index .. mouse.x_report.index + mouse.x_report.size]),
-                .dy = mouse_report_to_int(data[mouse.y_report.index .. mouse.y_report.index + mouse.y_report.size]),
-                .scroll_y = mouse_report_to_int(data[mouse.scroll_report.index .. mouse.scroll_report.index + mouse.scroll_report.size]),
-                .is_left_button_down = (data[mouse.button_report.index] & (1 << 0)) != 0,
-                .is_middle_button_down = (data[mouse.button_report.index] & (1 << 2)) != 0,
-                .is_right_button_down = (data[mouse.button_report.index] & (1 << 1)) != 0,
-            };
-            boksos_input.put_mouse_event(mouse_event);
+            //TODO: handle mouse event
+            // var mouse = &device_type.Mouse;
+            // const mouse_event = boksos_input.MouseEvent{
+            //     .dx = mouse_report_to_int(data[mouse.x_report.index .. mouse.x_report.index + mouse.x_report.size]),
+            //     .dy = mouse_report_to_int(data[mouse.y_report.index .. mouse.y_report.index + mouse.y_report.size]),
+            //     .scroll_y = mouse_report_to_int(data[mouse.scroll_report.index .. mouse.scroll_report.index + mouse.scroll_report.size]),
+            //     .is_left_button_down = (data[mouse.button_report.index] & (1 << 0)) != 0,
+            //     .is_middle_button_down = (data[mouse.button_report.index] & (1 << 2)) != 0,
+            //     .is_right_button_down = (data[mouse.button_report.index] & (1 << 1)) != 0,
+            // };
+            // boksos_input.put_mouse_event(mouse_event);
             //const buttons_pressed = data[mouse.button_report.index];
             //if (buttons_pressed != 0) {
             //println("buttons_pressed: {x}", .{buttons_pressed});
@@ -907,4 +927,38 @@ fn handle_input_data(data: []const u8, device_type: *USBHIDDevice.Type) void {
             //}
         },
     }
+}
+fn AllocationResultSlice(comptime T: type, comptime alignment: usize) type {
+    return struct {
+        data: []align(alignment) T,
+        physical_address_start: usize,
+    };
+}
+inline fn alloc_slice(
+    comptime T: type,
+    n: usize,
+    arena: *toolbox.Arena,
+    mapped_memory: *const toolbox.RandomRemovalLinkedList(w64.VirtualMemoryMapping),
+) AllocationResultSlice(T, @alignOf(T)) {
+    return alloc_slice_aligned(T, n, @alignOf(T), arena, mapped_memory);
+}
+
+fn alloc_slice_aligned(
+    comptime T: type,
+    n: usize,
+    comptime alignment: usize,
+    arena: *toolbox.Arena,
+    mapped_memory: *const toolbox.RandomRemovalLinkedList(w64.VirtualMemoryMapping),
+) AllocationResultSlice(T, @alignOf(T)) {
+    const slice = arena.push_slice_clear_aligned(
+        T,
+        n,
+        alignment,
+    );
+    const physical_address = w64.virtual_to_physical(@intFromPtr(slice.ptr), mapped_memory) catch
+        toolbox.panic("Could not find physical address for virtual address {X}", .{@intFromPtr(slice.ptr)});
+    return .{
+        .data = slice,
+        .physical_address_start = physical_address,
+    };
 }

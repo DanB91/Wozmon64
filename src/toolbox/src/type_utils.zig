@@ -69,5 +69,5 @@ pub fn ptr_cast(comptime T: type, ptr: anytype) T {
     if (ti != .Pointer) {
         @compileError("T in ptr_cast must be a pointer");
     }
-    return @as(T, @alignCast(ptr));
+    return @as(T, @ptrCast(@alignCast(ptr)));
 }

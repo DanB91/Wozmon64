@@ -62,7 +62,7 @@ pub fn build(b: *std.Build) !void {
             "-smp",
             "cores=4",
             "-m",
-            "1G",
+            "2G",
             "-no-reboot",
             "-cpu",
             "Skylake-Client-v3",
