@@ -594,6 +594,27 @@ pub fn echo(bytes: [*c]u8, len: usize) void {
     kernel.echo_str8("{}", .{str});
 }
 
+pub const InputState = struct {
+    modifier_key_pressed_events: toolbox.RingQueue(ScanCode),
+    modifier_key_released_events: toolbox.RingQueue(ScanCode),
+    key_pressed_events: toolbox.RingQueue(ScanCode),
+    key_released_events: toolbox.RingQueue(ScanCode),
+
+    pub fn init(arena: *toolbox.Arena) InputState {
+        const keys_pressed = toolbox.RingQueue(ScanCode).init(64, arena);
+        const keys_released = toolbox.RingQueue(ScanCode).init(64, arena);
+        const modifier_keys_pressed = toolbox.RingQueue(ScanCode).init(16, arena);
+        const modifier_keys_released = toolbox.RingQueue(ScanCode).init(16, arena);
+
+        return .{
+            .key_pressed_events = keys_pressed,
+            .key_released_events = keys_released,
+            .modifier_key_pressed_events = modifier_keys_pressed,
+            .modifier_key_released_events = modifier_keys_released,
+        };
+    }
+};
+
 pub const ScanCode = enum {
     Unknown,
     A,
@@ -711,3 +732,62 @@ pub const ScanCode = enum {
     F11,
     F12,
 };
+
+pub fn scancode_to_ascii(scancode: ScanCode) u8 {
+    return switch (scancode) {
+        .A => 'A',
+        .B => 'B',
+        .C => 'C',
+        .D => 'D',
+        .E => 'E',
+        .F => 'F',
+        .G => 'G',
+        .H => 'H',
+        .I => 'I',
+        .J => 'J',
+        .K => 'K',
+        .L => 'L',
+        .M => 'M',
+        .N => 'N',
+        .O => 'O',
+        .P => 'P',
+        .Q => 'Q',
+        .R => 'R',
+        .S => 'S',
+        .T => 'T',
+        .U => 'U',
+        .V => 'V',
+        .W => 'W',
+        .X => 'X',
+        .Y => 'Y',
+        .Z => 'Z',
+
+        .Zero => '0',
+        .One => '1',
+        .Two => '2',
+        .Three => '3',
+        .Four => '4',
+        .Five => '5',
+        .Six => '6',
+        .Seven => '7',
+        .Eight => '8',
+        .Nine => '9',
+
+        .Space => ' ',
+        .Enter => '\n',
+
+        .Slash => '/',
+        .Backslash => '\\',
+        .LeftBracket => '[',
+        .RightBracket => ']',
+        .Equals => '=',
+        .Backtick => '`',
+        .Hyphen => '-',
+        .Semicolon => ';',
+        .Quote => '\'',
+        .Comma => ',',
+        .Period => '.',
+
+        else => '?',
+    };
+}

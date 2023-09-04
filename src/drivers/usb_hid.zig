@@ -274,8 +274,7 @@ pub fn init_hid_interface(
         @enumFromInt(hid_descriptor.report_descriptor_type), //hid_descriptor.descriptor_type,
         hid_interface.interface_number,
         device.endpoint_0_transfer_ring,
-        controller.event_ring,
-        &controller.event_response_map,
+        controller,
     );
     print_serial("Device {?s} Interface: {} Number of endpoints: {}", .{
         device.product,
@@ -680,34 +679,32 @@ fn queue_transfer_trb(hid_device: *USBHIDDevice) void {
         trb_ring.index = 0;
     }
 }
-pub fn poll_events(
-    devices: []usb_xhci.Device,
-    event_ring: *volatile usb_xhci.EventRing,
-    event_response_map: *usb_xhci.EventResponseMap,
+pub fn poll(
+    controller: *usb_xhci.Controller,
+    input_state: *w64.InputState,
 ) void {
-    if (usb_xhci.poll_event_ring(event_ring, event_response_map)) {
-        //TODO have hash map instead of this double loop nonsense
-        for (devices) |*device| {
-            var it = device.hid_devices.iterator();
-            while (it.next()) |hid_device| {
-                if (event_response_map.get(
-                    hid_device.last_transfer_request_physical_address,
-                )) |event_response| {
-                    if (event_response.err) |e| {
-                        print_serial("Error polling device: {}", .{e});
-                        continue;
-                    }
-                    var number_of_bytes_not_transferred = event_response.number_of_bytes_not_transferred;
-                    const input_data = hid_device.packet_buffer[0 .. hid_device.packet_buffer.len - number_of_bytes_not_transferred];
-                    // println("Data from USB device: {x}", .{input_data});
-                    for (hid_device.device_types) |*device_type| {
-                        handle_input_data(input_data, device_type);
-                    }
-                    event_response_map.remove(
-                        hid_device.last_transfer_request_physical_address,
-                    );
-                    queue_transfer_trb(hid_device);
+    //TODO have hash map instead of this double loop nonsense
+    var device_it = controller.devices.iterator();
+    while (device_it.next_value()) |device| {
+        var hid_device_it = device.hid_devices.iterator();
+        while (hid_device_it.next()) |hid_device| {
+            if (controller.event_response_map.get(
+                hid_device.last_transfer_request_physical_address,
+            )) |event_response| {
+                if (event_response.err) |e| {
+                    print_serial("Error polling device: {}", .{e});
+                    continue;
                 }
+                var number_of_bytes_not_transferred = event_response.number_of_bytes_not_transferred;
+                const input_data = hid_device.packet_buffer[0 .. hid_device.packet_buffer.len - number_of_bytes_not_transferred];
+                // println("Data from USB device: {x}", .{input_data});
+                for (hid_device.device_types) |*device_type| {
+                    handle_input_data(input_data, device_type, input_state);
+                }
+                controller.event_response_map.remove(
+                    hid_device.last_transfer_request_physical_address,
+                );
+                queue_transfer_trb(hid_device);
             }
         }
     }
@@ -843,7 +840,11 @@ fn set_difference(minunend: []const u8, subtrahend: []const u8, result: []u8) vo
         }
     }
 }
-fn handle_input_data(data: []const u8, device_type: *USBHIDDevice.Type) void {
+fn handle_input_data(
+    data: []const u8,
+    device_type: *USBHIDDevice.Type,
+    input_state: *w64.InputState,
+) void {
     switch (device_type.*) {
         .Keyboard => |_| {
             var keyboard = &device_type.Keyboard;
@@ -887,6 +888,7 @@ fn handle_input_data(data: []const u8, device_type: *USBHIDDevice.Type) void {
                 if (usb_scancode_to_boksos_scancode(key)) |scancode| {
                     //TODO: handle key pressed event
                     print_serial("Key down scan code: {}", .{scancode});
+                    input_state.key_pressed_events.enqueue(scancode);
                     //boksos_input.put_keyboard_event(.{ .KeyDown = scancode });
                 }
             }
@@ -894,6 +896,7 @@ fn handle_input_data(data: []const u8, device_type: *USBHIDDevice.Type) void {
                 if (usb_scancode_to_boksos_scancode(key)) |scancode| {
                     //TODO: handle key released event
                     print_serial("Key up scan code: {}", .{scancode});
+                    input_state.key_released_events.enqueue(scancode);
                     //boksos_input.put_keyboard_event(.{ .KeyUp = scancode });
                 }
             }

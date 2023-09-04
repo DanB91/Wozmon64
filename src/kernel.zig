@@ -28,6 +28,7 @@ const KernelState = struct {
     next_free_virtual_address: u64,
 
     usb_xhci_controllers: toolbox.RandomRemovalLinkedList(*usb_xhci.Controller),
+    input_state: w64.InputState,
 
     global_arena: *toolbox.Arena,
     frame_arena: *toolbox.Arena,
@@ -88,6 +89,7 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
             .mapped_memory = undefined,
             .next_free_virtual_address = kernel_start_context.next_free_virtual_address,
             .application_processor_contexts = kernel_start_context.application_processor_contexts,
+            .input_state = w64.InputState.init(kernel_start_context.global_arena),
 
             .usb_xhci_controllers = toolbox.RandomRemovalLinkedList(*usb_xhci.Controller).init(kernel_start_context.global_arena),
 
@@ -200,7 +202,8 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
                                 };
                                 _ = g_state.usb_xhci_controllers.append(usb_controller);
 
-                                for (usb_controller.devices) |device| {
+                                var it = usb_controller.devices.iterator();
+                                while (it.next_value()) |device| {
                                     if (!device.is_connected) {
                                         continue;
                                     }
@@ -260,10 +263,26 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
     echo_str8("\\\n", .{});
     while (true) {
         var it = g_state.usb_xhci_controllers.iterator();
-        while (it.next()) |controller_ptr| {
-            const controller = controller_ptr.*;
-
-            usb_hid.poll_events(controller.devices, controller.event_ring, &controller.event_response_map);
+        while (it.next_value()) |controller| {
+            if (usb_xhci.poll_controller(controller)) {
+                usb_hid.poll(
+                    controller,
+                    &g_state.input_state,
+                );
+            }
+        }
+        while (g_state.input_state.modifier_key_pressed_events.dequeue()) |scancode| {
+            _ = scancode;
+        }
+        while (g_state.input_state.modifier_key_released_events.dequeue()) |scancode| {
+            _ = scancode;
+        }
+        while (g_state.input_state.key_pressed_events.dequeue()) |scancode| {
+            const char = w64.scancode_to_ascii(scancode);
+            echo_str8("{c}", .{char});
+        }
+        while (g_state.input_state.key_released_events.dequeue()) |scancode| {
+            _ = scancode;
         }
         draw_cursor();
         @memcpy(g_state.screen.frame_buffer, g_state.screen.back_buffer);

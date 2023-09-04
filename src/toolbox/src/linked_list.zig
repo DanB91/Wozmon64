@@ -175,6 +175,12 @@ pub fn RandomRemovalLinkedList(comptime T: type) type {
                     return null;
                 }
             }
+            pub fn next_value(self: *Iterator) ?T {
+                if (self.next()) |ptr| {
+                    return ptr.*;
+                }
+                return null;
+            }
         };
 
         pub fn init(arena: *toolbox.Arena) Self {

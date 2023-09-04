@@ -23,7 +23,7 @@ pub const Controller = struct {
     event_response_map: EventResponseMap,
     event_response_map_arena: *toolbox.Arena,
 
-    devices: []Device,
+    devices: toolbox.RandomRemovalLinkedList(*Device),
 };
 pub const EventResponseMap = toolbox.HashMap(usize, PollEventRingResult);
 
@@ -1064,7 +1064,6 @@ pub fn init(
 
     const hash_map_arena = controller_arena.create_arena_from_arena(toolbox.kb(32));
     var root_hub_usb_ports = @as([*]volatile PortRegisters, @ptrFromInt(bar0 + capability_registers.length + 0x400))[0..hcsparams1.max_ports];
-    var devices = controller_arena.push_slice(Device, root_hub_usb_ports.len);
     var controller = controller_arena.push(Controller);
     controller.* = .{
         .arena = controller_arena,
@@ -1078,15 +1077,12 @@ pub fn init(
         .command_ring = command_trb_ring,
         .event_ring = event_trb_ring,
 
-        .devices = devices,
+        .devices = toolbox.RandomRemovalLinkedList(*Device).init(controller_arena),
     };
-    //NOTE: DO NOT USE THE CONTROLLER ARENA AFTER THIS POINT
 
     //TODO refactor the body of the loop with an error handler.  don't want errors bubbling up if a single port fails
     for (root_hub_usb_ports, 0..) |*port_registers, port_index| {
-        const device = &devices[port_index];
-        device.is_connected = false;
-        init_device(
+        const device_opt = init_device(
             port_registers,
             port_index,
             hccparams1.csz,
@@ -1096,13 +1092,15 @@ pub fn init(
             device_slots,
             doorbells,
             scratch_arena,
-            device,
+            controller,
             mapped_memory,
         ) catch |e| {
             print_serial("Error initializing device! {}", .{e});
             continue;
         };
-        device.parent_controller = controller;
+        if (device_opt) |device| {
+            _ = controller.devices.append(device);
+        }
     } //end port loop
 
     return controller;
@@ -1117,28 +1115,34 @@ fn init_device(
     device_slots: []DeviceContextPointer,
     doorbells: []volatile u32,
     scratch_arena: *toolbox.Arena,
-    out_device: *Device,
+    controller: *Controller,
     mapped_memory: *const toolbox.RandomRemovalLinkedList(w64.VirtualMemoryMapping),
-) !void {
-    var device_arena = toolbox.Arena.init(toolbox.mb(2));
-    errdefer device_arena.free_all();
-
+) !?*Device {
+    _ = event_response_map;
+    _ = event_trb_ring;
+    _ = command_trb_ring;
     const port_number = port_index + 1;
     var portsc = port_registers.read_register(PortRegisters.StatusAndControlRegister);
     //TODO SeaBIOS seems to create a usb device object per port?
     //     not sure we want that
 
     {
-        var i: usize = 0;
-        while (!portsc.current_connect_status and i < 20) : (i += 1) {
+        for (0..20) |_| {
+            if (portsc.current_connect_status) {
+                break;
+            }
             w64.delay_milliseconds(5);
             portsc = port_registers.read_register(PortRegisters.StatusAndControlRegister);
         }
         if (!portsc.current_connect_status) {
             print_serial("No device on port {}", .{port_number});
-            return;
+            return null;
         }
     }
+    var device_arena = toolbox.Arena.init(toolbox.mb(2));
+    errdefer device_arena.free_all();
+
+    const device = device_arena.push(Device);
     //TODO run thread for each port
 
     //TODO take reset lock
@@ -1203,7 +1207,7 @@ fn init_device(
             .status = 0,
             //TODO get slot type and OR into control
             .control = @as(u32, @intFromEnum(TransferRequestBlock.Type.EnableSlotCommand)) << 10,
-        }, command_trb_ring, event_trb_ring, event_response_map) catch |e| {
+        }, controller) catch |e| {
             print_serial("Error enabling slot: {}", .{e});
             return e;
         };
@@ -1252,7 +1256,7 @@ fn init_device(
             .control = @as(u32, slot_id) << 24 | @as(u32, @intFromEnum(TransferRequestBlock.Type.AddressDeviceCommand)) << 10,
         };
         //TODO verify no error from submit command.  verify output context is addressed
-        _ = submit_command(command, command_trb_ring, event_trb_ring, event_response_map) catch |e| {
+        _ = submit_command(command, controller) catch |e| {
             print_serial("Error setting input context: {}", .{e});
             return e;
         };
@@ -1284,8 +1288,7 @@ fn init_device(
             .Device,
             0,
             device_slot_data_structures.endpoint_0_transfer_ring,
-            event_trb_ring,
-            event_response_map,
+            controller,
         ) catch |e| {
             print_serial("Error getting device descriptor: {}", .{e});
             return e;
@@ -1313,7 +1316,7 @@ fn init_device(
 
                     .control = @as(u32, slot_id) << 24 | @as(u32, @intFromEnum(TransferRequestBlock.Type.EvaluateContextCommand)) << 10,
                 };
-                _ = submit_command(command, command_trb_ring, event_trb_ring, event_response_map) catch |e| {
+                _ = submit_command(command, controller) catch |e| {
                     print_serial("Error setting max packet on input context: {}", .{e});
                     return e;
                 };
@@ -1333,8 +1336,7 @@ fn init_device(
         .Device,
         0,
         device_slot_data_structures.endpoint_0_transfer_ring,
-        event_trb_ring,
-        event_response_map,
+        controller,
     ) catch |e| {
         print_serial("Error getting device descriptor: {}", .{e});
         return e;
@@ -1346,8 +1348,7 @@ fn init_device(
         manufacturer_string = try get_string_descriptor(
             device_descriptor.manufacturer_index,
             endpoint_0_transfer_ring,
-            event_trb_ring,
-            event_response_map,
+            controller,
             scratch_arena,
             device_arena,
             mapped_memory,
@@ -1359,8 +1360,7 @@ fn init_device(
         product_string = try get_string_descriptor(
             device_descriptor.product_index,
             endpoint_0_transfer_ring,
-            event_trb_ring,
-            event_response_map,
+            controller,
             scratch_arena,
             device_arena,
             mapped_memory,
@@ -1369,7 +1369,14 @@ fn init_device(
     //Get serial number string
     var serial_number_string: ?[]const u8 = null;
     if (device_descriptor.serial_number_index > 0) {
-        serial_number_string = try get_string_descriptor(device_descriptor.serial_number_index, endpoint_0_transfer_ring, event_trb_ring, event_response_map, scratch_arena, device_arena, mapped_memory);
+        serial_number_string = try get_string_descriptor(
+            device_descriptor.serial_number_index,
+            endpoint_0_transfer_ring,
+            controller,
+            scratch_arena,
+            device_arena,
+            mapped_memory,
+        );
     }
 
     //Get Config Descriptor
@@ -1393,8 +1400,7 @@ fn init_device(
             .Configuration,
             0,
             device_slot_data_structures.endpoint_0_transfer_ring,
-            event_trb_ring,
-            event_response_map,
+            controller,
         ) catch |e| {
             print_serial("Error getting config descriptor: {}", .{e});
             return e;
@@ -1416,8 +1422,7 @@ fn init_device(
             .Configuration,
             0,
             device_slot_data_structures.endpoint_0_transfer_ring,
-            event_trb_ring,
-            event_response_map,
+            controller,
         ) catch |e| {
             print_serial("Error getting full config descriptor: {}", .{e});
             return e;
@@ -1430,7 +1435,7 @@ fn init_device(
         if (configuration_descriptor.num_interfaces <= 0) {
             //free all data structures associated with this device since this seems to be a useless device
             device_arena.free_all();
-            return;
+            return null;
         }
         var max_device_context_index: u5 = 0;
         var i: usize = 0;
@@ -1503,7 +1508,7 @@ fn init_device(
                     interface_index += 1;
 
                     current_interface.* = .{
-                        .parent_device = out_device,
+                        .parent_device = device,
                         .class_data = class_data,
                         .interface_number = interface_descriptor.interface_number,
                         .endpoints = endpoints,
@@ -1637,7 +1642,10 @@ fn init_device(
             .status = 0,
             .control = @as(u32, slot_id) << 24 | @as(u32, @intFromEnum(TransferRequestBlock.Type.ConfigureEndpointCommand)) << 10,
         };
-        _ = submit_command(command, command_trb_ring, event_trb_ring, event_response_map) catch |e| {
+        _ = submit_command(
+            command,
+            controller,
+        ) catch |e| {
             print_serial("Error running Configure Endpoint Command: {}", .{e});
             return e;
         };
@@ -1646,8 +1654,7 @@ fn init_device(
         set_configuration_on_endpoint0(
             configuration_descriptor.configuration_value,
             device_slot_data_structures.endpoint_0_transfer_ring,
-            event_trb_ring,
-            event_response_map,
+            controller,
         ) catch |e| {
             print_serial("Error running SET_CONFIGURATION: {}", .{e});
             return e;
@@ -1657,8 +1664,8 @@ fn init_device(
         //TODO send SET_FEATURE for remote wake up and others if supported
 
     } //end Get Config Descriptor
-    const ret = Device{
-        .parent_controller = undefined, //set in the caller
+    device.* = .{
+        .parent_controller = controller,
         .is_connected = true,
         .manufacturer = manufacturer_string,
         .product = product_string,
@@ -1673,13 +1680,12 @@ fn init_device(
         .number_of_unsupported_interfaces = interfaces.len - interface_index,
         .hid_devices = toolbox.RandomRemovalLinkedList(usb_hid.USBHIDDevice).init(device_arena),
     };
-    out_device.* = ret;
+    return device;
 }
 fn get_string_descriptor(
     string_descriptor_index: u8,
     endpoint_0_transfer_ring: *volatile TransferRing,
-    event_trb_ring: *volatile EventRing,
-    event_response_map: *EventResponseMap,
+    controller: *Controller,
     scratch_arena: *toolbox.Arena,
     device_arena: *toolbox.Arena,
     mapped_memory: *const toolbox.RandomRemovalLinkedList(w64.VirtualMemoryMapping),
@@ -1699,8 +1705,7 @@ fn get_string_descriptor(
         .String,
         0x0409, //US-English
         endpoint_0_transfer_ring,
-        event_trb_ring,
-        event_response_map,
+        controller,
     ) catch |e| {
         print_serial("Failed to get string descriptor header: {}", .{e});
     };
@@ -1722,8 +1727,7 @@ fn get_string_descriptor(
         .String,
         0x0409, //US-English
         endpoint_0_transfer_ring,
-        event_trb_ring,
-        event_response_map,
+        controller,
     ) catch |e| {
         print_serial("Failed to get string descriptor: {}", .{e});
     };
@@ -1769,8 +1773,7 @@ pub fn get_descriptor_from_endpoint0(
     descriptor_type: DescriptorType,
     flags: u16,
     endpoint_0_transfer_ring: *volatile TransferRing,
-    event_trb_ring: *volatile EventRing,
-    event_response_map: *EventResponseMap,
+    controller: *Controller,
 ) !void {
     try send_setup_command_endpoint0(
         6,
@@ -1782,8 +1785,7 @@ pub fn get_descriptor_from_endpoint0(
         (@as(u16, @intFromEnum(descriptor_type)) << 8) | @as(u16, descriptor_index),
         flags,
         endpoint_0_transfer_ring,
-        event_trb_ring,
-        event_response_map,
+        controller,
     );
 }
 fn get_configuration_from_endpoint0(
@@ -1809,8 +1811,7 @@ fn get_configuration_from_endpoint0(
 fn set_configuration_on_endpoint0(
     configuration_value: u8,
     endpoint_0_transfer_ring: *volatile TransferRing,
-    event_trb_ring: *volatile EventRing,
-    event_response_map: *EventResponseMap,
+    controller: *Controller,
 ) !void {
     try send_setup_command_endpoint0(
         9,
@@ -1822,8 +1823,7 @@ fn set_configuration_on_endpoint0(
         configuration_value,
         0,
         endpoint_0_transfer_ring,
-        event_trb_ring,
-        event_response_map,
+        controller,
     );
 }
 pub fn send_setup_command_endpoint0(
@@ -1836,8 +1836,7 @@ pub fn send_setup_command_endpoint0(
     value: u16,
     index: u16,
     endpoint_0_transfer_ring: *volatile TransferRing,
-    event_trb_ring: *volatile EventRing,
-    event_response_map: *EventResponseMap,
+    controller: *Controller,
 ) !void {
     const bm_request_type: u8 = (@as(u8, @intFromEnum(direction)) << 7) | (@as(u8, @intFromEnum(request_type)) << 5) | @as(u8, @intFromEnum(recipient));
     const setup_stage_trb = SetupStageTRB{
@@ -1943,7 +1942,7 @@ pub fn send_setup_command_endpoint0(
         }
     }
     endpoint_0_transfer_ring.doorbell.* = 1;
-    _ = try wait_for_transfer_response(transfer_trb_phyiscal_address, event_trb_ring, event_response_map);
+    _ = try wait_for_transfer_response(transfer_trb_phyiscal_address, controller);
 }
 
 //pub fn poll_event_ring_non_blocking(event_trb_ring: *volatile EventRing) !?PollEventRingResult {
@@ -1988,7 +1987,9 @@ pub fn send_setup_command_endpoint0(
 //}
 //return null;
 //}
-pub fn poll_event_ring(event_trb_ring: *volatile EventRing, event_response_map: *EventResponseMap) bool {
+pub fn poll_controller(controller: *Controller) bool {
+    const event_trb_ring = controller.event_ring;
+    const event_response_map = &controller.event_response_map;
     //TODO
     //const max_retries = 50;
     //var i: usize = 0;
@@ -2175,10 +2176,9 @@ fn initialize_device_slot_data_structures(
 
 fn submit_command(
     command: TransferRequestBlock,
-    command_trb_ring: *volatile CommandRing,
-    event_trb_ring: *volatile EventRing,
-    event_response_map: *EventResponseMap,
+    controller: *Controller,
 ) !PollEventRingResult {
+    const command_trb_ring = controller.command_ring;
     //write command block to the command ring
     var transfer_trb_phyiscal_address: u64 = command_trb_ring.ring.physical_address_of_current_index();
     {
@@ -2200,17 +2200,19 @@ fn submit_command(
     command_trb_ring.doorbell.* = 0;
 
     //TODO timeout
-    return wait_for_transfer_response(transfer_trb_phyiscal_address, event_trb_ring, event_response_map);
+    return wait_for_transfer_response(
+        transfer_trb_phyiscal_address,
+        controller,
+    );
 }
 
 fn wait_for_transfer_response(
     transfer_trb_phyiscal_address: usize,
-    event_trb_ring: *volatile EventRing,
-    event_response_map: *EventResponseMap,
+    controller: *Controller,
 ) !PollEventRingResult {
     while (true) {
-        if (poll_event_ring(event_trb_ring, event_response_map)) {
-            const response_opt = event_response_map.get(transfer_trb_phyiscal_address);
+        if (poll_controller(controller)) {
+            const response_opt = controller.event_response_map.get(transfer_trb_phyiscal_address);
             if (response_opt) |response| {
                 if (response.err) |e| {
                     return e;

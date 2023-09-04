@@ -72,9 +72,9 @@ pub fn RingQueue(comptime T: type) type {
                 next_ring_index(&self.rcursor, self.data.len);
             }
         }
-        pub inline fn dequeue(self: *Self) T {
+        pub inline fn dequeue(self: *Self) ?T {
             if (self.is_empty()) {
-                toolbox.panic("Trying to dequeue empty queue!", .{});
+                return null;
             }
             const ret = self.data[self.rcursor];
             next_ring_index(&self.rcursor, self.data.len);
