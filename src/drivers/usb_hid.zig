@@ -863,14 +863,10 @@ fn handle_input_data(
                 const modifier_scancodes = [_]w64.ScanCode{ .LeftCtrl, .LeftShift, .LeftAlt, .LeftFlag, .RightCtrl, .RightShift, .RightAlt, .RightFlag };
                 inline for (modifier_scancodes, 0..) |scancode, i| {
                     if ((key_modifiers_pressed & (1 << i)) != 0) {
-                        //TODO: handle key pressed event
-                        print_serial("Key down scan code: {}", .{scancode});
-                        //boksos_input.put_keyboard_event(.{ .KeyDown = scancode });
+                        input_state.modifier_key_pressed_events.enqueue(scancode);
                     }
                     if ((key_modifiers_released & (1 << i)) != 0) {
-                        //TODO: handle key released event
-                        print_serial("Key up scan code: {}", .{scancode});
-                        //boksos_input.put_keyboard_event(.{ .KeyUp = scancode });
+                        input_state.modifier_key_released_events.enqueue(scancode);
                     }
                 }
                 keyboard.modifier_keys_held = key_modifiers_held_now;
@@ -886,18 +882,12 @@ fn handle_input_data(
 
             for (keys_pressed) |key| {
                 if (usb_scancode_to_boksos_scancode(key)) |scancode| {
-                    //TODO: handle key pressed event
-                    print_serial("Key down scan code: {}", .{scancode});
                     input_state.key_pressed_events.enqueue(scancode);
-                    //boksos_input.put_keyboard_event(.{ .KeyDown = scancode });
                 }
             }
             for (keys_released) |key| {
                 if (usb_scancode_to_boksos_scancode(key)) |scancode| {
-                    //TODO: handle key released event
-                    print_serial("Key up scan code: {}", .{scancode});
                     input_state.key_released_events.enqueue(scancode);
-                    //boksos_input.put_keyboard_event(.{ .KeyUp = scancode });
                 }
             }
 

@@ -36,16 +36,16 @@ const KernelState = struct {
 };
 
 const StackUnwinder = struct {
-    fp: usize,
+    fp: u64,
     fn init() StackUnwinder {
         return .{ .fp = @frameAddress() };
     }
-    fn next(self: *StackUnwinder) ?usize {
-        if (self.fp == 0 or !toolbox.is_aligned_to(self.fp, @alignOf(usize))) {
+    fn next(self: *StackUnwinder) ?u64 {
+        if (self.fp == 0 or !toolbox.is_aligned_to(self.fp, @alignOf(u64))) {
             return null;
         }
-        const ip = @as(*const usize, @ptrFromInt(self.fp + @sizeOf(usize))).*;
-        const new_fp = @as(*const usize, @ptrFromInt(self.fp)).*;
+        const ip = @as(*const u64, @ptrFromInt(self.fp + @sizeOf(u64))).*;
+        const new_fp = @as(*const u64, @ptrFromInt(self.fp)).*;
         if (new_fp <= self.fp) {
             return null;
         }
@@ -261,32 +261,7 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
     }
 
     echo_str8("\\\n", .{});
-    while (true) {
-        var it = g_state.usb_xhci_controllers.iterator();
-        while (it.next_value()) |controller| {
-            if (usb_xhci.poll_controller(controller)) {
-                usb_hid.poll(
-                    controller,
-                    &g_state.input_state,
-                );
-            }
-        }
-        while (g_state.input_state.modifier_key_pressed_events.dequeue()) |scancode| {
-            _ = scancode;
-        }
-        while (g_state.input_state.modifier_key_released_events.dequeue()) |scancode| {
-            _ = scancode;
-        }
-        while (g_state.input_state.key_pressed_events.dequeue()) |scancode| {
-            const char = w64.scancode_to_ascii(scancode);
-            echo_str8("{c}", .{char});
-        }
-        while (g_state.input_state.key_released_events.dequeue()) |scancode| {
-            _ = scancode;
-        }
-        draw_cursor();
-        @memcpy(g_state.screen.frame_buffer, g_state.screen.back_buffer);
-    }
+    main_loop();
 
     toolbox.hang();
 }
@@ -300,28 +275,6 @@ pub inline fn free_memory(data: []u8) void {
     page_allocator.free(data);
 }
 
-pub fn draw_cursor() void {
-    //update cursor
-    {
-        const now = w64.now();
-        if (now.sub(g_state.last_cursor_update).milliseconds() >= CURSOR_BLINK_TIME_MS) {
-            g_state.last_cursor_update = now;
-            g_state.cursor_char = if (g_state.cursor_char == '@') ' ' else '@';
-        }
-    }
-
-    const index = g_state.cursor_char - ' ';
-    const font = g_state.screen.font;
-    const bitmap = font.character_bitmap(index);
-    for (0..font.height) |y| {
-        const screen_y = (g_state.cursor_y * font.height) + y;
-        for (0..font.width) |x| {
-            const screen_x = (g_state.cursor_x * font.kerning) + x;
-            g_state.screen.back_buffer[screen_y * g_state.screen.stride + screen_x] =
-                bitmap[y * font.width + x];
-        }
-    }
-}
 pub fn echo_welcome_line(comptime fmt: []const u8, args: anytype) void {
     const scratch_arena = g_state.scratch_arena;
     const arena_save_point = scratch_arena.create_save_point();
@@ -357,7 +310,6 @@ pub fn echo_str8(comptime fmt: []const u8, args: anytype) void {
             continue;
         }
         if (rune == '\n') {
-            g_state.cursor_x = 0;
             carriage_return();
             continue;
         }
@@ -398,39 +350,6 @@ pub fn echo_str8(comptime fmt: []const u8, args: anytype) void {
         if (g_state.cursor_x >= g_state.screen.width_in_characters) {
             carriage_return();
         }
-    }
-}
-
-fn carriage_return() void {
-    //output new line to serial
-    if (comptime ENABLE_SERIAL) {
-        asm volatile (
-            \\mov $0x3F8, %%dx
-            \\mov $'\n', %%al
-            \\outb %%al, %%dx
-            ::: "rax", "rdx");
-    }
-
-    g_state.cursor_x = 0;
-    g_state.cursor_y += 1;
-    const font = g_state.screen.font;
-    const height_in_characters = g_state.screen.height_in_characters;
-    if (g_state.cursor_y >= height_in_characters) {
-        for (0..g_state.screen.height_in_characters - 1) |cy| {
-            const srcy = (cy + 1) * font.height;
-            const desty = cy * font.height;
-            const src = g_state.screen.back_buffer[srcy * g_state.screen.stride .. (srcy + font.height - 1) * g_state.screen.stride +
-                g_state.screen.width];
-            const dest = g_state.screen.back_buffer[desty * g_state.screen.stride .. (desty + font.height - 1) * g_state.screen.stride +
-                g_state.screen.width];
-            @memcpy(dest, src);
-        }
-        {
-            const y = (height_in_characters - 1) * font.height;
-            const to_blank = g_state.screen.back_buffer[y * g_state.screen.stride ..];
-            @memset(to_blank, .{ .data = 0 });
-        }
-        g_state.cursor_y = height_in_characters - 1;
     }
 }
 
@@ -588,4 +507,107 @@ pub fn print_serial(comptime fmt: []const u8, args: anytype) void {
         : [char] "r" (@as(u8, '\n')),
         : "rax", "rdx"
     );
+}
+
+fn main_loop() void {
+    while (true) {
+        var it = g_state.usb_xhci_controllers.iterator();
+        while (it.next_value()) |controller| {
+            if (usb_xhci.poll_controller(controller)) {
+                usb_hid.poll(
+                    controller,
+                    &g_state.input_state,
+                );
+            }
+        }
+        while (g_state.input_state.modifier_key_pressed_events.dequeue()) |scancode| {
+            _ = scancode;
+        }
+        while (g_state.input_state.modifier_key_released_events.dequeue()) |scancode| {
+            _ = scancode;
+        }
+        while (g_state.input_state.key_pressed_events.dequeue()) |scancode| {
+            switch (scancode) {
+                .Backspace => {
+                    draw_blank_cursor();
+                    if (g_state.cursor_x > 0) {
+                        g_state.cursor_x -= 1;
+                    }
+                },
+                else => {
+                    const char = w64.scancode_to_ascii(scancode);
+                    echo_str8("{c}", .{char});
+                },
+            }
+        }
+        while (g_state.input_state.key_released_events.dequeue()) |scancode| {
+            _ = scancode;
+        }
+        update_cursor();
+        draw_cursor();
+        @memcpy(g_state.screen.frame_buffer, g_state.screen.back_buffer);
+    }
+}
+fn draw_blank_cursor() void {
+    const current_cursor = g_state.cursor_char;
+    g_state.cursor_char = ' ';
+    draw_cursor();
+    g_state.cursor_char = current_cursor;
+}
+
+fn update_cursor() void {
+    const now = w64.now();
+    if (now.sub(g_state.last_cursor_update).milliseconds() >= CURSOR_BLINK_TIME_MS) {
+        g_state.last_cursor_update = now;
+        g_state.cursor_char = if (g_state.cursor_char == '@') ' ' else '@';
+    }
+}
+
+fn draw_cursor() void {
+    const index = g_state.cursor_char - ' ';
+    const font = g_state.screen.font;
+    const bitmap = font.character_bitmap(index);
+    for (0..font.height) |y| {
+        const screen_y = (g_state.cursor_y * font.height) + y;
+        for (0..font.width) |x| {
+            const screen_x = (g_state.cursor_x * font.kerning) + x;
+            g_state.screen.back_buffer[screen_y * g_state.screen.stride + screen_x] =
+                bitmap[y * font.width + x];
+        }
+    }
+}
+
+fn carriage_return() void {
+    //output new line to serial
+    if (comptime ENABLE_SERIAL) {
+        asm volatile (
+            \\mov $0x3F8, %%dx
+            \\mov $'\n', %%al
+            \\outb %%al, %%dx
+            ::: "rax", "rdx");
+    }
+
+    draw_blank_cursor();
+
+    g_state.cursor_x = 0;
+    g_state.cursor_y += 1;
+    const font = g_state.screen.font;
+    const height_in_characters = g_state.screen.height_in_characters;
+    if (g_state.cursor_y >= height_in_characters) {
+        for (0..g_state.screen.height_in_characters - 1) |cy| {
+            const srcy = (cy + 1) * font.height;
+            const desty = cy * font.height;
+            const src = g_state.screen.back_buffer[srcy * g_state.screen.stride .. (srcy + font.height - 1) * g_state.screen.stride +
+                g_state.screen.width];
+            const dest = g_state.screen.back_buffer[desty * g_state.screen.stride .. (desty + font.height - 1) * g_state.screen.stride +
+                g_state.screen.width];
+            @memcpy(dest, src);
+        }
+        {
+            const y = (height_in_characters - 1) * font.height;
+            const to_blank = g_state.screen.back_buffer[y * g_state.screen.stride ..];
+            @memset(to_blank, .{ .data = 0 });
+        }
+        g_state.cursor_y = height_in_characters - 1;
+    }
 }
