@@ -732,6 +732,34 @@ pub const ScanCode = enum {
     F11,
     F12,
 };
+pub fn scancode_to_ascii_shifted(scancode: ScanCode) u8 {
+    return switch (scancode) {
+        .Zero => ')',
+        .One => '!',
+        .Two => '@',
+        .Three => '#',
+        .Four => '$',
+        .Five => '%',
+        .Six => '^',
+        .Seven => '&',
+        .Eight => '*',
+        .Nine => '(',
+
+        .Slash => '?',
+        .Backslash => '|',
+        .LeftBracket => '{',
+        .RightBracket => '}',
+        .Equals => '+',
+        .Backtick => '~',
+        .Hyphen => '_',
+        .Semicolon => ':',
+        .Quote => '"',
+        .Comma => '<',
+        .Period => '>',
+
+        else => scancode_to_ascii(scancode),
+    };
+}
 
 pub fn scancode_to_ascii(scancode: ScanCode) u8 {
     return switch (scancode) {

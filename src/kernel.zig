@@ -29,6 +29,7 @@ const KernelState = struct {
 
     usb_xhci_controllers: toolbox.RandomRemovalLinkedList(*usb_xhci.Controller),
     input_state: w64.InputState,
+    are_characters_shifted: bool,
 
     global_arena: *toolbox.Arena,
     frame_arena: *toolbox.Arena,
@@ -89,9 +90,10 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
             .mapped_memory = undefined,
             .next_free_virtual_address = kernel_start_context.next_free_virtual_address,
             .application_processor_contexts = kernel_start_context.application_processor_contexts,
-            .input_state = w64.InputState.init(kernel_start_context.global_arena),
 
+            .input_state = w64.InputState.init(kernel_start_context.global_arena),
             .usb_xhci_controllers = toolbox.RandomRemovalLinkedList(*usb_xhci.Controller).init(kernel_start_context.global_arena),
+            .are_characters_shifted = false,
 
             .global_arena = kernel_start_context.global_arena,
             .frame_arena = toolbox.Arena.init_with_buffer(frame_arena_bytes),
@@ -521,23 +523,88 @@ fn main_loop() void {
             }
         }
         while (g_state.input_state.modifier_key_pressed_events.dequeue()) |scancode| {
-            _ = scancode;
+            switch (scancode) {
+                .LeftShift, .RightShift => {
+                    g_state.are_characters_shifted = true;
+                },
+                else => {},
+            }
         }
         while (g_state.input_state.modifier_key_released_events.dequeue()) |scancode| {
-            _ = scancode;
+            switch (scancode) {
+                .LeftShift, .RightShift => {
+                    g_state.are_characters_shifted = false;
+                },
+                else => {},
+            }
         }
         while (g_state.input_state.key_pressed_events.dequeue()) |scancode| {
             switch (scancode) {
-                .Backspace => {
+                .LeftArrow, .Backspace => {
                     draw_blank_cursor();
                     if (g_state.cursor_x > 0) {
                         g_state.cursor_x -= 1;
                     }
                 },
-                else => {
-                    const char = w64.scancode_to_ascii(scancode);
+                .A,
+                .B,
+                .C,
+                .D,
+                .E,
+                .F,
+                .G,
+                .H,
+                .I,
+                .J,
+                .K,
+                .L,
+                .M,
+                .N,
+                .O,
+                .P,
+                .Q,
+                .R,
+                .S,
+                .T,
+                .U,
+                .V,
+                .W,
+                .X,
+                .Y,
+                .Z,
+
+                .Zero,
+                .One,
+                .Two,
+                .Three,
+                .Four,
+                .Five,
+                .Six,
+                .Seven,
+                .Eight,
+                .Nine,
+                .Space,
+                .Enter,
+
+                .Slash,
+                .Backslash,
+                .LeftBracket,
+                .RightBracket,
+                .Equals,
+                .Backtick,
+                .Hyphen,
+                .Semicolon,
+                .Quote,
+                .Comma,
+                .Period,
+                => {
+                    const char = if (g_state.are_characters_shifted)
+                        w64.scancode_to_ascii_shifted(scancode)
+                    else
+                        w64.scancode_to_ascii(scancode);
                     echo_str8("{c}", .{char});
                 },
+                else => {},
             }
         }
         while (g_state.input_state.key_released_events.dequeue()) |scancode| {
