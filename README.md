@@ -87,40 +87,68 @@ Perhaps in the future we can have mass media driver in the monitor where we can 
 Programs for Wozmon64 will be assembled AMD64 instructions that you will load directly into RAM. As such, any files that are Wozmon64 programs will be flat binary files with no header.  Wozmon64 will provide a couple of system-wide procedures and runtime constants that a program can execute to interact with the hardware. The calling convention of these procedures will follow the [64-bit version of the System V calling convention](https://wiki.osdev.org/Calling_Conventions). Here are the Zig function signatures, required data structures of the procedures and runtime constants:
 
 ```zig
-const KeyEvent = union(enum) {
-    KeyDown: UsageID
-    KeyUp: UsageID
+pub fn RingBuffer(comptime T: type) type {
+    return struct {
+        ...
+
+        //returns null if RingBuffer is empty
+        pub fn dequeue() ?T {
+            ...
+        }
+        pub fn enqueue(value: T) void {
+            ...
+        }
+    }
+}
+
+pub const KeyEvents = extern struct {
+    key_up_events: RingBuffer(UsageID),
+    key_down_events: RingBuffer(UsageID),
 
     //this corresponds to Usage ID of Keyboard/Keypad page of the USB HID usage table. 
     //See page 53 of https://www.usb.org/sites/default/files/documents/hut1_12v2.pdf
-    const UsageID = u8;
+    pub const UsageID = u8;
 };
 
 //returns true if there is an event, else false
-const poll_keyboard = @intToPtr(*const fn(out_event: *KeyEvent) callconv(.C) bool, 0xA0_0000);
+pub const poll_keyboard: *const fn(out_events: ?*KeyEvents) callconv(.C) bool = @ptrFromInt(0x220_0000);
 
-const MouseEvent = union(enum) {
-    MouseMoved: struct {dx: i16, dy: i16},
-    ScrollMoved: struct {dx: i16, dy: i16},
-    ButtonUp: Button,
-    ButtonDown: Button,
-    const Button = enum{Left, Middle, Right},
+pub const MouseEvents = extern struct {
+    mouse_moved: struct {dx: i16, dy: i16},
+    scroll_moved: struct {dx: i16, dy: i16},
+    button_up_events: RingBuffer(Button),
+    button_down_events: RingBuffer(Button),
+    
+    pub const Button = enum{Left, Middle, Right};
 };
 //returns true if there is an event, else false
-const poll_mouse = @intToPtr(*const fn(out_event: *MouseEvent) callconv(.C) bool, 0xA0_0008); 
+pub const poll_mouse: *const fn(out_event: ?*MouseEvent) callconv(.C) bool = @ptrFromInt(0x220_0008); 
 
-//returns true on success, else false.  core_number must be >= 1 and < N_CORES (core 0 is reserved for the monitor)
-const run_on_core = @intToPtr(*const fn(entry_point: *const fn(arg: ?*anyopaque) callconv(.C) void, arg: ?*anyopaque, core_number: u64) callconv(.C) bool, 0xA0_0010);
+pub const RunOnCoreStatus = enum(u32) {
+    Success = 0,
+    NoCoresAvailable,
+};
+//runs on the next available core, if any are available
+pub const run_on_core: *const fn(entry_point: ?*const fn(arg: ?*anyopaque) callconv(.C) void, arg: ?*anyopaque) callconv(.C) RunOnCoreStatus = @ptrFromInt(0x220_0010);
 
 
 //exits the current core and returns control back to the monitor.  If all cores are returned back to the montior, then the monitor interface assumes control of the machine.
-const exit = @intToPtr(*const fn() callconv(.C) void) callconv(.C) bool, 0xA0_0018);
+pub const exit: *const fn() callconv(.C) void callconv(.C) void = @ptrFromInt(0x220_0018);
 
 //runtime constant that contains the number of cores of the machine
-const N_CORES = @intToPtr(*const u64, 0xA0_0020);
+pub const N_CORES: *const u64 = @ptrFromInt(0x220_0020);
 
 //runtime constant that contains the highest usable RAM address
-const MAX_RAM_ADDRESS = @intToPtr(*const u64, 0xA0_0028);
+pub const MAX_RAM_ADDRESS: *const u64 = @ptrFromInt(0x220_0028);
+
+//runtime constant that contains the screen width
+pub const SCREEN_PIXEL_WIDTH: *const u64 = @ptrFromInt(0x220_0030);
+
+//runtime constant that contains the screen height
+pub const SCREEN_PIXEL_HEIGHT: *const u64 = @ptrFromInt(0x220_0038);
+
+//runtime constant that contains the frame buffer size
+pub const FRAME_BUFFER_SIZE: *const u64 = @ptrFromInt(0x220_0040);
 ```
 
 
@@ -128,14 +156,17 @@ const MAX_RAM_ADDRESS = @intToPtr(*const u64, 0xA0_0028);
 - AMD64 CPU with at least 2 physical cores (threads don't count!).
 - Motherboard with UEFI.
 - Graphics chip that supports UEFI Graphics Output Protocol (GOP).
-- Graphics chip and video monitor that supports a resolution of 1920x1080.
+- Graphics chip and video monitor that supports the following resolutions:
+    - 1280 x 720
+    - 1920 x 1080
+    - 3840 x 2160 
 
 ## Features
 
 - Supports 64-bit addresses and virtual memory.
 - Supports true backspace.
 - Error messages for bad input and runtime errors.
-- 1980x1080 24-bit color screen will be pixel-based as opposed to character-based.
+- Either 720p, 1080p, or 4K 24-bit color screen will be pixel-based as opposed to character-based.
 - Multi-core support, though the monitor itself will only be single threaded.
 
 As of now the monitor will have drivers for the following devices:
@@ -153,20 +184,22 @@ In the future we could support:
 
 This will be the virtual memory map of Wozmon64.  2MiB pages are used, so there maybe some invalid address space after some MMIO memory.
 
-| Address Range | Size | Name | Description |
-| ------------- | ---- | ---- |----------- |
+| Address Range | Virtual Address Space Size | Name | Description |
+| ------------- | -------------------------- | ---- |----------- |
 | 0x0 - 0x1F_FFFF | 2 MiB| Null Memory | Will throw `NULL MEMORY EXCEPTION` error if accessed |
-| 0x20_0000 - 0x9E_8FFF| 8,294,400 bytes |Frame Buffer  |Frame Buffer for the 1920x1080 screen. Each 4-byte pixel is in the form XRGB, where the `X` byte does nothing. Reads are discouraged from this memory.|
-| 0x9E_9000 - 0x9F_FFFF|  94,208 bytes | Invalid Memory | Access effects are unknown. |
-| 0xA0_0000 - A0_0007| 8 bytes | `poll_keyboard` Procedure Address | Contains the address of the `poll_keyboard` procedure. |
-| 0xA0_0008 - A0_000F| 8 bytes | `poll_mouse` Procedure Address | Contains the address of the `poll_mouse` procedure. |
-| 0xA0_0010 - A0_0017| 8 bytes | `run_on_core` Procedure Address | Contains the address of the `run_on_core` procedure. |
-| 0xA0_0018 - A0_001F| 8 bytes | `exit` Procedure Address | Contains the address of the `exit` procedure. |
-| 0xA0_0020 - A0_0027| 8 bytes | N_CORES  | Contains the number of physical cores the CPU has (not threads). |
-| 0xA0_0028 - A0_0030| 8 bytes | MAX_RAM_ADDRESS  | Contains the highest usable RAM address. `MAX_RAM_ADDRESS.* - 0xC0_0000` will give you the total number of bytes free on the system. |
-| 0xA0_0030 - A0_0037| 8 bytes | Program selector entry point  | Entry point of the **Program Selector** program. Run with `A00030R` in the monitor |
-| 0xA0_0038 - 0xBF_FFFF | 2,097,096 bytes | Reserved | Reserved for future use.
-| 0xC0_0000 - XXXXXX | Depends on the amount of RAM in the machine | Usable Memory | All the free memory on the machine|
+| 0x20_0000 - 0x21F_FFFF| 33,177,600 bytes |Frame Buffer  |Frame Buffer for the screen. Each 4-byte pixel is in the form XRGB, where the `X` byte does nothing. Size of the frame buffer depends on the resolution of the screen. Any memory access at or after `0x20_0000 + FRAME_BUFFER_SIZE.*` is undefined. Do not read from this memory.|
+| 0x220_0000 - 220_0007| 8 bytes | `poll_keyboard` Procedure Address | Contains the address of the `poll_keyboard` procedure. |
+| 0x220_0008 - 220_000F| 8 bytes | `poll_mouse` Procedure Address | Contains the address of the `poll_mouse` procedure. |
+| 0x220_0010 - 220_0017| 8 bytes | `run_on_core` Procedure Address | Contains the address of the `run_on_core` procedure. |
+| 0x220_0018 - 220_001F| 8 bytes | `exit` Procedure Address | Contains the address of the `exit` procedure. |
+| 0x220_0020 - 220_0027| 8 bytes | N_CORES  | Contains the number of physical cores the CPU has (not threads). |
+| 0x220_0028 - 220_002F| 8 bytes | MAX_RAM_ADDRESS  | Contains the highest usable RAM address. `MAX_RAM_ADDRESS.* - 0xC0_0000` will give you the total number of bytes free on the system. |
+| 0x220_0030 - 220_0037| 8 bytes | SCREEN_PIXEL_WIDTH  | Contains the screen width in pixels (e.g. 1920). |
+| 0x220_0038 - 220_003F| 8 bytes | SCREEN_PIXEL_HEIGHT  | Contains the screen height in pixels (e.g. 1080). |
+| 0x220_0040 - 220_0047| 8 bytes | FRAME_BUFFER_SIZE  | Contains the size of the frame buffer. |
+| 0x220_0048 - 220_004F| 8 bytes | Program selector entry point  | Entry point of the **Program Selector** program. Run with `2200048R` in the monitor |
+| 0x220_0048 - 0x22F_FFFF | 1,048,496 bytes | Reserved | Reserved for future use.
+| 0x230_0000 - XXXXXX | Depends on the amount of RAM in the machine | Usable Memory | All the free memory on the machine|
 | [XXXXXX + 1] - 0xFFFF_FFFF_7FFF_FFFF |  Depends on the amount of RAM in the machine | Invalid Memory| This is left over address space between usable memory and where the monitor lives.
 | 0xFFFF_FFFF_8000_0000 and after | Depends on the size of the monitor program | Monitor | Where the monitor lives.  You probably don't want to touch this memory unless you're feeling like a h4xor.| 
 
@@ -184,4 +217,4 @@ There are many things that are up in the air and alternative paths I have consid
 - How will network support work?
 
 ## Questions and Feedback
-If you have any questions or feedback, I'd love to hear from you! Please reach out to me at dan@boksos.com or DM @dbokser91 on Twitter.
+If you have any questions or feedback, I'd love to hear from you! Please reach out to me at dan@boksos.com or DM @dbokser91 on X/Twitter.
