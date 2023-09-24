@@ -311,7 +311,7 @@ fn macos_allocate_memory(n: usize) []u8 {
 
     const code = mach_vm_allocate(mach_task_self_, &address, n, VM_FLAGS_ANYWHERE);
     if (code == 0) {
-        return @as([*]u8, address)[0..n];
+        return @as([*]u8, @ptrFromInt(address))[0..n];
     }
     toolbox.panic("Error allocating {} bytes of OS memory. Code: {}", .{ n, code });
 }

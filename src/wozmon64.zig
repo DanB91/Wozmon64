@@ -17,6 +17,12 @@ pub const KERNEL_FRAME_ARENA_SIZE = toolbox.mb(4);
 pub const KERNEL_SCRATCH_ARENA_SIZE = toolbox.mb(4);
 
 pub const FRAME_BUFFER_VIRTUAL_ADDRESS = 0x20_0000;
+
+//Frame buffer data
+pub const SCREEN_PIXEL_WIDTH_ADDRESS = 0x220_0030;
+pub const SCREEN_PIXEL_HEIGHT_ADDRESS = 0x220_0038;
+pub const FRAME_BUFFER_SIZE_ADDRESS = 0x220_0040;
+
 pub const PAGE_TABLE_RECURSIVE_OFFSET = 510;
 
 pub const DisplayConfiguration = struct {};
@@ -46,8 +52,8 @@ pub const Screen = struct {
     height: usize,
     stride: usize,
 
-    width_in_characters: usize,
-    height_in_characters: usize,
+    width_in_runes: usize,
+    height_in_runes: usize,
 
     pub fn init(
         width: usize,
@@ -78,8 +84,8 @@ pub const Screen = struct {
             .height = height,
             .stride = stride,
 
-            .width_in_characters = @divTrunc(width, font.kerning),
-            .height_in_characters = @divTrunc(height, font.height),
+            .width_in_runes = @divTrunc(width, font.kerning),
+            .height_in_runes = @divTrunc(height, font.height),
         };
     }
 };
@@ -198,26 +204,28 @@ pub fn virtual_to_physical(
     }
     return error.VirtualAddressNotMapped;
 }
+pub const MapMemoryResult = struct {
+    virtual_address: u64,
+    next_free_virtual_address: u64,
+};
 pub fn map_conventional_memory_physical_address(
     starting_physical_address: u64,
-    starting_virtual_address_ptr: *u64, //increments to next free address
+    //TODO: i think we should get rid of this pointer and return the new virtual address instead
+    starting_virtual_address: u64,
     number_of_pages: usize,
     arena: *toolbox.Arena,
     mappings: *toolbox.RandomRemovalLinkedList(VirtualMemoryMapping),
-) u64 {
-    starting_virtual_address_ptr.* = toolbox.align_up(starting_virtual_address_ptr.*, MEMORY_PAGE_SIZE);
-    const starting_virtual_address = starting_virtual_address_ptr.*;
-    toolbox.assert(
-        toolbox.is_aligned_to(starting_physical_address, MEMORY_PAGE_SIZE),
-        "Physical address should be 2MB page aligned, but was {X}.",
-        .{starting_physical_address},
-    );
-    for (0..number_of_pages) |i| {
-        const virtual_address = starting_virtual_address + i * MEMORY_PAGE_SIZE;
-        const physical_address = starting_physical_address + i * MEMORY_PAGE_SIZE;
+) !MapMemoryResult {
+    if (!toolbox.is_aligned_to(starting_virtual_address, MEMORY_PAGE_SIZE)) {
+        return error.VirtualAddressNotPageAligned;
+    }
+    if (!toolbox.is_aligned_to(starting_physical_address, MEMORY_PAGE_SIZE)) {
+        return error.PhysicalAddressNotPageAligned;
+    }
 
-        defer starting_virtual_address_ptr.* += MEMORY_PAGE_SIZE;
-
+    var virtual_address = starting_virtual_address;
+    var physical_address = starting_physical_address;
+    for (0..number_of_pages) |_| {
         toolbox.assert(
             virtual_address > 0xFFFF_FF7F_FFFF_FFFF or virtual_address < 0xFFFF_FF80_0000_0000,
             "Mapping page table virtual address! physical address: {x}, virtual_address: {x}",
@@ -296,24 +304,17 @@ pub fn map_conventional_memory_physical_address(
                     .no_execute = false,
                 };
             } else {
-                toolbox.assert(
-                    entry.must_be_one == 1,
-                    "Expected 2MB PD, but was 4KB! Attempted virtual address to map: {X}",
-                    .{virtual_address},
-                );
-                toolbox.assert(
-                    false,
-                    "Trying map {x} to {x}, which is already mapped to {x}. Starting virtual address: {x}. Entry: {}",
-                    .{
-                        virtual_address,
-                        physical_address,
-                        entry.physical_page_base_address,
-                        starting_virtual_address,
-                        entry.*,
-                    },
-                );
+                if (entry.must_be_one == 1) {
+                    toolbox.panic(
+                        "Expected 2MB PD, but was 4KB! Attempted virtual address to map: {X}",
+                        .{virtual_address},
+                    );
+                }
+                return error.VirtualAddressAlreadyMapped;
             }
         }
+        virtual_address += MEMORY_PAGE_SIZE;
+        physical_address += MEMORY_PAGE_SIZE;
     }
     _ = mappings.append(.{
         .physical_address = starting_physical_address,
@@ -321,7 +322,10 @@ pub fn map_conventional_memory_physical_address(
         .size = number_of_pages * MEMORY_PAGE_SIZE,
         .memory_type = .ConventionalMemory,
     });
-    return starting_virtual_address;
+    return .{
+        .virtual_address = starting_virtual_address,
+        .next_free_virtual_address = virtual_address,
+    };
 }
 
 fn print_serial(comptime fmt: []const u8, args: anytype) void {

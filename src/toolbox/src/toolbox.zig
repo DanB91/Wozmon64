@@ -36,8 +36,11 @@ pub const Platform = enum {
 };
 pub const THIS_PLATFORM = if (@hasDecl(root, "THIS_PLATFORM"))
     root.THIS_PLATFORM
-else
-    @compileError("Please define the THIS_PLATFORM constant in the root source file");
+else switch (builtin.os.tag) {
+    .macos => Platform.MacOS,
+    .wasi => Platform.WASM,
+    else => @compileError("Please define the THIS_PLATFORM constant in the root source file"),
+};
 pub const IS_DEBUG = builtin.mode == .Debug;
 
 ////BoksOS runtime functions

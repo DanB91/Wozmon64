@@ -23,7 +23,7 @@ pub fn init(
     free_conventional_memory: []w64.ConventionalMemoryDescriptor,
     virtual_address_mappings: *toolbox.RandomRemovalLinkedList(w64.VirtualMemoryMapping),
 ) void {
-    g_state.arena = global_arena.create_arena_from_arena(toolbox.kb(128));
+    g_state.arena = global_arena.create_arena_from_arena(toolbox.mb(1));
     const arena = g_state.arena;
     const allocated_blocks = toolbox.HashMap(u64, PageAllocatorBlock)
         .init(128, arena);
@@ -68,35 +68,45 @@ pub fn allocate(number_of_pages: usize) []u8 {
     }
 
     //if nothing found, go to the free_conventional_memory structure
-    {
-        for (g_state.free_conventional_memory) |*desc| {
-            if (desc.number_of_pages >= number_of_pages) {
-                //TODO:
-                //  1) map next free virtual address
-                const virtual_address = w64.map_conventional_memory_physical_address(
-                    desc.physical_address,
-                    g_state.next_free_virtual_address,
-                    number_of_pages,
-                    g_state.arena,
-                    g_state.virtual_address_mappings,
-                );
-                //  2) update descriptor
-                desc.number_of_pages -= number_of_pages;
-                desc.physical_address += number_of_pages * w64.MEMORY_PAGE_SIZE;
-                //  3) add to allocated block map
-                g_state.allocated_blocks.put(virtual_address, .{
-                    .virtual_address = virtual_address,
-                    .number_of_pages = number_of_pages,
-                });
+    const virtual_address = toolbox.align_up(g_state.next_free_virtual_address.*, w64.MEMORY_PAGE_SIZE);
+    return allocate_at_address(virtual_address, number_of_pages);
+}
 
-                return @as(
-                    [*]u8,
-                    @ptrFromInt(virtual_address),
-                )[0 .. number_of_pages * w64.MEMORY_PAGE_SIZE];
-            }
+pub fn allocate_at_address(virtual_address: u64, number_of_pages: usize) []u8 {
+    for (g_state.free_conventional_memory) |*desc| {
+        if (desc.number_of_pages >= number_of_pages) {
+            //  1) map virtual address
+            const mapping_result = w64.map_conventional_memory_physical_address(
+                desc.physical_address,
+                virtual_address,
+                number_of_pages,
+                g_state.arena,
+                g_state.virtual_address_mappings,
+            ) catch |e| toolbox.panic("Could not map virtual address {X} to {X}: {}", .{
+                g_state.next_free_virtual_address,
+                desc.physical_address,
+                e,
+            });
+            g_state.next_free_virtual_address.* = mapping_result.next_free_virtual_address;
+            //  2) update descriptor
+            desc.number_of_pages -= number_of_pages;
+            desc.physical_address += number_of_pages * w64.MEMORY_PAGE_SIZE;
+            //  3) add to allocated block map
+            g_state.allocated_blocks.put(virtual_address, .{
+                .virtual_address = virtual_address,
+                .number_of_pages = number_of_pages,
+            });
+
+            return @as(
+                [*]u8,
+                @ptrFromInt(virtual_address),
+            )[0 .. number_of_pages * w64.MEMORY_PAGE_SIZE];
         }
     }
-    toolbox.panic("Out of page memory!", .{});
+    toolbox.panic(
+        "Out of page memory! Requested {} pages for virtual address: {X}",
+        .{ number_of_pages, virtual_address },
+    );
 }
 
 pub fn free(data: []u8) void {

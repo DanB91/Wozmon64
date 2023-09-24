@@ -27,7 +27,7 @@ Wozmon64 will be line based and support similar syntax as the original WozMon. T
     [RESPONSE]C0_00F0: 04
     ```
 
-- Entering a range will print out a range of bytes. Example:
+- Entering a range will print out a range of bytes (destination exclusive). Example:
 
     ```
     C000F0.C000F4[ENTER]
@@ -40,6 +40,14 @@ Wozmon64 will be line based and support similar syntax as the original WozMon. T
     [RESPONSE]C0_00F0: 00 33 55 66
 
     .C0000F8[ENTER]
+   [RESPONSE] C0_00F5: 11 CD AB
+    ```
+- Entering a "/" followed by a size will print the data at the source address until address + size. Example:
+ ```
+    C000F0/4[ENTER]
+    [RESPONSE]C0_00F0: 00 33 55 66
+
+    /3[ENTER]
    [RESPONSE] C0_00F5: 11 CD AB
     ```
 - Using the `:` operator will allow you write bytes into memory. When writing into memory, the previous value of the memory will be printed out.  Example:

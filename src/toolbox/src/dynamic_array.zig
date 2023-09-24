@@ -30,12 +30,21 @@ pub fn DynamicArray(comptime T: type) type {
             self._len += 1;
         }
 
+        pub fn remove_last(self: *Self) ?T {
+            if (self._len > 0) {
+                const ret = self.items()[self._len - 1];
+                self._len -= 1;
+                return ret;
+            }
+            return null;
+        }
+
         pub inline fn len(self: *const Self) usize {
             return self._len;
         }
 
         pub fn clear(self: *Self) void {
-            self.* = .{ .arena = self.arena };
+            self._len = 0;
         }
 
         pub const sort = switch (@typeInfo(T)) {

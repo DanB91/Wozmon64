@@ -14,12 +14,12 @@ const UEFI_PAGE_SIZE = toolbox.kb(4);
 
 const KERNEL_STACK_BOTTOM_ADDRESS = 0x1_0000_0000_0000_0000 - w64.MEMORY_PAGE_SIZE;
 
-const ZSGraphicsOutputProtocol = std.os.uefi.protocols.GraphicsOutputProtocol;
-const ZSGraphicsOutputProtocolMode = std.os.uefi.protocols.GraphicsOutputProtocolMode;
-const ZSGraphicsOutputModeInformation = std.os.uefi.protocols.GraphicsOutputModeInformation;
+const ZSGraphicsOutputProtocol = std.os.uefi.protocol.GraphicsOutput;
+const ZSGraphicsOutputProtocolMode = std.os.uefi.protocol.GraphicsOutput.Mode;
+const ZSGraphicsOutputModeInformation = std.os.uefi.protocol.GraphicsOutput.Mode.Info;
 const ZSUEFIStatus = std.os.uefi.Status;
 const ZSMemoryDescriptor = std.os.uefi.tables.MemoryDescriptor;
-const ZSLoadedImageProtocol = std.os.uefi.protocols.LoadedImageProtocol;
+const ZSLoadedImageProtocol = std.os.uefi.protocol.LoadedImage;
 
 const SmallUEFIMemoryDescriptor = ZSMemoryDescriptor;
 

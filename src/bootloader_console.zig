@@ -4,7 +4,7 @@ const std = @import("std");
 const w64 = @import("wozmon64.zig");
 const toolbox = @import("toolbox");
 
-const ENABLE_CONSOLE = true;
+const ENABLE_CONSOLE = toolbox.IS_DEBUG;
 const BootloaderStage = enum {
     UEFI,
     AfterExitButBeforeScreenIsSetup,
@@ -83,7 +83,7 @@ fn graphics_println(comptime fmt: []const u8, args: anytype) void {
             }
         }
         g_state.cursor_x += 1;
-        if (g_state.cursor_x >= g_state.screen.width_in_characters) {
+        if (g_state.cursor_x >= g_state.screen.width_in_runes) {
             carriage_return();
         }
     }
@@ -94,8 +94,8 @@ fn carriage_return() void {
     g_state.cursor_x = 0;
     g_state.cursor_y += 1;
     const font = g_state.screen.font;
-    if (g_state.cursor_y >= g_state.screen.height_in_characters) {
-        for (0..g_state.screen.height_in_characters - 1) |cy| {
+    if (g_state.cursor_y >= g_state.screen.height_in_runes) {
+        for (0..g_state.screen.height_in_runes - 1) |cy| {
             const srcy = (cy + 1) * font.height;
             const desty = cy * font.height;
             const src = g_state.screen.back_buffer[srcy * g_state.screen.stride .. (srcy + font.height - 1) * g_state.screen.stride +
@@ -105,11 +105,11 @@ fn carriage_return() void {
             @memcpy(dest, src);
         }
         {
-            const y = (g_state.screen.height_in_characters - 1) * font.height;
+            const y = (g_state.screen.height_in_runes - 1) * font.height;
             const to_blank = g_state.screen.back_buffer[y * g_state.screen.stride ..];
             @memset(to_blank, .{ .data = 0 });
         }
-        g_state.cursor_y = g_state.screen.height_in_characters - 1;
+        g_state.cursor_y = g_state.screen.height_in_runes - 1;
     }
 }
 

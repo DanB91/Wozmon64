@@ -30,11 +30,15 @@ pub fn RingQueue(comptime T: type) type {
         const Self = @This();
 
         pub fn init(ring_len: usize, arena: *toolbox.Arena) Self {
-            if (!toolbox.is_power_of_2(ring_len) or ring_len == 0) {
-                toolbox.panic("RingQueue len must be a power of 2 that is > 0! Was: {}", .{ring_len});
+            if (ring_len == 0) {
+                toolbox.panic("RingQueue len must be > 0! Was: {}", .{ring_len});
+            }
+            var len = ring_len;
+            if (!toolbox.is_power_of_2(ring_len)) {
+                len = toolbox.next_power_of_2(ring_len);
             }
             return .{
-                .data = arena.push_slice(T, ring_len),
+                .data = arena.push_slice(T, len),
                 .rcursor = 0,
                 .wcursor = 0,
             };

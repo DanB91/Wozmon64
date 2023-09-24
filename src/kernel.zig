@@ -9,17 +9,19 @@ const amd64 = @import("amd64.zig");
 const pcie = @import("drivers/pcie.zig");
 const usb_xhci = @import("drivers/usb_xhci.zig");
 const usb_hid = @import("drivers/usb_hid.zig");
+const commands = @import("commands.zig");
+const programs = @import("programs.zig");
 
 pub const THIS_PLATFORM = toolbox.Platform.Wozmon64;
 
 const CURSOR_BLINK_TIME_MS = 500;
-const ENABLE_SERIAL = true;
+const ENABLE_SERIAL = toolbox.IS_DEBUG;
 
 const KernelState = struct {
     cursor_x: usize,
     cursor_y: usize,
     last_cursor_update: w64.Time,
-    cursor_char: u8,
+    cursor_char: toolbox.Rune,
 
     screen: w64.Screen,
     root_xsdt: *const amd64.XSDT,
@@ -34,6 +36,16 @@ const KernelState = struct {
     global_arena: *toolbox.Arena,
     frame_arena: *toolbox.Arena,
     scratch_arena: *toolbox.Arena,
+
+    //monitor state
+    rune_buffer: []toolbox.Rune,
+    command_buffer: toolbox.DynamicArray(u8),
+    opened_address: u64,
+
+    //runtime "constants"
+    screen_pixel_width: *u64,
+    screen_pixel_height: *u64,
+    frame_buffer_size: *u64,
 };
 
 const StackUnwinder = struct {
@@ -60,12 +72,12 @@ pub fn panic(msg: []const u8, error_return_trace: ?*std.builtin.StackTrace, ret_
     _ = ret_addr;
     _ = error_return_trace;
 
-    echo_str8("{s}", .{msg});
+    echo_line("{s}", .{msg});
     var it = StackUnwinder.init();
     while (it.next()) |address| {
-        echo_str8("At {X}\n", .{address});
+        echo_line("At {X}", .{address});
     }
-    @memcpy(g_state.screen.frame_buffer, g_state.screen.back_buffer);
+    render();
     toolbox.hang();
 }
 
@@ -95,9 +107,23 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
             .usb_xhci_controllers = toolbox.RandomRemovalLinkedList(*usb_xhci.Controller).init(kernel_start_context.global_arena),
             .are_characters_shifted = false,
 
+            .command_buffer = toolbox.DynamicArray(u8).init(
+                kernel_start_context.global_arena,
+                kernel_start_context.screen.width_in_runes * kernel_start_context.screen.height_in_runes,
+            ),
+            .opened_address = 0,
+            .rune_buffer = kernel_start_context.global_arena.push_slice(
+                toolbox.Rune,
+                kernel_start_context.screen.height_in_runes * kernel_start_context.screen.width,
+            ),
+
             .global_arena = kernel_start_context.global_arena,
             .frame_arena = toolbox.Arena.init_with_buffer(frame_arena_bytes),
             .scratch_arena = toolbox.Arena.init_with_buffer(scratch_arena_bytes),
+
+            .screen_pixel_height = @ptrFromInt(w64.SCREEN_PIXEL_HEIGHT_ADDRESS),
+            .screen_pixel_width = @ptrFromInt(w64.SCREEN_PIXEL_WIDTH_ADDRESS),
+            .frame_buffer_size = @ptrFromInt(w64.FRAME_BUFFER_SIZE_ADDRESS),
         };
         g_state.mapped_memory = b: {
             var mapped_memory = toolbox.RandomRemovalLinkedList(w64.VirtualMemoryMapping).init(g_state.global_arena);
@@ -250,7 +276,12 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
         print_serial("PCIE devices len: {}", .{pcie_devices.len});
     }
 
-    @memset(g_state.screen.back_buffer, .{ .data = 0 });
+    //populate runtime constants
+    {
+        g_state.screen_pixel_width.* = g_state.screen.width;
+        g_state.screen_pixel_height.* = g_state.screen.height;
+        g_state.frame_buffer_size.* = g_state.screen.frame_buffer.len;
+    }
 
     echo_welcome_line("*** Wozmon64 ***\n", .{});
     {
@@ -262,7 +293,7 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
         });
     }
 
-    echo_str8("\\\n", .{});
+    echo_line("\\", .{});
     main_loop();
 
     toolbox.hang();
@@ -285,20 +316,23 @@ pub fn echo_welcome_line(comptime fmt: []const u8, args: anytype) void {
     const str = toolbox.str8fmt(fmt, args, scratch_arena);
 
     toolbox.assert(
-        g_state.screen.width_in_characters > str.rune_length,
+        g_state.screen.width_in_runes > str.rune_length,
         "Bad font scale. Try making it smaller",
         .{},
     );
-    const padding_each_side = @divTrunc(g_state.screen.width_in_characters - str.rune_length, 2);
+    const padding_each_side = @divTrunc(g_state.screen.width_in_runes - str.rune_length, 2);
     const spaces = scratch_arena.push_slice(u8, padding_each_side);
 
     @memset(spaces, ' ');
 
-    echo_str8("{s}{}{s}", .{ spaces, str, spaces });
+    echo_fmt("{s}{}{s}", .{ spaces, str, spaces });
     carriage_return();
 }
+pub inline fn echo_line(comptime fmt: []const u8, args: anytype) void {
+    echo_fmt(fmt ++ "\n", args);
+}
 
-pub fn echo_str8(comptime fmt: []const u8, args: anytype) void {
+pub fn echo_fmt(comptime fmt: []const u8, args: anytype) void {
     const scratch_arena = g_state.scratch_arena;
     const arena_save_point = scratch_arena.create_save_point();
     defer scratch_arena.restore_save_point(arena_save_point);
@@ -335,21 +369,14 @@ pub fn echo_str8(comptime fmt: []const u8, args: anytype) void {
             );
         }
 
-        const index = byte - ' ';
+        g_state.rune_buffer[
+            g_state.cursor_y * g_state.screen.width_in_runes +
+                g_state.cursor_x
+        ] =
+            byte;
 
-        const font = g_state.screen.font;
-        const bitmap = font.character_bitmap(index);
-
-        for (0..font.height) |y| {
-            const screen_y = (g_state.cursor_y * font.height) + y;
-            for (0..font.width) |x| {
-                const screen_x = (g_state.cursor_x * font.kerning) + x;
-                g_state.screen.back_buffer[screen_y * g_state.screen.stride + screen_x] =
-                    bitmap[y * font.width + x];
-            }
-        }
         g_state.cursor_x += 1;
-        if (g_state.cursor_x >= g_state.screen.width_in_characters) {
+        if (g_state.cursor_x >= g_state.screen.width_in_runes) {
             carriage_return();
         }
     }
@@ -449,39 +476,124 @@ const ExceptionRegisters = packed struct {
 
 comptime {
     const SAVE_FRAME_POINTER = if (toolbox.IS_DEBUG)
-        \\push %rbp
+        \\
         \\mov %rsp, %rbp
+        \\
     else
-        "";
+        \\
+        \\
+        ;
+
     asm (
         \\.global page_fault_handler
         \\.extern page_fault_handler_inner
         \\page_fault_handler:
         \\
-        \\#TODO: save all registers
-        \\mov (%rsp), %rdi #save error code
-        \\add $8,%rsp
-        \\mov %cr2, %rsi
-        \\
+        \\xchg %rdi, (%rsp) #save and pop error code
+        \\push %rbp
         ++ SAVE_FRAME_POINTER ++
+            \\push %rsi
+            \\push %rax
+            \\push %rbx
+            \\push %rcx
+            \\push %rdx
+            \\push %r8
+            \\push %r9
+            \\push %r10
+            \\push %r11
+            \\push %r12
+            \\push %r13
+            \\push %r14
+            \\push %r15
+            \\sub $0x100, %rsp
+            \\movdqu %xmm15, 0xF0(%rsp)
+            \\movdqu %xmm14, 0xE0(%rsp)
+            \\movdqu %xmm13, 0xD0(%rsp)
+            \\movdqu %xmm12, 0xC0(%rsp)
+            \\movdqu %xmm11, 0xB0(%rsp)
+            \\movdqu %xmm10, 0xC0(%rsp)
+            \\movdqu %xmm9, 0x90(%rsp)
+            \\movdqu %xmm8, 0x80(%rsp)
+            \\movdqu %xmm7, 0x70(%rsp)
+            \\movdqu %xmm6, 0x60(%rsp)
+            \\movdqu %xmm5, 0x50(%rsp)
+            \\movdqu %xmm4, 0x40(%rsp)
+            \\movdqu %xmm3, 0x30(%rsp)
+            \\movdqu %xmm2, 0x20(%rsp)
+            \\movdqu %xmm1, 0x10(%rsp)
+            \\movdqu %xmm0, 0x0(%rsp)
             \\
+            \\mov %cr2, %rsi
+            \\
+            \\
+            \\#TODO: we must save all caller registers!!! (e.g. RAX, RCX, etc)
             \\call page_fault_handler_inner
+            \\
+            \\
+            \\movdqu 0(%rsp), %xmm15 
+            \\movdqu 0x10(%rsp), %xmm14
+            \\movdqu 0x20(%rsp), %xmm13
+            \\movdqu 0x30(%rsp), %xmm12
+            \\movdqu 0x40(%rsp), %xmm11
+            \\movdqu 0x50(%rsp), %xmm10
+            \\movdqu 0x60(%rsp), %xmm9 
+            \\movdqu 0x70(%rsp), %xmm8 
+            \\movdqu 0x80(%rsp), %xmm7 
+            \\movdqu 0x90(%rsp), %xmm6 
+            \\movdqu 0xA0(%rsp), %xmm5 
+            \\movdqu 0xB0(%rsp), %xmm4 
+            \\movdqu 0xC0(%rsp), %xmm3 
+            \\movdqu 0xD0(%rsp), %xmm2 
+            \\movdqu 0xE0(%rsp), %xmm1 
+            \\movdqu 0xF0(%rsp), %xmm0 
+            \\add $0x100, %rsp
+            \\pop %r15
+            \\pop %r14
+            \\pop %r13
+            \\pop %r12
+            \\pop %r11
+            \\pop %r10
+            \\pop %r9
+            \\pop %r8
+            \\pop %rdx
+            \\pop %rcx
+            \\pop %rbx
+            \\pop %rax
+            \\pop %rsi
+            \\pop %rbp
+            \\pop %rdi
+            \\iretq
     );
 }
 
 extern fn page_fault_handler() void;
 
 export fn page_fault_handler_inner(error_code: u64, unmapped_address: u64) callconv(.C) void {
-    //return address should have something likeFFFFFFFF80008D70
-    toolbox.panic(
-        "Page fault! Error code: {}, Unmapped address: {X}",
-        .{
-            error_code,
-            unmapped_address,
-        },
-    );
+    _ = error_code;
+    const to_map = toolbox.align_down(unmapped_address, w64.MEMORY_PAGE_SIZE);
+    if (to_map == 0) {
+        toolbox.panic("Allocating memory at null page!", .{});
+    }
+    print_serial("Allocating page for address: {X}", .{to_map});
+    var it = StackUnwinder.init();
+    while (it.next()) |address| {
+        print_serial("At {X}", .{address});
+    }
 
-    //TODO as of now, we cannot return since we destroy all registers
+    //TODO: remove
+    const page = page_allocator.allocate_at_address(to_map, 1);
+    for (page) |*b| {
+        b.* = 0xAA;
+    }
+
+    // //return address should have something like FFFFFFFF80008D70
+    // toolbox.panic(
+    //     "Page fault! Error code: {}, Unmapped address: {X}",
+    //     .{
+    //         error_code,
+    //         unmapped_address,
+    //     },
+    // );
 }
 
 //for debugging within print routines
@@ -539,90 +651,58 @@ fn main_loop() void {
             }
         }
         while (g_state.input_state.key_pressed_events.dequeue()) |scancode| {
-            switch (scancode) {
-                .LeftArrow, .Backspace => {
-                    draw_blank_cursor();
-                    if (g_state.cursor_x > 0) {
-                        g_state.cursor_x -= 1;
-                    }
-                },
-                .A,
-                .B,
-                .C,
-                .D,
-                .E,
-                .F,
-                .G,
-                .H,
-                .I,
-                .J,
-                .K,
-                .L,
-                .M,
-                .N,
-                .O,
-                .P,
-                .Q,
-                .R,
-                .S,
-                .T,
-                .U,
-                .V,
-                .W,
-                .X,
-                .Y,
-                .Z,
-
-                .Zero,
-                .One,
-                .Two,
-                .Three,
-                .Four,
-                .Five,
-                .Six,
-                .Seven,
-                .Eight,
-                .Nine,
-                .Space,
-                .Enter,
-
-                .Slash,
-                .Backslash,
-                .LeftBracket,
-                .RightBracket,
-                .Equals,
-                .Backtick,
-                .Hyphen,
-                .Semicolon,
-                .Quote,
-                .Comma,
-                .Period,
-                => {
-                    const char = if (g_state.are_characters_shifted)
-                        w64.scancode_to_ascii_shifted(scancode)
-                    else
-                        w64.scancode_to_ascii(scancode);
-                    echo_str8("{c}", .{char});
-                },
-                else => {},
+            if (scancode == .F1) {
+                type_program(&programs.draw_flashing_screen);
+            } else {
+                type_key(scancode, g_state.are_characters_shifted);
             }
         }
         while (g_state.input_state.key_released_events.dequeue()) |scancode| {
             _ = scancode;
         }
-        update_cursor();
-        draw_cursor();
-        @memcpy(g_state.screen.frame_buffer, g_state.screen.back_buffer);
+        blink_cursor();
+
+        render();
     }
 }
-fn draw_blank_cursor() void {
-    const current_cursor = g_state.cursor_char;
-    g_state.cursor_char = ' ';
+fn render() void {
+    @memset(g_state.screen.back_buffer, .{ .data = 0 });
+    draw_runes();
     draw_cursor();
-    g_state.cursor_char = current_cursor;
+    @memcpy(g_state.screen.frame_buffer, g_state.screen.back_buffer);
 }
 
-fn update_cursor() void {
+fn draw_runes() void {
+    var rune_x: usize = 0;
+    var rune_y: usize = 0;
+    for (g_state.rune_buffer) |c| {
+        draw_rune(c, rune_x, rune_y);
+
+        rune_x += 1;
+        if (rune_x >= g_state.screen.width_in_runes) {
+            rune_x = 0;
+            rune_y += 1;
+        }
+    }
+}
+fn draw_rune(rune: toolbox.Rune, rune_x: usize, rune_y: usize) void {
+    if (rune < ' ') {
+        return;
+    }
+    const index = @as(u8, @intCast(rune)) - ' ';
+    const font = g_state.screen.font;
+    const bitmap = font.character_bitmap(index);
+    for (0..font.height) |y| {
+        const screen_y = (rune_y * font.height) + y;
+        for (0..font.width) |x| {
+            const screen_x = (rune_x * font.kerning) + x;
+            g_state.screen.back_buffer[screen_y * g_state.screen.stride + screen_x] =
+                bitmap[y * font.width + x];
+        }
+    }
+}
+
+fn blink_cursor() void {
     const now = w64.now();
     if (now.sub(g_state.last_cursor_update).milliseconds() >= CURSOR_BLINK_TIME_MS) {
         g_state.last_cursor_update = now;
@@ -631,17 +711,7 @@ fn update_cursor() void {
 }
 
 fn draw_cursor() void {
-    const index = g_state.cursor_char - ' ';
-    const font = g_state.screen.font;
-    const bitmap = font.character_bitmap(index);
-    for (0..font.height) |y| {
-        const screen_y = (g_state.cursor_y * font.height) + y;
-        for (0..font.width) |x| {
-            const screen_x = (g_state.cursor_x * font.kerning) + x;
-            g_state.screen.back_buffer[screen_y * g_state.screen.stride + screen_x] =
-                bitmap[y * font.width + x];
-        }
-    }
+    draw_rune(g_state.cursor_char, g_state.cursor_x, g_state.cursor_y);
 }
 
 fn carriage_return() void {
@@ -654,27 +724,239 @@ fn carriage_return() void {
             ::: "rax", "rdx");
     }
 
-    draw_blank_cursor();
-
     g_state.cursor_x = 0;
     g_state.cursor_y += 1;
-    const font = g_state.screen.font;
-    const height_in_characters = g_state.screen.height_in_characters;
-    if (g_state.cursor_y >= height_in_characters) {
-        for (0..g_state.screen.height_in_characters - 1) |cy| {
-            const srcy = (cy + 1) * font.height;
-            const desty = cy * font.height;
-            const src = g_state.screen.back_buffer[srcy * g_state.screen.stride .. (srcy + font.height - 1) * g_state.screen.stride +
-                g_state.screen.width];
-            const dest = g_state.screen.back_buffer[desty * g_state.screen.stride .. (desty + font.height - 1) * g_state.screen.stride +
-                g_state.screen.width];
+    // const font = g_state.screen.font;
+    const height_in_runes = g_state.screen.height_in_runes;
+    if (g_state.cursor_y >= height_in_runes) {
+        const width_in_runes = g_state.screen.width_in_runes;
+        for (0..height_in_runes - 1) |row| {
+            const dest_start = row * width_in_runes;
+            const src_start = (row + 1) * width_in_runes;
+            const dest = g_state.rune_buffer[dest_start .. dest_start + width_in_runes];
+            const src = g_state.rune_buffer[src_start .. src_start + width_in_runes];
             @memcpy(dest, src);
         }
-        {
-            const y = (height_in_characters - 1) * font.height;
-            const to_blank = g_state.screen.back_buffer[y * g_state.screen.stride ..];
-            @memset(to_blank, .{ .data = 0 });
-        }
-        g_state.cursor_y = height_in_characters - 1;
+        //clear final row
+        const dest_start = (height_in_runes - 1) * width_in_runes;
+        @memset(g_state.rune_buffer[dest_start .. dest_start + width_in_runes], ' ');
+        g_state.cursor_y = height_in_runes - 1;
     }
+}
+fn type_program(program: []const u8) void {
+    type_number(@as(u32, 0x230_0000));
+    type_key(.Semicolon, true);
+    type_key(.Space, false);
+    for (program) |b| {
+        type_number(b);
+        type_key(.Space, false);
+    }
+    type_key(.Enter, false);
+}
+
+fn type_number(number: anytype) void {
+    const number_of_bits: i32 = @bitSizeOf(@TypeOf(number));
+    var shift = number_of_bits - 4;
+    while (shift >= 0) : (shift -= 4) {
+        type_nibble(@intCast((number >> @intCast(shift)) & 0xF));
+    }
+}
+fn type_nibble(nibble: u8) void {
+    const to_type: w64.ScanCode = switch (nibble) {
+        0 => .Zero,
+        1 => .One,
+        2 => .Two,
+        3 => .Three,
+        4 => .Four,
+        5 => .Five,
+        6 => .Six,
+        7 => .Seven,
+        8 => .Eight,
+        9 => .Nine,
+        0xA => .A,
+        0xB => .B,
+        0xC => .C,
+        0xD => .D,
+        0xE => .E,
+        0xF => .F,
+        else => unreachable,
+    };
+    type_key(to_type, false);
+}
+fn type_key(scancode: w64.ScanCode, are_characters_shifted: bool) void {
+    switch (scancode) {
+        .LeftArrow, .Backspace => {
+            if (g_state.cursor_x > 0) {
+                g_state.cursor_x -= 1;
+            }
+            _ = g_state.command_buffer.remove_last();
+        },
+        .A,
+        .B,
+        .C,
+        .D,
+        .E,
+        .F,
+        .G,
+        .H,
+        .I,
+        .J,
+        .K,
+        .L,
+        .M,
+        .N,
+        .O,
+        .P,
+        .Q,
+        .R,
+        .S,
+        .T,
+        .U,
+        .V,
+        .W,
+        .X,
+        .Y,
+        .Z,
+
+        .Zero,
+        .One,
+        .Two,
+        .Three,
+        .Four,
+        .Five,
+        .Six,
+        .Seven,
+        .Eight,
+        .Nine,
+        .Space,
+
+        .Slash,
+        .Backslash,
+        .LeftBracket,
+        .RightBracket,
+        .Equals,
+        .Backtick,
+        .Hyphen,
+        .Semicolon,
+        .Quote,
+        .Comma,
+        .Period,
+        => {
+            const char = if (are_characters_shifted)
+                w64.scancode_to_ascii_shifted(scancode)
+            else
+                w64.scancode_to_ascii(scancode);
+            echo_fmt("{c}", .{char});
+
+            _ = g_state.command_buffer.append(char);
+        },
+        .Enter => {
+            echo_line("", .{});
+            const parse_result =
+                commands.parse_command(
+                g_state.command_buffer.items(),
+                g_state.scratch_arena,
+            );
+            defer g_state.scratch_arena.reset();
+            handle_parse_result(parse_result, g_state.command_buffer.items());
+
+            g_state.command_buffer.clear();
+        },
+        else => {},
+    }
+}
+
+fn handle_command(command: commands.Command) void {
+    switch (command) {
+        .None => {},
+        .Read => |arguments| {
+            read_memory(
+                arguments.from,
+                arguments.to,
+                arguments.number_of_bytes,
+            );
+        },
+        .Write => |arguments| {
+            handle_address_wrap_around(arguments.start, arguments.data.len) catch return;
+            handle_null_page(arguments.start) catch return;
+            const destination = @as([*]u8, @ptrFromInt(arguments.start))[0..arguments.data.len];
+            for (destination, arguments.data) |*d, s| {
+                d.* = s;
+            }
+            echo_line("", .{});
+            read_memory(arguments.start, null, null);
+        },
+        .Execute => |arguments| {
+            //TODO, execute on next thread
+            const entry_point: *const fn () callconv(.C) void = @ptrFromInt(arguments.start);
+            entry_point();
+        },
+    }
+}
+fn read_memory(from_address: ?u64, to_address: ?u64, number_of_bytes: ?u64) void {
+    const length = number_of_bytes orelse 1;
+    const from = from_address orelse g_state.opened_address;
+    const to = to_address orelse from + length;
+    if (to < from) {
+        echo_line("End address '{X}' must be less start address '{X}'", .{ to, from });
+        return;
+    }
+    handle_null_page(from) catch return;
+    g_state.opened_address = to;
+
+    const size = @min(to - from, 256);
+    const start = to - size;
+
+    const to_read = @as([*]u8, @ptrFromInt(start))[0..size];
+    var cursor: usize = 0;
+    const MAX_BYTES_PER_LINE = 16;
+    while (cursor < to_read.len) {
+        echo_fmt("{X}: ", .{start + cursor});
+        const limit = @min(MAX_BYTES_PER_LINE, to_read.len - cursor);
+        for (to_read[cursor .. cursor + limit]) |b| {
+            echo_fmt("{X} ", .{b});
+        }
+        echo_line("", .{});
+
+        cursor += limit;
+    }
+}
+fn handle_address_wrap_around(start_address: u64, len: usize) !void {
+    var x: u128 = start_address;
+    x += len;
+    if (x > 0xFFFF_FFFF_FFFF_FFFF) {
+        echo_line("Address range wraps around, which is unsupported.", .{});
+        return error.AddressWrapsAround;
+    }
+}
+fn handle_null_page(address: u64) !void {
+    if (toolbox.align_down(address, w64.MEMORY_PAGE_SIZE) == 0) {
+        echo_line("Address range '{X}' is in null page.", .{
+            address,
+        });
+        return error.InNullPage;
+    }
+}
+
+fn handle_parse_result(parse_result: commands.ParseResult, command_buffer: []const u8) void {
+    switch (parse_result) {
+        .Command => |command| {
+            handle_command(command);
+        },
+        .HexNumberTooBig => |descriptor| {
+            const hex_number_string = command_buffer[descriptor.start..descriptor.end];
+            echo_line(
+                "Number starting at column {} ('{s}') is too big. Max 8 bytes in length.",
+                .{ descriptor.start, hex_number_string },
+            );
+        },
+        .InvalidToken => |bad_token| {
+            echo_line("Invalid token '{c}'.", .{bad_token});
+        },
+        .UnexpectedToken => |token| {
+            const token_string = command_buffer[token.start..token.end];
+            echo_line("Unexpected token '{s}' at column {}", .{ token_string, token.start });
+        },
+    }
+    echo_line("\n\\", .{});
 }
