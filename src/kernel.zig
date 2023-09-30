@@ -143,21 +143,40 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
         g_state.scratch_arena = toolbox.Arena.init(w64.KERNEL_SCRATCH_ARENA_SIZE);
     }
     //set up GDT
-    set_up_gdt();
+    set_up_gdt(g_state.global_arena);
 
     //set up IDT
-    set_up_idt();
-
-    //set up memory map
-    {
-        //TODO
-
-    }
+    set_up_idt(g_state.global_arena);
 
     //bring processors in to kernel space
     {
-        //TODO
+        for (g_state.application_processor_contexts) |context| {
+            const stack = g_state.global_arena.push_slice_aligned(
+                u8,
+                w64.MEMORY_PAGE_SIZE,
+                w64.MEMORY_PAGE_SIZE,
+            );
+            const start_context_data: *w64.ApplicationProcessorKernelStartContext = @ptrFromInt(
+                @intFromPtr(stack.ptr) + stack.len -
+                    @sizeOf(w64.ApplicationProcessorKernelStartContext),
+            );
+            start_context_data.* = .{ .processor_id = context.processor_id };
+            const rsp = @intFromPtr(start_context_data);
+            const cr3: u64 =
+                asm volatile ("mov %%cr3, %[cr3]"
+                : [cr3] "=r" (-> u64),
+            );
+            context.application_processor_kernel_entry_data = .{
+                .cr3 = cr3,
+                .rsp = rsp,
+                .start_context_data = start_context_data,
+                .entry = core_entry,
+            };
+        }
     }
+
+    //bring processors in to kernel space
+    {}
 
     //set up drivers
     {
@@ -298,6 +317,16 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
 
     toolbox.hang();
 }
+fn core_entry(context: *w64.ApplicationProcessorKernelStartContext) callconv(.C) noreturn {
+    _ = context;
+    const arena = toolbox.Arena.init(w64.MEMORY_PAGE_SIZE);
+    set_up_gdt(arena);
+    set_up_idt(arena);
+
+    while (true) {
+        std.atomic.spinLoopHint();
+    }
+}
 pub inline fn allocate_memory(n: usize) []u8 {
     return page_allocator.allocate(
         @divTrunc(toolbox.align_up(n, w64.MEMORY_PAGE_SIZE), w64.MEMORY_PAGE_SIZE),
@@ -382,7 +411,7 @@ pub fn echo_fmt(comptime fmt: []const u8, args: anytype) void {
     }
 }
 
-fn set_up_gdt() void {
+noinline fn set_up_gdt(arena: *toolbox.Arena) void {
     //TODO
     const gdt_array = [3]amd64.GDTDescriptor{
         //null descriptor
@@ -416,7 +445,7 @@ fn set_up_gdt() void {
             .base_addr_bits_24_to_31 = 0,
         },
     };
-    const gdt = g_state.global_arena.push_slice(amd64.GDTDescriptor, gdt_array.len);
+    const gdt = arena.push_slice(amd64.GDTDescriptor, gdt_array.len);
     @memcpy(gdt, gdt_array[0..]);
 
     const gdt_register = amd64.GDTRegister{
@@ -447,8 +476,8 @@ fn set_up_gdt() void {
     );
 }
 
-fn set_up_idt() void {
-    var idt = g_state.global_arena.push_slice_clear(amd64.IDTDescriptor, 256);
+fn set_up_idt(arena: *toolbox.Arena) void {
+    var idt = arena.push_slice_clear(amd64.IDTDescriptor, 256);
     const idt_register = amd64.IDTRegister{
         .limit = @intCast(idt.len - 1),
         .idt = idt.ptr,
@@ -752,6 +781,8 @@ fn type_program(program: []const u8) void {
         type_key(.Space, false);
     }
     type_key(.Enter, false);
+    type_number(@as(u32, 0x230_0000));
+    type_key(.R, false);
 }
 
 fn type_number(number: anytype) void {
@@ -788,6 +819,8 @@ fn type_key(scancode: w64.ScanCode, are_characters_shifted: bool) void {
         .LeftArrow, .Backspace => {
             if (g_state.cursor_x > 0) {
                 g_state.cursor_x -= 1;
+                g_state.rune_buffer[g_state.cursor_y * g_state.screen.width_in_runes + g_state.cursor_x] =
+                    ' ';
             }
             _ = g_state.command_buffer.remove_last();
         },

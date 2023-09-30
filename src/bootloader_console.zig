@@ -124,7 +124,7 @@ fn uefi_println(comptime fmt: []const u8, args: anytype) void {
     _ = std.os.uefi.system_table.con_out.?.outputString(&buf16);
 }
 
-fn serial_println(comptime fmt: []const u8, args: anytype) void {
+pub fn serial_println(comptime fmt: []const u8, args: anytype) void {
     if (comptime !ENABLE_CONSOLE) {
         return;
     }

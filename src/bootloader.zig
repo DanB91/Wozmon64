@@ -473,6 +473,9 @@ pub fn main() noreturn {
 
     println("tsc mhz: {}", .{tsc_mhz});
 
+    //TODO, probably shouldn't assume BSP is 0 for core id
+    amd64.wrmsr(amd64.IA32_TSC_AUX_MSR, 0);
+
     const application_processor_contexts =
         bootstrap_application_processors(global_arena, number_of_enabled_processors);
 
@@ -486,6 +489,10 @@ pub fn main() noreturn {
     }
     println("APs booted!", .{});
 
+    for (application_processor_contexts) |*context| {
+        context.* = physical_to_virtual_pointer(context.*, mapped_memory.items());
+    }
+
     var kernel_start_context = global_arena.push(w64.KernelStartContext);
     kernel_start_context.* = .{
         .root_xsdt = physical_to_virtual_pointer(root_xsdt, mapped_memory.items()),
@@ -494,7 +501,7 @@ pub fn main() noreturn {
         .free_conventional_memory = physical_to_virtual_pointer(free_conventional_memory.items(), mapped_memory.items()),
         .next_free_virtual_address = toolbox.align_up(next_free_virtual_address, w64.MEMORY_PAGE_SIZE),
         .global_arena = global_arena,
-        .application_processor_contexts = application_processor_contexts,
+        .application_processor_contexts = physical_to_virtual_pointer(application_processor_contexts, mapped_memory.items()),
         .tsc_mhz = tsc_mhz,
     };
     kernel_start_context.screen.back_buffer = physical_to_virtual_pointer(
@@ -1498,13 +1505,16 @@ export fn processor_entry(
     println("processor id: {}", .{processor_id});
     @atomicStore(u64, &context.processor_id, processor_id, .SeqCst);
     @atomicStore(bool, &context.is_booted, true, .SeqCst);
+
+    amd64.wrmsr(amd64.IA32_TSC_AUX_MSR, processor_id);
     while (true) {
         if (context.application_processor_kernel_entry_data) |entry_data| {
+            console.serial_println("starting processor id: {}, {X},entry: {X}", .{ processor_id, entry_data.rsp, @intFromPtr(entry_data.entry) });
             asm volatile (
                 \\movq %[cr3_data], %%cr3
                 \\movq %[stack_virtual_address], %%rsp
                 \\movq %[ksc_addr], %%rdi
-                \\jmpq *%[entry_point] #here we go!!!!
+                \\call *%[entry_point] #here we go!!!!
                 \\ud2 #this instruction is for searchability in the disassembly
                 :
                 : [cr3_data] "r" (entry_data.cr3),

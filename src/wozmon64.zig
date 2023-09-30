@@ -97,14 +97,16 @@ pub const BootloaderProcessorContext = struct {
     application_processor_kernel_entry_data: ?struct {
         entry: *const fn (
             context: *ApplicationProcessorKernelStartContext,
-        ) noreturn,
+        ) callconv(.C) noreturn,
         cr3: u64, //page table address
         rsp: u64, //initial stack pointer
-        start_context_data: *anyopaque,
+        start_context_data: *ApplicationProcessorKernelStartContext,
     },
 };
 
-pub const ApplicationProcessorKernelStartContext = struct {};
+pub const ApplicationProcessorKernelStartContext = struct {
+    processor_id: u64,
+};
 
 pub const KernelStartContext = struct {
     screen: Screen,
@@ -587,6 +589,50 @@ pub fn delay_milliseconds(n: i64) void {
         std.atomic.spinLoopHint();
     }
 }
+
+pub fn get_core_id() u64 {
+    return amd64.rdmsr(amd64.IA32_TSC_AUX_MSR);
+}
+
+pub const ReentrantTicketLock = struct {
+    serving: u64 = 0,
+    taken: u64 = 0,
+
+    recursion_level: u64 = 0,
+    core_id: i64 = -1,
+
+    pub fn lock(self: *ReentrantTicketLock) void {
+        const core_id = @atomicLoad(i64, &self.core_id, .SeqCst);
+        if (core_id == get_core_id()) {
+            self.recursion_level += 1;
+            return;
+        }
+        const ticket = @atomicRmw(u64, &self.taken, .Add, 1, .SeqCst);
+        while (true) {
+            if (@cmpxchgWeak(
+                u64,
+                &self.serving,
+                ticket,
+                ticket,
+                .AcqRel,
+                .Acquire,
+            ) == null) {
+                @atomicStore(i64, &self.core_id, @intCast(get_core_id()), .SeqCst);
+                self.recursion_level = 1;
+                return;
+            } else {
+                std.atomic.spinLoopHint();
+            }
+        }
+    }
+
+    pub fn release(self: *ReentrantTicketLock) void {
+        self.recursion_level -= 1;
+        if (self.recursion_level == 0) {
+            _ = @atomicRmw(u64, &self.serving, .Add, 1, .SeqCst);
+        }
+    }
+};
 
 comptime {
     toolbox.static_assert(@sizeOf(Pixel) == 4, "Incorrect size for Pixel");

@@ -397,6 +397,7 @@ pub inline fn cpuid(input_eax: u32) CPUIDResult {
 }
 pub const IA32_APIC_BASE_MSR = 0x1B;
 pub const PAT_MSR = 0x277; //Page attribute table MSR;
+pub const IA32_TSC_AUX_MSR = 0xC0000103; //Used for storing processor id
 
 pub inline fn rdmsr(msr: u32) u64 {
     var eax: u64 = 0;

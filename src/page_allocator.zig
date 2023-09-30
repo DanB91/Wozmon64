@@ -13,6 +13,7 @@ const PageAllocatorState = struct {
     virtual_address_mappings: *toolbox.RandomRemovalLinkedList(w64.VirtualMemoryMapping),
     next_free_virtual_address: *u64,
     arena: *toolbox.Arena,
+    lock: w64.ReentrantTicketLock,
 };
 
 var g_state: PageAllocatorState = undefined;
@@ -35,10 +36,14 @@ pub fn init(
         .free_blocks = free_blocks,
         .free_conventional_memory = free_conventional_memory,
         .virtual_address_mappings = virtual_address_mappings,
+        .lock = .{},
     };
 }
 
 pub fn pages_free() usize {
+    g_state.lock.lock();
+    defer g_state.lock.release();
+
     var ret: usize = 0;
     for (g_state.free_conventional_memory) |desc| {
         ret += desc.number_of_pages;
@@ -51,6 +56,9 @@ pub fn pages_free() usize {
 }
 
 pub fn allocate(number_of_pages: usize) []u8 {
+    g_state.lock.lock();
+    defer g_state.lock.release();
+
     //first go through free list
     {
         var it = g_state.free_blocks.iterator();
@@ -73,6 +81,9 @@ pub fn allocate(number_of_pages: usize) []u8 {
 }
 
 pub fn allocate_at_address(virtual_address: u64, number_of_pages: usize) []u8 {
+    g_state.lock.lock();
+    defer g_state.lock.release();
+
     for (g_state.free_conventional_memory) |*desc| {
         if (desc.number_of_pages >= number_of_pages) {
             //  1) map virtual address
@@ -110,6 +121,9 @@ pub fn allocate_at_address(virtual_address: u64, number_of_pages: usize) []u8 {
 }
 
 pub fn free(data: []u8) void {
+    g_state.lock.lock();
+    defer g_state.lock.release();
+
     const virtual_address = @intFromPtr(data.ptr);
     const block_opt = g_state.allocated_blocks.get(virtual_address);
     if (block_opt) |block| {
