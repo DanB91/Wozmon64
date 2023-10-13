@@ -17,6 +17,7 @@ pub fn build(b: *std.Build) !void {
             .root_source_file = .{ .path = "src/kernel.zig" },
             .target = kernel_target,
             .optimize = optimize,
+            .main_pkg_path = .{ .path = "." },
         });
         exe.linker_script = .{ .path = "src/linker.ld" };
         exe.code_model = .kernel;

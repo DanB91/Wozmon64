@@ -1,6 +1,7 @@
 const toolbox = @import("toolbox");
 const std = @import("std");
 const w64 = @import("wozmon64.zig");
+const kernel_memory = @import("kernel_memory.zig");
 
 pub const ACPI2RSDP = extern struct {
     signature: [8]u8,
@@ -38,7 +39,6 @@ pub fn root_xsdt_entries(xsdt: *const XSDT) []align(4) u64 {
 
 pub fn find_acpi_table(
     root_xsdt: *const XSDT,
-    memory_mappings: toolbox.RandomRemovalLinkedList(w64.VirtualMemoryMapping),
     comptime name: []const u8,
     comptime Table: type,
 ) !*align(4) const Table {
@@ -46,7 +46,7 @@ pub fn find_acpi_table(
     const table_xsdt = b: {
         for (entries) |physical_address| {
             const entry: *const XSDT = @ptrFromInt(
-                w64.physical_to_virtual(physical_address, memory_mappings) catch
+                kernel_memory.physical_to_virtual(physical_address) catch
                     toolbox.panic(
                     "Could not find mapping for ACPI physical address: {X}",
                     .{physical_address},

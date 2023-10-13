@@ -104,7 +104,7 @@ pub fn playdate_panic(
                     playdate_error("%s", to_print.ptr);
                     break :b;
                 };
-                std.debug.writeCurrentStackTrace(stream.writer(), debug_info, std.debug.detectTTYConfig(), null) catch {};
+                std.debug.writeCurrentStackTrace(stream.writer(), debug_info, std.io.tty.detectConfig(std.io.getStdErr()), null) catch {};
             }
             const to_print = std.fmt.bufPrintZ(&buffer, "{s} -- {s}", .{ msg, stack_trace_buffer[0..stream.pos] }) catch "Unknown error";
             playdate_error("%s", to_print.ptr);

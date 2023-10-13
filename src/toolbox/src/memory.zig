@@ -235,11 +235,11 @@ pub const Arena = struct {
 
 pub fn os_allocate_object(comptime T: type) *T {
     var memory = platform_allocate_memory(@sizeOf(T));
-    return @as(*T, @alignCast(memory.ptr));
+    return @as(*T, @ptrCast(@alignCast(memory.ptr)));
 }
 pub fn os_free_object(to_free: anytype) void {
     const object_size = @sizeOf(@TypeOf(to_free.*));
-    platform_free_memory(@as([*]u8, to_free)[0..object_size]);
+    platform_free_memory(@as([*]u8, @ptrCast(to_free))[0..object_size]);
 }
 pub fn os_allocate_objects(comptime T: type, n: usize) []T {
     var memory = platform_allocate_memory(n * @sizeOf(T));
@@ -353,7 +353,7 @@ fn boksos_free_memory(memory: []u8) void {
 fn playdate_allocate_memory(n: usize) []u8 {
     const data_opt = toolbox.playdate_realloc(null, n);
     if (data_opt) |data| {
-        return @as([*]u8, data)[0..n];
+        return @as([*]u8, @ptrCast(data))[0..n];
     }
     toolbox.panic("Error allocating {} bytes of OS memory.", .{n});
 }

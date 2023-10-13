@@ -614,7 +614,7 @@ fn bootstrap_application_processors(arena: *toolbox.Arena, number_of_processors:
                     .is_booted = false,
                     .processor_id = 0,
                     .pml4_table_address = cr3,
-                    .application_processor_kernel_entry_data = null,
+                    .application_processor_kernel_entry_data = .{ .value = null },
                 };
                 const context_data: [8]u8 = @bitCast(@intFromPtr(context));
                 const i = ((proc + 1) * w64.MEMORY_PAGE_SIZE) - @sizeOf(*w64.BootloaderProcessorContext);
@@ -1508,13 +1508,18 @@ export fn processor_entry(
 
     amd64.wrmsr(amd64.IA32_TSC_AUX_MSR, processor_id);
     while (true) {
-        if (context.application_processor_kernel_entry_data) |entry_data| {
-            console.serial_println("starting processor id: {}, {X},entry: {X}", .{ processor_id, entry_data.rsp, @intFromPtr(entry_data.entry) });
+        if (context.application_processor_kernel_entry_data.get()) |entry_data| {
+            console.serial_println("starting processor id: {}, rsp {X},entry: {X}", .{
+                processor_id,
+                entry_data.rsp,
+                @intFromPtr(entry_data.entry),
+            });
+
             asm volatile (
                 \\movq %[cr3_data], %%cr3
-                \\movq %[stack_virtual_address], %%rsp
                 \\movq %[ksc_addr], %%rdi
-                \\call *%[entry_point] #here we go!!!!
+                \\movq %[stack_virtual_address], %%rsp
+                \\callq *%[entry_point] #here we go!!!!
                 \\ud2 #this instruction is for searchability in the disassembly
                 :
                 : [cr3_data] "r" (entry_data.cr3),

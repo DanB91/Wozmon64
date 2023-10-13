@@ -16,6 +16,7 @@ const State = struct {
     cursor_x: usize = 0,
     cursor_y: usize = 0,
     lock: toolbox.TicketLock = .{},
+    serial_lock: toolbox.TicketLock = .{},
 };
 
 var g_state = State{ .screen = undefined };
@@ -128,6 +129,8 @@ pub fn serial_println(comptime fmt: []const u8, args: anytype) void {
     if (comptime !ENABLE_CONSOLE) {
         return;
     }
+    g_state.serial_lock.lock();
+    defer g_state.serial_lock.release();
     const COM1_PORT_ADDRESS = 0x3F8;
     var buf: [MAX_BYTES]u8 = undefined;
     const bytes = std.fmt.bufPrint(&buf, fmt ++ "\r\n", args) catch buf[0..];

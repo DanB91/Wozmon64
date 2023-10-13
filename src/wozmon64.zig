@@ -94,18 +94,22 @@ pub const BootloaderProcessorContext = struct {
     is_booted: bool,
     pml4_table_address: u64,
     processor_id: u64,
-    application_processor_kernel_entry_data: ?struct {
+    application_processor_kernel_entry_data: Atomic(?struct {
         entry: *const fn (
-            context: *ApplicationProcessorKernelStartContext,
+            context: *ApplicationProcessorKernelContext,
         ) callconv(.C) noreturn,
         cr3: u64, //page table address
         rsp: u64, //initial stack pointer
-        start_context_data: *ApplicationProcessorKernelStartContext,
-    },
+        start_context_data: *ApplicationProcessorKernelContext,
+    }),
 };
 
-pub const ApplicationProcessorKernelStartContext = struct {
+pub const ApplicationProcessorKernelContext = struct {
     processor_id: u64,
+    job: Atomic(?struct {
+        entry: *const fn (user_data: ?*anyopaque) callconv(.C) void,
+        user_data: ?*anyopaque,
+    }),
 };
 
 pub const KernelStartContext = struct {
@@ -137,6 +141,8 @@ pub const VirtualMemoryMapping = struct {
     size: usize, //in bytes
     memory_type: MemoryType,
 };
+
+//TODO: remove
 pub fn physical_to_virtual(
     physical_address: u64,
     mappings: toolbox.RandomRemovalLinkedList(VirtualMemoryMapping),
@@ -153,6 +159,7 @@ pub fn physical_to_virtual(
     return error.PhysicalAddressNotMapped;
 }
 
+//TODO: remove
 pub fn virtual_to_physical(
     virtual_address: u64,
     mappings: *const toolbox.RandomRemovalLinkedList(VirtualMemoryMapping),
@@ -594,6 +601,59 @@ pub fn get_core_id() u64 {
     return amd64.rdmsr(amd64.IA32_TSC_AUX_MSR);
 }
 
+pub fn Atomic(comptime T: type) type {
+    return struct {
+        value: T,
+        lock: ReentrantTicketLock = .{},
+
+        const Self = @This();
+
+        pub const get = switch (@sizeOf(T)) {
+            1, 2, 4, 8 => get_register,
+            else => get_generic,
+        };
+        pub const set = switch (@sizeOf(T)) {
+            1, 2, 4, 8 => set_register,
+            else => set_generic,
+        };
+
+        fn get_generic(self: *Self) T {
+            self.lock.lock();
+            const value = self.value;
+            self.lock.release();
+            return value;
+        }
+
+        fn set_generic(self: *Self, value: T) void {
+            self.lock.lock();
+            self.value = value;
+            self.lock.release();
+        }
+
+        inline fn get_register(self: *Self) T {
+            const RegisterType = get_register_type();
+            const reg_value: RegisterType = @bitCast(self.value);
+            return @bitCast(@atomicLoad(RegisterType, &reg_value, .SeqCst));
+        }
+
+        inline fn set_register(self: *Self, value: T) void {
+            const RegisterType = get_register_type();
+            const reg_value: RegisterType = @bitCast(value);
+            @atomicStore(RegisterType, &self.value, reg_value, .SeqCst);
+        }
+
+        fn get_register_type() type {
+            return switch (@sizeOf(T)) {
+                1 => u8,
+                2 => u16,
+                4 => u32,
+                8 => u64,
+                else => @compileError("Incorrect usage of get_register_type!"),
+            };
+        }
+    };
+}
+
 pub const ReentrantTicketLock = struct {
     serving: u64 = 0,
     taken: u64 = 0,
@@ -629,6 +689,7 @@ pub const ReentrantTicketLock = struct {
     pub fn release(self: *ReentrantTicketLock) void {
         self.recursion_level -= 1;
         if (self.recursion_level == 0) {
+            @atomicStore(i64, &self.core_id, @intCast(-1), .SeqCst);
             _ = @atomicRmw(u64, &self.serving, .Add, 1, .SeqCst);
         }
     }
@@ -639,7 +700,7 @@ comptime {
 }
 
 //userspace functions
-pub fn echo(bytes: [*c]u8, len: usize) void {
+pub fn echo(bytes: [*c]u8, len: u64) callconv(.C) void {
     const str = toolbox.str8(bytes[0..len]);
     kernel.echo_str8("{}", .{str});
 }

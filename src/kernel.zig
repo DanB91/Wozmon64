@@ -3,7 +3,7 @@
 
 const std = @import("std");
 const toolbox = @import("toolbox");
-const page_allocator = @import("page_allocator.zig");
+const kernel_memory = @import("kernel_memory.zig");
 const w64 = @import("wozmon64.zig");
 const amd64 = @import("amd64.zig");
 const pcie = @import("drivers/pcie.zig");
@@ -25,9 +25,7 @@ const KernelState = struct {
 
     screen: w64.Screen,
     root_xsdt: *const amd64.XSDT,
-    mapped_memory: toolbox.RandomRemovalLinkedList(w64.VirtualMemoryMapping),
-    application_processor_contexts: []*w64.BootloaderProcessorContext,
-    next_free_virtual_address: u64,
+    application_processor_contexts: []*w64.ApplicationProcessorKernelContext,
 
     usb_xhci_controllers: toolbox.RandomRemovalLinkedList(*usb_xhci.Controller),
     input_state: w64.InputState,
@@ -50,11 +48,17 @@ const KernelState = struct {
 
 const StackUnwinder = struct {
     fp: u64,
+    i: usize = 0,
+    max_iterations: usize = 10,
+
     fn init() StackUnwinder {
-        return .{ .fp = @frameAddress() };
+        return .{
+            .fp = @frameAddress(),
+        };
     }
     fn next(self: *StackUnwinder) ?u64 {
-        if (self.fp == 0 or !toolbox.is_aligned_to(self.fp, @alignOf(u64))) {
+        defer self.i += 1;
+        if (self.i >= self.max_iterations or self.fp == 0 or !toolbox.is_aligned_to(self.fp, @alignOf(u64))) {
             return null;
         }
         const ip = @as(*const u64, @ptrFromInt(self.fp + @sizeOf(u64))).*;
@@ -99,9 +103,7 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
 
             .screen = kernel_start_context.screen,
             .root_xsdt = kernel_start_context.root_xsdt,
-            .mapped_memory = undefined,
-            .next_free_virtual_address = kernel_start_context.next_free_virtual_address,
-            .application_processor_contexts = kernel_start_context.application_processor_contexts,
+            .application_processor_contexts = undefined,
 
             .input_state = w64.InputState.init(kernel_start_context.global_arena),
             .usb_xhci_controllers = toolbox.RandomRemovalLinkedList(*usb_xhci.Controller).init(kernel_start_context.global_arena),
@@ -125,18 +127,18 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
             .screen_pixel_width = @ptrFromInt(w64.SCREEN_PIXEL_WIDTH_ADDRESS),
             .frame_buffer_size = @ptrFromInt(w64.FRAME_BUFFER_SIZE_ADDRESS),
         };
-        g_state.mapped_memory = b: {
+        const mapped_memory = b: {
             var mapped_memory = toolbox.RandomRemovalLinkedList(w64.VirtualMemoryMapping).init(g_state.global_arena);
             for (kernel_start_context.mapped_memory) |mapping| {
                 _ = mapped_memory.append(mapping);
             }
             break :b mapped_memory;
         };
-        page_allocator.init(
+        kernel_memory.init(
             g_state.global_arena,
-            &g_state.next_free_virtual_address,
+            kernel_start_context.next_free_virtual_address,
             kernel_start_context.free_conventional_memory,
-            &g_state.mapped_memory,
+            mapped_memory,
         );
         //TODO: remove
         g_state.frame_arena = toolbox.Arena.init(w64.KERNEL_FRAME_ARENA_SIZE);
@@ -150,40 +152,45 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
 
     //bring processors in to kernel space
     {
-        for (g_state.application_processor_contexts) |context| {
-            const stack = g_state.global_arena.push_slice_aligned(
+        g_state.application_processor_contexts = g_state.global_arena.push_slice(
+            *w64.ApplicationProcessorKernelContext,
+            kernel_start_context.application_processor_contexts.len,
+        );
+
+        for (kernel_start_context.application_processor_contexts, 0..) |context, i| {
+            const stack = g_state.global_arena.push_slice_clear_aligned(
                 u8,
                 w64.MEMORY_PAGE_SIZE,
                 w64.MEMORY_PAGE_SIZE,
             );
-            const start_context_data: *w64.ApplicationProcessorKernelStartContext = @ptrFromInt(
+            const ap_kernel_context: *w64.ApplicationProcessorKernelContext = @ptrFromInt(
                 @intFromPtr(stack.ptr) + stack.len -
-                    @sizeOf(w64.ApplicationProcessorKernelStartContext),
+                    @sizeOf(w64.ApplicationProcessorKernelContext),
             );
-            start_context_data.* = .{ .processor_id = context.processor_id };
-            const rsp = @intFromPtr(start_context_data);
+            ap_kernel_context.* = .{
+                .processor_id = context.processor_id,
+                .job = .{ .value = null },
+            };
+            const rsp = @intFromPtr(ap_kernel_context);
             const cr3: u64 =
                 asm volatile ("mov %%cr3, %[cr3]"
                 : [cr3] "=r" (-> u64),
             );
-            context.application_processor_kernel_entry_data = .{
+            context.application_processor_kernel_entry_data.set(.{
                 .cr3 = cr3,
-                .rsp = rsp,
-                .start_context_data = start_context_data,
+                .rsp = toolbox.align_down(rsp, 16),
+                .start_context_data = ap_kernel_context,
                 .entry = core_entry,
-            };
+            });
+            g_state.application_processor_contexts[i] = ap_kernel_context;
         }
     }
-
-    //bring processors in to kernel space
-    {}
 
     //set up drivers
     {
         const pcie_devices = pcie.enumerate_devices(
             kernel_start_context.root_xsdt,
             g_state.global_arena,
-            g_state.mapped_memory,
         );
         for (pcie_devices) |*dev| {
             switch (dev.header) {
@@ -192,13 +199,12 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
                         end_point_device_header.subclass_code == pcie.NVME_SUBCLASS_CODE)
                     {
                         const physical_bar0 = end_point_device_header.effective_bar0();
-                        const nvme_bar0 = w64.physical_to_virtual(physical_bar0, g_state.mapped_memory) catch b: {
-                            break :b w64.map_mmio_physical_address(
+                        print_serial("physical address: {X}", .{physical_bar0});
+                        const nvme_bar0 = kernel_memory.physical_to_virtual(physical_bar0) catch b: {
+                            break :b kernel_memory.map_mmio_physical_address(
                                 physical_bar0,
-                                &g_state.next_free_virtual_address,
                                 1,
                                 g_state.global_arena,
-                                &g_state.mapped_memory,
                             );
                         };
 
@@ -229,13 +235,11 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
                             pcie.XHCI_PROGRAMING_INTERFACE => {
                                 const physical_bar0 = end_point_device_header.effective_bar0();
                                 print_serial("XCHI physical bar0: {X}", .{physical_bar0});
-                                const virtual_bar0 = w64.physical_to_virtual(physical_bar0, g_state.mapped_memory) catch b: {
-                                    break :b w64.map_mmio_physical_address(
+                                const virtual_bar0 = kernel_memory.physical_to_virtual(physical_bar0) catch b: {
+                                    break :b kernel_memory.map_mmio_physical_address(
                                         physical_bar0,
-                                        &g_state.next_free_virtual_address,
                                         3,
                                         g_state.global_arena,
-                                        &g_state.mapped_memory,
                                     );
                                 };
                                 print_serial("Found USB xHCI controller! Virtual BAR0: {X}, Physical BAR0: {X}", .{ virtual_bar0, physical_bar0 });
@@ -243,7 +247,6 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
                                     dev,
                                     virtual_bar0,
                                     g_state.scratch_arena,
-                                    &g_state.mapped_memory,
                                 ) catch |e| {
                                     toolbox.panic("Could not init xHCI adapter: {}", .{e});
                                 };
@@ -261,7 +264,6 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
                                                     interface,
                                                     hid_data.hid_descriptor,
                                                     g_state.scratch_arena,
-                                                    &g_state.mapped_memory,
                                                 ) catch |e| {
                                                     //TODO: remove
                                                     switch (e) {
@@ -305,7 +307,7 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
     echo_welcome_line("*** Wozmon64 ***\n", .{});
     {
         echo_welcome_line("{} bytes free *** {} processors free *** {} x {} pixels free\n", .{
-            page_allocator.pages_free() * w64.MEMORY_PAGE_SIZE,
+            kernel_memory.pages_free() * w64.MEMORY_PAGE_SIZE,
             g_state.application_processor_contexts.len,
             g_state.screen.width,
             g_state.screen.height,
@@ -317,24 +319,27 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
 
     toolbox.hang();
 }
-fn core_entry(context: *w64.ApplicationProcessorKernelStartContext) callconv(.C) noreturn {
-    _ = context;
+fn core_entry(context: *w64.ApplicationProcessorKernelContext) callconv(.C) noreturn {
     const arena = toolbox.Arena.init(w64.MEMORY_PAGE_SIZE);
     set_up_gdt(arena);
     set_up_idt(arena);
 
     while (true) {
+        if (context.job.get()) |job| {
+            job.entry(job.user_data);
+            context.job.set(null);
+        }
         std.atomic.spinLoopHint();
     }
 }
 pub inline fn allocate_memory(n: usize) []u8 {
-    return page_allocator.allocate(
+    return kernel_memory.allocate(
         @divTrunc(toolbox.align_up(n, w64.MEMORY_PAGE_SIZE), w64.MEMORY_PAGE_SIZE),
     );
 }
 
 pub inline fn free_memory(data: []u8) void {
-    page_allocator.free(data);
+    kernel_memory.free(data);
 }
 
 pub fn echo_welcome_line(comptime fmt: []const u8, args: anytype) void {
@@ -409,6 +414,16 @@ pub fn echo_fmt(comptime fmt: []const u8, args: anytype) void {
             carriage_return();
         }
     }
+}
+
+pub fn run_on_core(entry_point: *const fn (user_data: ?*anyopaque) callconv(.C) void, user_data: ?*anyopaque) void {
+    for (g_state.application_processor_contexts) |context| {
+        if (context.job.get() == null) {
+            context.job.set(.{ .entry = entry_point, .user_data = user_data });
+            break;
+        }
+    }
+    //TODO: return error if all cores busy
 }
 
 noinline fn set_up_gdt(arena: *toolbox.Arena) void {
@@ -610,7 +625,8 @@ export fn page_fault_handler_inner(error_code: u64, unmapped_address: u64) callc
     }
 
     //TODO: remove
-    const page = page_allocator.allocate_at_address(to_map, 1);
+    const page = kernel_memory.allocate_at_address(to_map, 1);
+    // print_serial("Page virtual address: {X}", .{@intFromPtr(page.ptr)});
     for (page) |*b| {
         b.* = 0xAA;
     }
@@ -681,7 +697,7 @@ fn main_loop() void {
         }
         while (g_state.input_state.key_pressed_events.dequeue()) |scancode| {
             if (scancode == .F1) {
-                type_program(&programs.draw_flashing_screen);
+                type_program(programs.draw_red_screen);
             } else {
                 type_key(scancode, g_state.are_characters_shifted);
             }
@@ -773,16 +789,24 @@ fn carriage_return() void {
     }
 }
 fn type_program(program: []const u8) void {
-    type_number(@as(u32, 0x230_0000));
-    type_key(.Semicolon, true);
-    type_key(.Space, false);
-    for (program) |b| {
-        type_number(b);
-        type_key(.Space, false);
-    }
+    const load_address: u32 = 0x230_0000;
+    const dest = @as([*]u8, @ptrFromInt(load_address))[0..program.len];
+    @memcpy(dest, program);
+    echo_line("Loaded program to address {X}!", .{load_address});
+    type_number(load_address);
+    type_key(.Slash, false);
+    type_number(@as(u32, 16));
     type_key(.Enter, false);
-    type_number(@as(u32, 0x230_0000));
+    type_number(load_address);
     type_key(.R, false);
+
+    // type_number(@as(u32, 0x230_0000));
+    // type_key(.Semicolon, true);
+    // type_key(.Space, false);
+    // for (program) |b| {
+    //     type_number(b);
+    //     type_key(.Space, false);
+    // }
 }
 
 fn type_number(number: anytype) void {
@@ -921,8 +945,10 @@ fn handle_command(command: commands.Command) void {
         },
         .Execute => |arguments| {
             //TODO, execute on next thread
-            const entry_point: *const fn () callconv(.C) void = @ptrFromInt(arguments.start);
-            entry_point();
+            const entry_point: *const fn (?*anyopaque) callconv(.C) void = @ptrFromInt(arguments.start);
+            run_on_core(entry_point, null);
+            //entry_point();
+            toolbox.hang();
         },
     }
 }

@@ -6,6 +6,7 @@ const amd64 = @import("../amd64.zig");
 const pcie = @import("pcie.zig");
 const usb_hid = @import("usb_hid.zig");
 const w64 = @import("../wozmon64.zig");
+const kernel_memory = @import("../kernel_memory.zig");
 const static_assert = toolbox.static_assert;
 const print_serial = kernel.print_serial;
 
@@ -817,7 +818,6 @@ pub fn init(
     pcie_device: *const pcie.Device,
     bar0: u64,
     scratch_arena: *toolbox.Arena,
-    mapped_memory: *const toolbox.RandomRemovalLinkedList(w64.VirtualMemoryMapping),
 ) !*Controller {
     var controller_arena = toolbox.Arena.init(toolbox.mb(2));
     errdefer controller_arena.free_all();
@@ -922,7 +922,6 @@ pub fn init(
             CommandRing,
             w64.MMIO_PAGE_SIZE,
             controller_arena,
-            mapped_memory,
         );
         command_trb_ring = command_trb_ring_allocation_result.data;
 
@@ -946,7 +945,6 @@ pub fn init(
             EventRing,
             w64.MMIO_PAGE_SIZE,
             controller_arena,
-            mapped_memory,
         );
 
         event_trb_ring = event_trb_ring_allocation_result.data;
@@ -988,7 +986,6 @@ pub fn init(
             hcsparams1.max_device_slots + 1,
             w64.MMIO_PAGE_SIZE,
             controller_arena,
-            mapped_memory,
         );
         device_slots = device_slots_allocation_result.data;
         const hcsparams2 = capability_registers.read_register(CapabilityRegisters.StructuralParameters2);
@@ -1003,14 +1000,12 @@ pub fn init(
                 number_of_scratch_pad_buffers,
                 w64.MMIO_PAGE_SIZE,
                 controller_arena,
-                mapped_memory,
             );
             var scratch_pad_buffers_allocation_result = alloc_slice_aligned(
                 u8,
                 w64.MMIO_PAGE_SIZE * number_of_scratch_pad_buffers,
                 w64.MMIO_PAGE_SIZE,
                 controller_arena,
-                mapped_memory,
             );
             var scratch_pad_buffer_pointer_array = scratch_pad_buffer_pointer_array_allocation_result.data;
             for (scratch_pad_buffer_pointer_array, 0..) |*spbp, i| {
@@ -1093,7 +1088,6 @@ pub fn init(
             doorbells,
             scratch_arena,
             controller,
-            mapped_memory,
         ) catch |e| {
             print_serial("Error initializing device! {}", .{e});
             continue;
@@ -1116,7 +1110,6 @@ fn init_device(
     doorbells: []volatile u32,
     scratch_arena: *toolbox.Arena,
     controller: *Controller,
-    mapped_memory: *const toolbox.RandomRemovalLinkedList(w64.VirtualMemoryMapping),
 ) !?*Device {
     _ = event_response_map;
     _ = event_trb_ring;
@@ -1232,7 +1225,6 @@ fn init_device(
                 device_slots,
                 &doorbells[slot_id],
                 device_arena,
-                mapped_memory,
             );
         } else {
             device_slot_data_structures = try initialize_device_slot_data_structures(
@@ -1243,7 +1235,6 @@ fn init_device(
                 device_slots,
                 &doorbells[slot_id],
                 device_arena,
-                mapped_memory,
             );
         }
     }
@@ -1275,7 +1266,6 @@ fn init_device(
     const device_descriptor_result = alloc_object(
         USBDeviceDescriptor,
         scratch_arena,
-        mapped_memory,
     );
     const device_descriptor = device_descriptor_result.data;
     const device_descriptor_physical_address = device_descriptor_result.physical_address_start;
@@ -1351,7 +1341,6 @@ fn init_device(
             controller,
             scratch_arena,
             device_arena,
-            mapped_memory,
         );
     }
     //Get product string
@@ -1363,7 +1352,6 @@ fn init_device(
             controller,
             scratch_arena,
             device_arena,
-            mapped_memory,
         );
     }
     //Get serial number string
@@ -1375,7 +1363,6 @@ fn init_device(
             controller,
             scratch_arena,
             device_arena,
-            mapped_memory,
         );
     }
 
@@ -1389,7 +1376,7 @@ fn init_device(
         const input_control_context = get_input_control_context_from_input_context(input_context);
         //const output_device_context = device_slot_data_structures.output_device_context;
 
-        const configuration_descriptor_result = alloc_object(USBConfigurationDescriptor, scratch_arena, mapped_memory);
+        const configuration_descriptor_result = alloc_object(USBConfigurationDescriptor, scratch_arena);
         const configuration_descriptor = configuration_descriptor_result.data;
         const configuration_descriptor_physical_address = configuration_descriptor_result.physical_address_start;
         get_descriptor_from_endpoint0(
@@ -1409,7 +1396,6 @@ fn init_device(
             u8,
             configuration_descriptor.total_length,
             device_arena,
-            mapped_memory,
         );
         configuration_and_interface_descriptor = configuration_and_interface_descriptor_result.data;
         const configuration_and_interface_descriptor_physical_address = configuration_and_interface_descriptor_result.physical_address_start;
@@ -1569,7 +1555,6 @@ fn init_device(
                                 TransferRing,
                                 w64.MMIO_PAGE_SIZE,
                                 device_arena,
-                                mapped_memory,
                             );
                             endpoint_transfer_ring = transfer_trb_ring_allocation_result.data;
 
@@ -1688,12 +1673,10 @@ fn get_string_descriptor(
     controller: *Controller,
     scratch_arena: *toolbox.Arena,
     device_arena: *toolbox.Arena,
-    mapped_memory: *const toolbox.RandomRemovalLinkedList(w64.VirtualMemoryMapping),
 ) ![]const u8 {
     const descriptor_header_result = alloc_object(
         USBDescriptorHeader,
         scratch_arena,
-        mapped_memory,
     );
     const descriptor_header = descriptor_header_result.data;
     const descriptor_header_physical_address = descriptor_header_result.physical_address_start;
@@ -1713,7 +1696,6 @@ fn get_string_descriptor(
         u8,
         descriptor_header.length,
         device_arena,
-        mapped_memory,
     );
     const string_descriptor = string_descriptor_result.data;
     const string_descriptor_physical_address = string_descriptor_result.physical_address_start;
@@ -2048,7 +2030,6 @@ fn initialize_device_slot_data_structures(
     device_slots: []DeviceContextPointer,
     doorbell: *volatile u32,
     device_arena: *toolbox.Arena,
-    mapped_memory: *const toolbox.RandomRemovalLinkedList(w64.VirtualMemoryMapping),
 ) !DeviceSlotDataStructures {
     //1. Allocate an Input Context data structure (6.2.5) and initialize all fields to ‘0’.
     const input_context_allocation_result = alloc_slice_aligned(
@@ -2056,7 +2037,6 @@ fn initialize_device_slot_data_structures(
         context_size_in_words * 33,
         w64.MMIO_PAGE_SIZE,
         device_arena,
-        mapped_memory,
     );
 
     //2. Initialize the Input Control Context (6.2.5.1) of the Input Context by setting the A0 and A1 flags to ‘1’. These flags indicate that the Slot Context and the Endpoint 0 Context of the Input Context are affected by the command.
@@ -2098,7 +2078,6 @@ fn initialize_device_slot_data_structures(
             TransferRing,
             w64.MMIO_PAGE_SIZE,
             device_arena,
-            mapped_memory,
         );
         endpoint_0_transfer_ring = transfer_trb_ring_allocation_result.data;
 
@@ -2153,7 +2132,6 @@ fn initialize_device_slot_data_structures(
         context_size_in_words * 32,
         w64.MMIO_PAGE_SIZE,
         device_arena,
-        mapped_memory,
     );
     const output_device_context = DeviceContext{
         .context_size_in_words = context_size_in_words,
@@ -2303,19 +2281,17 @@ fn AllocationResultSlice(comptime T: type, comptime alignment: usize) type {
 inline fn alloc_object(
     comptime T: type,
     arena: *toolbox.Arena,
-    mapped_memory: *const toolbox.RandomRemovalLinkedList(w64.VirtualMemoryMapping),
 ) AllocationResultObject(T, @alignOf(T)) {
-    return alloc_object_aligned(T, @alignOf(T), arena, mapped_memory);
+    return alloc_object_aligned(T, @alignOf(T), arena);
 }
 
 fn alloc_object_aligned(
     comptime T: type,
     comptime alignment: usize,
     arena: *toolbox.Arena,
-    mapped_memory: *const toolbox.RandomRemovalLinkedList(w64.VirtualMemoryMapping),
 ) AllocationResultObject(T, alignment) {
     const obj = arena.push_clear_aligned(T, alignment);
-    const physical_address = w64.virtual_to_physical(@intFromPtr(obj), mapped_memory) catch
+    const physical_address = kernel_memory.virtual_to_physical(@intFromPtr(obj)) catch
         toolbox.panic("Could not find physical address for virtual address {X}", .{@intFromPtr(obj)});
     return .{
         .data = obj,
@@ -2326,9 +2302,8 @@ inline fn alloc_slice(
     comptime T: type,
     n: usize,
     arena: *toolbox.Arena,
-    mapped_memory: *const toolbox.RandomRemovalLinkedList(w64.VirtualMemoryMapping),
 ) AllocationResultSlice(T, @alignOf(T)) {
-    return alloc_slice_aligned(T, n, @alignOf(T), arena, mapped_memory);
+    return alloc_slice_aligned(T, n, @alignOf(T), arena);
 }
 
 fn alloc_slice_aligned(
@@ -2336,14 +2311,13 @@ fn alloc_slice_aligned(
     n: usize,
     comptime alignment: usize,
     arena: *toolbox.Arena,
-    mapped_memory: *const toolbox.RandomRemovalLinkedList(w64.VirtualMemoryMapping),
 ) AllocationResultSlice(T, @alignOf(T)) {
     const slice = arena.push_slice_clear_aligned(
         T,
         n,
         alignment,
     );
-    const physical_address = w64.virtual_to_physical(@intFromPtr(slice.ptr), mapped_memory) catch
+    const physical_address = kernel_memory.virtual_to_physical(@intFromPtr(slice.ptr)) catch
         toolbox.panic("Could not find physical address for virtual address {X}", .{@intFromPtr(slice.ptr)});
     return .{
         .data = slice,

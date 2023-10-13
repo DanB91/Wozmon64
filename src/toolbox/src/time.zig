@@ -35,6 +35,7 @@ pub fn milliseconds() Milliseconds {
             const ms = toolbox.playdate_get_milliseconds();
             return @intCast(ms);
         },
+        else => @compileError("Millisecond clock not supported on " ++ @tagName(toolbox.THIS_PLATFORM)),
     }
 }
 

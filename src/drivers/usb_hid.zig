@@ -2,6 +2,7 @@ const usb_xhci = @import("usb_xhci.zig");
 const toolbox = @import("toolbox");
 const w64 = @import("../wozmon64.zig");
 const kernel = @import("../kernel.zig");
+const kernel_memory = @import("../kernel_memory.zig");
 
 const print_serial = kernel.print_serial;
 
@@ -245,7 +246,6 @@ pub fn init_hid_interface(
     hid_interface: *usb_xhci.Interface,
     hid_descriptor: Descriptor,
     scratch_arena: *toolbox.Arena,
-    mapped_memory: *const toolbox.RandomRemovalLinkedList(w64.VirtualMemoryMapping),
 ) !void {
     const save_point = scratch_arena.create_save_point();
     defer scratch_arena.restore_save_point(save_point);
@@ -261,7 +261,7 @@ pub fn init_hid_interface(
     const controller = hid_interface.parent_device.parent_controller;
     const device = hid_interface.parent_device;
     const full_hid_descriptor_result =
-        alloc_slice(u8, hid_descriptor.report_descriptor_length, scratch_arena, mapped_memory);
+        alloc_slice(u8, hid_descriptor.report_descriptor_length, scratch_arena);
     const full_hid_descriptor = full_hid_descriptor_result.data;
     const full_hid_descriptor_physical_address = full_hid_descriptor_result.physical_address_start;
     const initial_array_size = 8;
@@ -529,7 +529,6 @@ pub fn init_hid_interface(
         u8,
         in_endpoint.endpoint_context.max_packet_size,
         device.arena,
-        mapped_memory,
     );
 
     var hid_device = USBHIDDevice{
@@ -931,9 +930,8 @@ inline fn alloc_slice(
     comptime T: type,
     n: usize,
     arena: *toolbox.Arena,
-    mapped_memory: *const toolbox.RandomRemovalLinkedList(w64.VirtualMemoryMapping),
 ) AllocationResultSlice(T, @alignOf(T)) {
-    return alloc_slice_aligned(T, n, @alignOf(T), arena, mapped_memory);
+    return alloc_slice_aligned(T, n, @alignOf(T), arena);
 }
 
 fn alloc_slice_aligned(
@@ -941,14 +939,13 @@ fn alloc_slice_aligned(
     n: usize,
     comptime alignment: usize,
     arena: *toolbox.Arena,
-    mapped_memory: *const toolbox.RandomRemovalLinkedList(w64.VirtualMemoryMapping),
 ) AllocationResultSlice(T, @alignOf(T)) {
     const slice = arena.push_slice_clear_aligned(
         T,
         n,
         alignment,
     );
-    const physical_address = w64.virtual_to_physical(@intFromPtr(slice.ptr), mapped_memory) catch
+    const physical_address = kernel_memory.virtual_to_physical(@intFromPtr(slice.ptr)) catch
         toolbox.panic("Could not find physical address for virtual address {X}", .{@intFromPtr(slice.ptr)});
     return .{
         .data = slice,

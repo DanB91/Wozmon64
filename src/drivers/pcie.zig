@@ -1,6 +1,7 @@
 const amd64 = @import("../amd64.zig");
 const toolbox = @import("toolbox");
 const w64 = @import("../wozmon64.zig");
+const kernel_memory = @import("../kernel_memory.zig");
 
 pub const END_POINT_DEVICE_HEADER_TYPE = 0;
 pub const BRIDGE_DEVICE_HEADER_TYPE = 1;
@@ -174,10 +175,9 @@ comptime {
 pub fn enumerate_devices(
     root_xsdt: *const amd64.XSDT,
     arena: *toolbox.Arena,
-    memory_mappings: toolbox.RandomRemovalLinkedList(w64.VirtualMemoryMapping),
 ) []const Device {
     var ret = toolbox.DynamicArray(Device).init(arena, 32);
-    const mcfg = amd64.find_acpi_table(root_xsdt, memory_mappings, "MCFG", MCFG) catch
+    const mcfg = amd64.find_acpi_table(root_xsdt, "MCFG", MCFG) catch
         toolbox.panic("Could not find MCFG table!", .{});
 
     const pci_descriptors = mcfg.config_space_descriptors();
@@ -196,7 +196,7 @@ pub fn enumerate_devices(
                     const pci_request_paddr = pd.base_address +
                         ((bus - pd.start_pci_bus_number) << 20 | device << 15 | function << 12);
 
-                    const pci_request_vaddr = w64.physical_to_virtual(pci_request_paddr, memory_mappings) catch |e| {
+                    const pci_request_vaddr = kernel_memory.physical_to_virtual(pci_request_paddr) catch |e| {
                         toolbox.panic("Error finding descriptor address {x}. Error: {} ", .{ pci_request_paddr, e });
                     };
                     const pcie_device_header = @as([*]align(4096) u8, @ptrFromInt(pci_request_vaddr))[0..64];
