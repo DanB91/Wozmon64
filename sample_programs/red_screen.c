@@ -51527,7 +51527,7 @@ static int min(int a, int b) {
 void __attribute__((section(".entry"))) entry(void)  {
     u32 *frame_buffer = (u32*)0x200000;
     u64 frame_buffer_size = *(u64*)0x2200040;
-    u64 stride = *(u64*)0x2200030;
+    u64 stride = *(u64*)0x2200048;
     
     for (int y = 0; y < WOZ_AND_JOBS_HEIGHT; y++) {
         for (int x = 0; x < WOZ_AND_JOBS_WIDTH; x++) {

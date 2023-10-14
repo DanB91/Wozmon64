@@ -44,6 +44,7 @@ const KernelState = struct {
     screen_pixel_width: *u64,
     screen_pixel_height: *u64,
     frame_buffer_size: *u64,
+    frame_buffer_stride: *u64,
 };
 
 const StackUnwinder = struct {
@@ -126,6 +127,7 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
             .screen_pixel_height = @ptrFromInt(w64.SCREEN_PIXEL_HEIGHT_ADDRESS),
             .screen_pixel_width = @ptrFromInt(w64.SCREEN_PIXEL_WIDTH_ADDRESS),
             .frame_buffer_size = @ptrFromInt(w64.FRAME_BUFFER_SIZE_ADDRESS),
+            .frame_buffer_stride = @ptrFromInt(w64.FRAME_BUFFER_STRIDE_ADDRESS),
         };
         const mapped_memory = b: {
             var mapped_memory = toolbox.RandomRemovalLinkedList(w64.VirtualMemoryMapping).init(g_state.global_arena);
@@ -302,6 +304,7 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
         g_state.screen_pixel_width.* = g_state.screen.width;
         g_state.screen_pixel_height.* = g_state.screen.height;
         g_state.frame_buffer_size.* = g_state.screen.frame_buffer.len;
+        g_state.frame_buffer_stride.* = g_state.screen.stride;
     }
 
     echo_welcome_line("*** Wozmon64 ***\n", .{});
@@ -320,7 +323,13 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
     toolbox.hang();
 }
 fn core_entry(context: *w64.ApplicationProcessorKernelContext) callconv(.C) noreturn {
-    const arena = toolbox.Arena.init(w64.MEMORY_PAGE_SIZE);
+    //TODO some bug is preventing this from working on desktop.  There might be
+    //     some sort of race condition.  Debug
+    //const arena = toolbox.arena.init(w64.memory_page_size);
+
+    var arena_buffer: [toolbox.kb(512)]u8 = undefined;
+    const arena = toolbox.Arena.init_with_buffer(&arena_buffer);
+
     set_up_gdt(arena);
     set_up_idt(arena);
 
@@ -731,7 +740,7 @@ fn draw_runes() void {
     }
 }
 fn draw_rune(rune: toolbox.Rune, rune_x: usize, rune_y: usize) void {
-    if (rune < ' ') {
+    if (rune < ' ' or rune > '_') {
         return;
     }
     const index = @as(u8, @intCast(rune)) - ' ';
@@ -1018,4 +1027,13 @@ fn handle_parse_result(parse_result: commands.ParseResult, command_buffer: []con
         },
     }
     echo_line("\n\\", .{});
+}
+
+//good for finding where in the code an issue is happening
+fn debug_clear_screen_and_hang(r: u8, g: u8, b: u8) void {
+    for (g_state.screen.frame_buffer) |*p| {
+        p.colors = .{ .r = r, .b = b, .g = g, .reserved = 0 };
+    }
+
+    toolbox.hang();
 }
