@@ -51526,8 +51526,13 @@ static int min(int a, int b) {
 }
 void __attribute__((section(".entry"))) entry(void)  {
     u32 *frame_buffer = (u32*)0x200000;
+    u64 screen_width = *(u64*)0x2200030;
+    u64 screen_height = *(u64*)0x2200038;
     u64 frame_buffer_size = *(u64*)0x2200040;
     u64 stride = *(u64*)0x2200048;
+
+    u64 x_offset = (screen_width/2 - WOZ_AND_JOBS_WIDTH/2);
+    u64 y_offset = (screen_height/2 - WOZ_AND_JOBS_HEIGHT/2);
     
     for (int y = 0; y < WOZ_AND_JOBS_HEIGHT; y++) {
         for (int x = 0; x < WOZ_AND_JOBS_WIDTH; x++) {
@@ -51535,7 +51540,7 @@ void __attribute__((section(".entry"))) entry(void)  {
             int r = woz_and_jobs[pixel];
             int g = woz_and_jobs[pixel+1];
             int b = woz_and_jobs[pixel+2];
-            frame_buffer[y*stride + x] = r << 16 | g << 8 | b;
+            frame_buffer[(y+y_offset)*stride + (x+x_offset)] = r << 16 | g << 8 | b;
         }
     }
 

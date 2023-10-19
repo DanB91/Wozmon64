@@ -58,7 +58,7 @@ pub fn build(b: *std.Build) !void {
         const args_array = [_][]const u8{
             "qemu-system-x86_64",
             "-smp",
-            "cores=4",
+            "cores=16",
             "-m",
             "2G",
             "-no-reboot",

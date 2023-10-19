@@ -345,11 +345,13 @@ pub const MapMemoryResult = struct {
 };
 pub fn map_conventional_memory_physical_address(
     starting_physical_address: u64,
-    //TODO: i think we should get rid of this pointer and return the new virtual address instead
     starting_virtual_address: u64,
     number_of_pages: usize,
     arena: *toolbox.Arena,
 ) !MapMemoryResult {
+    g_state.lock.lock();
+    defer g_state.lock.release();
+
     if (!toolbox.is_aligned_to(starting_virtual_address, w64.MEMORY_PAGE_SIZE)) {
         return error.VirtualAddressNotPageAligned;
     }

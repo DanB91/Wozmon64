@@ -325,10 +325,10 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
 fn core_entry(context: *w64.ApplicationProcessorKernelContext) callconv(.C) noreturn {
     //TODO some bug is preventing this from working on desktop.  There might be
     //     some sort of race condition.  Debug
-    //const arena = toolbox.arena.init(w64.memory_page_size);
+    const arena = toolbox.Arena.init(w64.MEMORY_PAGE_SIZE);
 
-    var arena_buffer: [toolbox.kb(512)]u8 = undefined;
-    const arena = toolbox.Arena.init_with_buffer(&arena_buffer);
+    // var arena_buffer: [toolbox.kb(512)]u8 = undefined;
+    // const arena = toolbox.Arena.init_with_buffer(&arena_buffer);
 
     set_up_gdt(arena);
     set_up_idt(arena);
