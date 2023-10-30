@@ -51534,6 +51534,7 @@ void __attribute__((section(".entry"))) entry(void)  {
     u64 x_offset = (screen_width/2 - WOZ_AND_JOBS_WIDTH/2);
     u64 y_offset = (screen_height/2 - WOZ_AND_JOBS_HEIGHT/2);
     
+    for (;;) {
     for (int y = 0; y < WOZ_AND_JOBS_HEIGHT; y++) {
         for (int x = 0; x < WOZ_AND_JOBS_WIDTH; x++) {
             int pixel = y*3*WOZ_AND_JOBS_WIDTH + x*3;
@@ -51543,6 +51544,6 @@ void __attribute__((section(".entry"))) entry(void)  {
             frame_buffer[(y+y_offset)*stride + (x+x_offset)] = r << 16 | g << 8 | b;
         }
     }
+    }
 
-    for (;;){}
 }

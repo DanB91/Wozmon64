@@ -27,6 +27,7 @@ const KernelState = struct {
     root_xsdt: *const amd64.XSDT,
     application_processor_contexts: []*w64.ApplicationProcessorKernelContext,
 
+    apic_address: u64,
     usb_xhci_controllers: toolbox.RandomRemovalLinkedList(*usb_xhci.Controller),
     input_state: w64.InputState,
     are_characters_shifted: bool,
@@ -106,6 +107,7 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
             .root_xsdt = kernel_start_context.root_xsdt,
             .application_processor_contexts = undefined,
 
+            .apic_address = 0,
             .input_state = w64.InputState.init(kernel_start_context.global_arena),
             .usb_xhci_controllers = toolbox.RandomRemovalLinkedList(*usb_xhci.Controller).init(kernel_start_context.global_arena),
             .are_characters_shifted = false,
@@ -152,6 +154,15 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
     //set up IDT
     set_up_idt(g_state.global_arena);
 
+    //map APIC
+    {
+        g_state.apic_address = kernel_memory.map_mmio_physical_address(
+            amd64.rdmsr(amd64.IA32_APIC_BASE_MSR) &
+                toolbox.mask_for_bit_range(12, 63, u64),
+            1,
+            g_state.global_arena,
+        );
+    }
     //bring processors in to kernel space
     {
         g_state.application_processor_contexts = g_state.global_arena.push_slice(
@@ -325,13 +336,16 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
 fn core_entry(context: *w64.ApplicationProcessorKernelContext) callconv(.C) noreturn {
     //TODO some bug is preventing this from working on desktop.  There might be
     //     some sort of race condition.  Debug
-    const arena = toolbox.Arena.init(w64.MEMORY_PAGE_SIZE);
+    //     Get debug symbols working first
+    // const arena = toolbox.Arena.init(w64.MEMORY_PAGE_SIZE);
 
-    // var arena_buffer: [toolbox.kb(512)]u8 = undefined;
-    // const arena = toolbox.Arena.init_with_buffer(&arena_buffer);
+    var arena_buffer: [toolbox.kb(512)]u8 = undefined;
+    const arena = toolbox.Arena.init_with_buffer(&arena_buffer);
 
     set_up_gdt(arena);
     set_up_idt(arena);
+    //print_serial("APIC register {X}", .{amd64.rdmsr(amd64.IA32_APIC_BASE_MSR)});
+    print_apic_id_and_core_id();
 
     while (true) {
         if (context.job.get()) |job| {
@@ -425,16 +439,6 @@ pub fn echo_fmt(comptime fmt: []const u8, args: anytype) void {
     }
 }
 
-pub fn run_on_core(entry_point: *const fn (user_data: ?*anyopaque) callconv(.C) void, user_data: ?*anyopaque) void {
-    for (g_state.application_processor_contexts) |context| {
-        if (context.job.get() == null) {
-            context.job.set(.{ .entry = entry_point, .user_data = user_data });
-            break;
-        }
-    }
-    //TODO: return error if all cores busy
-}
-
 noinline fn set_up_gdt(arena: *toolbox.Arena) void {
     //TODO
     const gdt_array = [3]amd64.GDTDescriptor{
@@ -508,11 +512,17 @@ fn set_up_idt(arena: *toolbox.Arena) void {
     };
     amd64.register_exception_handler(&page_fault_handler, .PageFault, idt);
     amd64.register_exception_handler(&invalid_opcode_handler, .InvalidOpcode, idt);
+    amd64.register_exception_handler(&nmi_handler, .NMI, idt);
     asm volatile (
         \\lidt (%[idtr])
         :
         : [idtr] "r" (&idt_register),
     );
+}
+fn nmi_handler() callconv(.Interrupt) void {
+    while (true) {
+        std.atomic.spinLoopHint();
+    }
 }
 
 fn invalid_opcode_handler() callconv(.Interrupt) void {
@@ -652,6 +662,12 @@ export fn page_fault_handler_inner(error_code: u64, unmapped_address: u64) callc
 
 //for debugging within print routines
 pub fn print_serial(comptime fmt: []const u8, args: anytype) void {
+    const StaticVars = struct {
+        var print_lock: w64.ReentrantTicketLock = .{};
+    };
+    StaticVars.print_lock.lock();
+    defer StaticVars.print_lock.release();
+
     const scratch_arena = g_state.scratch_arena;
     const arena_save_point = scratch_arena.create_save_point();
     defer scratch_arena.restore_save_point(arena_save_point);
@@ -953,12 +969,82 @@ fn handle_command(command: commands.Command) void {
             read_memory(arguments.start, null, null);
         },
         .Execute => |arguments| {
-            //TODO, execute on next thread
             const entry_point: *const fn (?*anyopaque) callconv(.C) void = @ptrFromInt(arguments.start);
             run_on_core(entry_point, null);
-            //entry_point();
+            while (true) {
+                var it = g_state.usb_xhci_controllers.iterator();
+                while (it.next_value()) |controller| {
+                    if (usb_xhci.poll_controller(controller)) {
+                        usb_hid.poll(
+                            controller,
+                            &g_state.input_state,
+                        );
+                    }
+                }
+                while (g_state.input_state.modifier_key_pressed_events.dequeue()) |scancode| {
+                    switch (scancode) {
+                        .LeftShift, .RightShift => {
+                            g_state.are_characters_shifted = true;
+                        },
+                        else => {},
+                    }
+                }
+                while (g_state.input_state.modifier_key_released_events.dequeue()) |scancode| {
+                    switch (scancode) {
+                        .LeftShift, .RightShift => {
+                            g_state.are_characters_shifted = false;
+                        },
+                        else => {},
+                    }
+                }
+                while (g_state.input_state.key_pressed_events.dequeue()) |scancode| {
+                    if (scancode == .Escape) {
+                        exit_running_program();
+                        return;
+                    }
+                }
+                while (g_state.input_state.key_released_events.dequeue()) |scancode| {
+                    _ = scancode;
+                }
+                std.atomic.spinLoopHint();
+            }
+
             toolbox.hang();
         },
+    }
+}
+fn print_apic_id_and_core_id() void {
+    const core_id = w64.get_core_id();
+    const apic_id = @as(*u32, @ptrFromInt(g_state.apic_address + 0x20)).*;
+    print_serial("Core id {}, APIC ID {X}", .{ core_id, apic_id });
+}
+fn exit_running_program() void {
+    print_serial("Escape hit", .{});
+    for (g_state.application_processor_contexts) |context| {
+        if (context.job.get()) |_| {
+            print_serial("Sending NMI to {}", .{context.processor_id});
+            const interrupt_command_register_low = amd64.InterruptControlRegisterLow{
+                .vector = 0,
+                .message_type = .NonMaskableInterrupt,
+                .destination_mode = .PhysicalAPICID,
+                .is_sent = false,
+                .assert_interrupt = false,
+                .trigger_mode = .EdgeTriggered,
+                .destination_shorthand = .Destination,
+            };
+            const interrupt_command_register_high = amd64.InterruptControlRegisterHigh{
+                .destination = @intCast(context.processor_id),
+            };
+            print_serial("Low command {X}, High command {X}, ", .{
+                @as(u32, @bitCast(interrupt_command_register_low)),
+                @as(u32, @bitCast(interrupt_command_register_high)),
+            });
+            amd64.send_interprocessor_interrupt(
+                g_state.apic_address,
+                interrupt_command_register_low,
+                interrupt_command_register_high,
+            );
+        }
     }
 }
 fn read_memory(from_address: ?u64, to_address: ?u64, number_of_bytes: ?u64) void {
@@ -1036,4 +1122,15 @@ fn debug_clear_screen_and_hang(r: u8, g: u8, b: u8) void {
     }
 
     toolbox.hang();
+}
+
+//Wozmon64 public API
+pub fn run_on_core(entry_point: *const fn (user_data: ?*anyopaque) callconv(.C) void, user_data: ?*anyopaque) void {
+    for (g_state.application_processor_contexts) |context| {
+        if (context.job.get() == null) {
+            context.job.set(.{ .entry = entry_point, .user_data = user_data });
+            break;
+        }
+    }
+    //TODO: return error if all cores busy
 }

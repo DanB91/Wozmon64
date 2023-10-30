@@ -645,3 +645,72 @@ pub fn register_exception_handler(
         .zeroB = 0,
     };
 }
+
+//interprocessor interrupts (IPI)
+pub const InterruptControlRegisterLow = packed struct(u32) {
+    vector: u8, //VEC
+    message_type: enum(u3) {
+        Fixed = 0b000,
+        LowestPriority = 0b001,
+        SystemManagementInterrupt = 0b010, //SMI
+        RemoteRead = 0b011,
+        NonMaskableInterrupt = 0b100, //NMI
+        Initialize = 0b101, //INIT
+        Startup = 0b110,
+        ExternalInterrupt = 0b111,
+    }, //MT
+    destination_mode: enum(u1) {
+        PhysicalAPICID = 0,
+        LogicalAPICID = 1,
+    }, //DM
+    is_sent: bool, //DS
+    reserved1: u1 = 0,
+    assert_interrupt: bool, //L
+    trigger_mode: enum(u1) {
+        EdgeTriggered,
+        LevelSensitive,
+    },
+    remote_read_status: u2 = 0, //RRS. don't really care about this
+    destination_shorthand: enum(u2) {
+        Destination,
+        Self,
+        AllIncludingSelf,
+        AllExcludingSelf,
+    },
+    reserved2: u12 = 0,
+};
+pub const InterruptControlRegisterHigh = packed struct(u32) {
+    reserved: u24 = 0,
+    destination: u8,
+};
+pub fn send_interprocessor_interrupt(
+    apic_base_address: u64,
+    interrupt_command_register_low: InterruptControlRegisterLow,
+    interrupt_command_register_high: InterruptControlRegisterHigh,
+) void {
+    const icr = @as([*]u32, @ptrFromInt(
+        apic_base_address + 0x300,
+    ))[0..5];
+    icr[4] = @bitCast(interrupt_command_register_high);
+    @fence(.SeqCst);
+    icr[0] = @bitCast(interrupt_command_register_low);
+
+    // const apic_base_address = rdmsr(IA32_APIC_BASE_MSR) &
+    //     toolbox.mask_for_bit_range(12, 63, u64);
+    // const interrupt_command_register_low_ptr = @as(
+    //     *volatile InterruptControlRegisterLow,
+    //     @ptrFromInt(
+    //         apic_base_address + 0x300,
+    //     ),
+    // );
+    // const interrupt_command_register_high_ptr = @as(
+    //     *volatile InterruptControlRegisterHigh,
+    //     @ptrFromInt(
+    //         apic_base_address + 0x300 + @sizeOf(InterruptControlRegisterLow),
+    //     ),
+    // );
+
+    // interrupt_command_register_high_ptr.* = interrupt_command_register_high;
+    // @fence(.SeqCst);
+    // interrupt_command_register_low_ptr.* = interrupt_command_register_low;
+}

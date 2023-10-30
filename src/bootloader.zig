@@ -632,82 +632,39 @@ fn bootstrap_application_processors(arena: *toolbox.Arena, number_of_processors:
 
         const apic_base_address = amd64.rdmsr(amd64.IA32_APIC_BASE_MSR) &
             toolbox.mask_for_bit_range(12, 63, u64);
-        const InterruptControlRegisterLow = packed struct(u32) {
-            vector: u8, //VEC
-            message_type: enum(u3) {
-                Fixed = 0b000,
-                LowestPriority = 0b001,
-                SystemManagementInterrupt = 0b010, //SMI
-                RemoteRead = 0b011,
-                NonMaskableInterrupt = 0b100, //NMI
-                Initialize = 0b101, //INIT
-                Startup = 0b110,
-                ExternalInterrupt = 0b111,
-            }, //MT
-            destination_mode: enum(u1) {
-                SingleAPIC = 0,
-                MultipleAPICs = 1,
-            }, //DM
-            is_sent: bool, //DS
-            reserved1: u1 = 0,
-            assert_interrupt: bool, //L
-            trigger_mode: enum(u1) {
-                EdgeTriggered,
-                LevelSensitive,
+        amd64.send_interprocessor_interrupt(
+            apic_base_address,
+            .{
+                .vector = 0,
+                .message_type = .Initialize,
+                .destination_mode = .LogicalAPICID,
+                .is_sent = false,
+                .assert_interrupt = true,
+                .trigger_mode = .EdgeTriggered,
+                .destination_shorthand = .AllExcludingSelf,
             },
-            remote_read_status: u2 = 0, //RRS. don't really care about this
-            destination_shorthand: enum(u2) {
-                Destination,
-                Self,
-                AllIncludingSelf,
-                AllExcludingSelf,
+            .{
+                .destination = 0xFF,
             },
-            reserved2: u12 = 0,
-        };
-        const InterruptControlRegisterHigh = packed struct(u32) {
-            reserved: u24 = 0,
-            destination: u8,
-        };
-        const interrupt_command_register_low = @as(
-            *volatile InterruptControlRegisterLow,
-            @ptrFromInt(
-                apic_base_address + 0x300,
-            ),
         );
-        const interrupt_command_register_high = @as(
-            *volatile InterruptControlRegisterHigh,
-            @ptrFromInt(
-                apic_base_address + 0x300 + @sizeOf(InterruptControlRegisterLow),
-            ),
-        );
-
-        interrupt_command_register_high.* = .{
-            .destination = 0xFF,
-        };
-        interrupt_command_register_low.* = .{
-            .vector = 0,
-            .message_type = .Initialize,
-            .destination_mode = .MultipleAPICs,
-            .is_sent = false,
-            .assert_interrupt = true,
-            .trigger_mode = .EdgeTriggered,
-            .destination_shorthand = .AllExcludingSelf,
-        };
 
         toolbox.busy_wait(1000);
 
-        interrupt_command_register_high.* = .{
-            .destination = 0xFF,
-        };
-        interrupt_command_register_low.* = .{
-            .vector = PROCESSOR_BOOTSTRAP_PROGRAM_ADDRESS >> 12,
-            .message_type = .Startup,
-            .destination_mode = .MultipleAPICs,
-            .is_sent = false,
-            .assert_interrupt = true,
-            .trigger_mode = .EdgeTriggered,
-            .destination_shorthand = .AllExcludingSelf,
-        };
+        amd64.send_interprocessor_interrupt(
+            apic_base_address,
+            .{
+                .vector = PROCESSOR_BOOTSTRAP_PROGRAM_ADDRESS >> 12,
+                .message_type = .Startup,
+                .destination_mode = .LogicalAPICID,
+                .is_sent = false,
+                .assert_interrupt = true,
+                .trigger_mode = .EdgeTriggered,
+                .destination_shorthand = .AllExcludingSelf,
+            },
+            .{
+                .destination = 0xFF,
+            },
+        );
     }
     return processor_contexts;
 }
