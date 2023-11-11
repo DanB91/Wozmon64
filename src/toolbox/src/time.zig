@@ -10,7 +10,7 @@ pub const Seconds = switch (toolbox.THIS_PLATFORM) {
     else => f64,
 };
 pub fn microseconds() Microseconds {
-    switch (toolbox.THIS_PLATFORM) {
+    switch (comptime toolbox.THIS_PLATFORM) {
         .MacOS => {
             const ctime = @cImport(@cInclude("time.h"));
             const nanos = ctime.clock_gettime_nsec_np(ctime.CLOCK_MONOTONIC);
@@ -20,6 +20,11 @@ pub fn microseconds() Microseconds {
         .Playdate => {
             const sec = seconds();
             return @intFromFloat(sec * 1_000_000);
+        },
+        .Wozmon64 => {
+            const w64 = @import("root").w64;
+            const ticks = w64.now();
+            return ticks.microseconds();
         },
         else => @compileError("Microsecond clock not supported on " ++ @tagName(toolbox.THIS_PLATFORM)),
     }

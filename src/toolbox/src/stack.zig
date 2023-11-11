@@ -12,9 +12,10 @@ pub fn Stack(comptime T: type) type {
                 .back = 0,
             };
         }
-        pub inline fn push(self: *Self, value: T) void {
+        pub inline fn push(self: *Self, value: T) *T {
             self.data[self.back] = value;
             self.back += 1;
+            return &self.data[self.back - 1];
         }
         pub inline fn pop(self: *Self) T {
             self.back -= 1;

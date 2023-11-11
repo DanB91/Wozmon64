@@ -1,5 +1,5 @@
 #if 0
-x86_64-elf-gcc  -nostdlib -nostartfiles -ffreestanding -fPIC -fno-builtin -O2 -Wl,-T,linker.ld -o red_screen.bin $0
+x86_64-elf-gcc  -nostdlib -nostartfiles -ffreestanding -fPIC -fno-builtin -O2 -Wl,-T,linker.ld -o woz_and_jobs.bin $0
 
 exit 0
 #endif

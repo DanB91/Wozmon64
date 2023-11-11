@@ -6,7 +6,7 @@ pub fn str8lit(comptime bytes: [:0]const u8) String8 {
     return comptime str8(bytes);
 }
 pub fn str8fmt(comptime fmt: []const u8, args: anytype, arena: *toolbox.Arena) String8 {
-    const buffer_len = std.fmt.count(fmt, args);
+    var buffer_len = @as(usize, @intCast(std.fmt.count(fmt, args)));
     const buffer = arena.push_bytes_unaligned(buffer_len);
     const string_bytes = std.fmt.bufPrint(buffer, fmt, args) catch |e|
         toolbox.panic("Error std.fmt.bufPrint in str8fmt: {}", .{e});

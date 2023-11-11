@@ -1,16 +1,18 @@
 const std = @import("std");
 const toolbox = @import("toolbox.zig");
+const profiler = toolbox.profiler;
 
 pub const THIS_PLATFORM = toolbox.Platform.MacOS;
+pub const ENABLE_PROFILER = true;
 pub const panic = toolbox.panic_handler;
 
 pub fn main() anyerror!void {
-    if (toolbox.IS_DEBUG) {
-        run_tests(0);
-    } else {
-        run_tests(0);
-        run_benchmarks(0);
-    }
+    // if (toolbox.IS_DEBUG) {
+    //     run_tests(0);
+    // } else {
+    // run_tests(0);
+    run_benchmarks(0);
+    // }
 }
 
 const TestModule = u32;
@@ -70,11 +72,11 @@ fn run_tests(which_tests: TestModule) void {
         }
 
         const arena_size = toolbox.mb(1);
-        var arena: toolbox.Arena = toolbox.Arena.init(arena_size);
+        var arena = toolbox.Arena.init(arena_size);
         //test init arena
         {
             toolbox.asserteq(0, arena.pos, "Arena should have initial postion of 0");
-            toolbox.asserteq(arena_size, arena.data.len, "Wrong arena capacity");
+            toolbox.asserteq(arena_size - @sizeOf(toolbox.Arena), arena.data.len, "Wrong arena capacity");
         }
 
         //test push_bytes_unaligned
@@ -116,7 +118,7 @@ fn run_tests(which_tests: TestModule) void {
         //pool allocator
         {
             const POOL_SIZE = 8;
-            var pool_allocator = toolbox.PoolAllocator(i32).init(POOL_SIZE, &arena);
+            var pool_allocator = toolbox.PoolAllocator(i32).init(POOL_SIZE, arena);
             var ptrs: [POOL_SIZE * 2]*i32 = undefined;
             {
                 var i: usize = 0;
@@ -143,7 +145,7 @@ fn run_tests(which_tests: TestModule) void {
     //Linked list queue
     {
         defer arena.reset();
-        var list = toolbox.LinkedListQueue(i64).init(&arena);
+        var list = toolbox.LinkedListQueue(i64).init(arena);
         var first_element = list.push(42);
         toolbox.assert(list.len == 1, "List should be length 1", .{});
         toolbox.assert(first_element.* == 42, "Node should have a value of 42", .{});
@@ -180,7 +182,7 @@ fn run_tests(which_tests: TestModule) void {
 
     //Linked list stack
     {
-        var list = toolbox.LinkedListStack(i64).init(&arena);
+        var list = toolbox.LinkedListStack(i64).init(arena);
         _ = list.push(42 * 1);
         _ = list.push(42 * 2);
         _ = list.push(42 * 3);
@@ -201,7 +203,7 @@ fn run_tests(which_tests: TestModule) void {
     //Random removal Linked list
     {
         defer arena.reset();
-        var list = toolbox.RandomRemovalLinkedList(i64).init(&arena);
+        var list = toolbox.RandomRemovalLinkedList(i64).init(arena);
         var first_element = list.append(42);
         toolbox.assert(list.len == 1, "List should be length 1", .{});
         toolbox.assert(first_element.* == 42, "Node should have a value of 42", .{});
@@ -266,7 +268,7 @@ fn run_tests(which_tests: TestModule) void {
     //Hash map
     {
         defer arena.reset();
-        var map = toolbox.HashMap([]const u8, i64).init(2, &arena);
+        var map = toolbox.HashMap([]const u8, i64).init(2, arena);
         map.put("Macs", 123);
         map.put("Apple IIs", 432);
         map.put("PCs", 8765);
@@ -313,7 +315,7 @@ fn run_tests(which_tests: TestModule) void {
     {
         defer arena.reset();
 
-        var map = toolbox.HashMap(i64, i64).init(2, &arena);
+        var map = toolbox.HashMap(i64, i64).init(2, arena);
         map.put(123, 123);
         map.put(432, 432);
         map.put(456, 8765);
@@ -332,7 +334,7 @@ fn run_tests(which_tests: TestModule) void {
         defer arena.reset();
         var keys = [_]i64{ 123, 432, 456, 6543 };
 
-        var map = toolbox.HashMap(*const i64, i64).init(2, &arena);
+        var map = toolbox.HashMap(*const i64, i64).init(2, arena);
         map.put(&keys[0], 123);
         map.put(&keys[1], 432);
         map.put(&keys[2], 8765);
@@ -352,12 +354,12 @@ fn run_tests(which_tests: TestModule) void {
     }
     //string
     {
-        const english = toolbox.string8_literal("Hello!");
-        const korean = toolbox.string8_literal("안녕하세요!");
-        const japanese = toolbox.string8_literal("こんにちは!");
+        const english = toolbox.str8lit("Hello!");
+        const korean = toolbox.str8lit("안녕하세요!");
+        const japanese = toolbox.str8lit("こんにちは!");
 
         const buffer = [_]u8{ 'H', 'e', 'l', 'l', 'o', '!' };
-        const runtime_english = toolbox.string8_bytes(buffer[0..]);
+        const runtime_english = toolbox.str8(buffer[0..]);
         toolbox.asserteq(6, english.rune_length, "Wrong rune length");
         toolbox.asserteq(6, runtime_english.rune_length, "Wrong rune length");
         toolbox.asserteq(6, korean.rune_length, "Wrong rune length");
@@ -384,7 +386,7 @@ fn run_tests(which_tests: TestModule) void {
 
         //substring
         {
-            const s = toolbox.string8_literal("hello!");
+            const s = toolbox.str8lit("hello!");
             const ss = s.substring(1, 3);
             toolbox.asserteq(2, ss.rune_length, "Wrong rune length");
             toolbox.asserteq(2, ss.bytes.len, "Wrong byte length");
@@ -394,10 +396,10 @@ fn run_tests(which_tests: TestModule) void {
 
         //contains
         {
-            const s = toolbox.string8_literal("hello!");
-            const substring = toolbox.string8_literal("ll");
-            const not_substring1 = toolbox.string8_literal("ll!");
-            const not_substring2 = toolbox.string8_literal("hello!!!!");
+            const s = toolbox.str8lit("hello!");
+            const substring = toolbox.str8lit("ll");
+            const not_substring1 = toolbox.str8lit("ll!");
+            const not_substring2 = toolbox.str8lit("hello!!!!");
 
             toolbox.asserteq(s.contains(substring), true, "Should contain");
             toolbox.asserteq(s.contains(not_substring1), false, "Should not contain");
@@ -411,7 +413,7 @@ fn run_tests(which_tests: TestModule) void {
     {
         //TODO
         // defer arena.reset();
-        // var ring_queue = toolbox.RingQueue(i64).init(8, &arena);
+        // var ring_queue = toolbox.RingQueue(i64).init(8, arena);
         // for (0..10) |u| {
         //     const i = @intCast(i64, u);
         //     ring_queue.enqueue(i);
@@ -432,32 +434,45 @@ fn run_tests(which_tests: TestModule) void {
 
 fn run_benchmarks(which_tests: TestModule) void {
     _ = which_tests;
-    var arena = toolbox.Arena.init(toolbox.mb(8));
-    defer arena.free_all();
-    benchmark("is_iterable", IterableBenchmark{}, &arena);
-    benchmark("allocate, touch and free memory with OS allocator", OSAllocateBenchmark{}, &arena);
+    var arena = toolbox.Arena.init(toolbox.mb(16));
+    profiler.init(arena);
+    profiler.start_profiler();
+    defer {
+        profiler.end_profiler();
+        var it = profiler.line_iterator(arena);
+        while (it.next()) |to_print| {
+            toolbox.println_str8(to_print);
+        }
+        arena.free_all();
+    }
+
+    benchmark("is_iterable", IterableBenchmark{}, arena);
+    benchmark("allocate, touch and free memory with OS allocator", OSAllocateBenchmark{}, arena);
 
     {
+        const save_point = arena.create_save_point();
+        defer arena.restore_save_point(save_point);
+        const new_arena = arena.create_arena_from_arena(toolbox.mb(8));
         var arena_benchmark = ArenaAllocateBenchmark{};
-        benchmark("allocate, touch and free memory with arena", &arena_benchmark, &arena);
-        arena.reset();
+        benchmark("allocate, touch and free memory with arena", &arena_benchmark, new_arena);
+        // arena.reset();
     }
     {
         {
-            var list = toolbox.LinkedListQueue(i64).init(&arena);
+            var list = toolbox.LinkedListQueue(i64).init(arena);
             var llpq = LinkedListQueuePushBenchmark{ .list = &list };
-            benchmark("LinkedListDeque push ", &llpq, &arena);
+            benchmark("LinkedListDeque push ", &llpq, arena);
             var llpop = LinkedListQueuePopBenchmark{ .list = &list };
-            benchmark("LinkedListDeque pop ", &llpop, &arena);
+            benchmark("LinkedListDeque pop ", &llpop, arena);
         }
         {
-            var list = toolbox.LinkedListStack(i64).init(&arena);
+            var list = toolbox.LinkedListStack(i64).init(arena);
             var llps = LinkedListStackPushBenchmark{ .list = &list };
-            benchmark("LinkedListStack push ", &llps, &arena);
+            benchmark("LinkedListStack push ", &llps, arena);
             var llpop = LinkedListStackPopBenchmark{ .list = &list };
-            benchmark("LinkedListStack pop ", &llpop, &arena);
+            benchmark("LinkedListStack pop ", &llpop, arena);
         }
-        arena.reset();
+        // arena.reset();
     }
 
     //hash map
@@ -467,9 +482,9 @@ fn run_benchmarks(which_tests: TestModule) void {
             zhmb.map.ensureUnusedCapacity(512) catch |e| {
                 toolbox.panic("ensureUnusedCapacity failed: {}", .{e});
             };
-            benchmark("Zig HashMap", &zhmb, &arena);
-            var thmb = ToolboxHashMapBenchmark.init(&arena);
-            benchmark("Toolbox HashMap", &thmb, &arena);
+            benchmark("Zig HashMap", &zhmb, arena);
+            var thmb = ToolboxHashMapBenchmark.init(arena);
+            benchmark("Toolbox HashMap", &thmb, arena);
         }
 
         {
@@ -477,13 +492,13 @@ fn run_benchmarks(which_tests: TestModule) void {
             zihmb.map.ensureUnusedCapacity(512) catch |e| {
                 toolbox.panic("ensureUnusedCapacity failed: {}", .{e});
             };
-            benchmark("Zig IntHashMap", &zihmb, &arena);
-            var thimb = ToolboxIntHashMapBenchmark.init(&arena);
-            benchmark("Toolbox IntHashMap", &thimb, &arena);
+            benchmark("Zig IntHashMap", &zihmb, arena);
+            var thimb = ToolboxIntHashMapBenchmark.init(arena);
+            benchmark("Toolbox IntHashMap", &thimb, arena);
         }
 
         var thb = ToolboxHashBenchmark{};
-        benchmark("Toolbox Hash", &thb, &arena);
+        benchmark("Toolbox Hash", &thb, arena);
         toolbox.println("last hash {x}", .{thb.last_hash});
     }
 }
@@ -564,7 +579,7 @@ const ToolboxHashMapBenchmark = struct {
         };
     }
 
-    const s8 = toolbox.string8_literal;
+    const s8 = toolbox.str8lit;
     fn benchmark(self: *ToolboxHashMapBenchmark, _: *toolbox.Arena) void {
         const kv = .{
             s8("hello"),                12345,
@@ -652,25 +667,11 @@ const ToolboxHashBenchmark = struct {
 
 pub fn benchmark(comptime benchmark_name: []const u8, benchmark_obj: anytype, arena: *toolbox.Arena) void {
     const total_iterations = 1000;
-    var total_time: toolbox.Microseconds = 0;
-    var max_time: toolbox.Microseconds = 0;
-    var min_time: toolbox.Microseconds = 0;
     {
-        var i: isize = 0;
-        while (i < total_iterations) : (i += 1) {
-            const start = toolbox.microseconds();
+        for (0..total_iterations) |_| {
+            profiler.begin(benchmark_name);
             benchmark_obj.benchmark(arena);
-            const time_taken = toolbox.microseconds() - start;
-            total_time += time_taken;
-            max_time = @max(max_time, time_taken);
-            min_time = @min(min_time, time_taken);
+            profiler.end();
         }
     }
-    toolbox.println("Benchmark for " ++ benchmark_name ++ ":", .{});
-    toolbox.println("----------------------", .{});
-    toolbox.println("Total time: {d}µs", .{total_time});
-    toolbox.println("Avg time: {d}µs", .{@floatFromInt(f64, total_time) / total_iterations});
-    toolbox.println("Max time: {d}µs", .{max_time});
-    toolbox.println("Min time: {d}µs", .{min_time});
-    toolbox.println("----------------------", .{});
 }

@@ -28,7 +28,7 @@ fn BaseHashMap(comptime Key: type, comptime Value: type, comptime is_pointer_sta
             index_node: *usize,
         };
         const Self = @This();
-        const Iterator = struct {
+        pub const Iterator = struct {
             it: toolbox.RandomRemovalLinkedList(usize).Iterator,
             hash_map: *const Self,
 
@@ -52,7 +52,7 @@ fn BaseHashMap(comptime Key: type, comptime Value: type, comptime is_pointer_sta
             };
         }
         pub inline fn clear(self: *Self) void {
-            self.indices.clear();
+            self.indices.clear_and_free();
             for (self.buckets) |*bucket| bucket.* = null;
         }
         pub inline fn len(self: *const Self) usize {
@@ -109,6 +109,8 @@ fn BaseHashMap(comptime Key: type, comptime Value: type, comptime is_pointer_sta
         }
 
         pub fn get(self: *Self, key: Key) ?Value {
+            toolbox.profiler.begin("Hash Map get");
+            defer toolbox.profiler.end();
             if (self.len() == 0) {
                 return null;
             }

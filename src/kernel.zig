@@ -1,10 +1,11 @@
 //Copyright Daniel Bokser 2023
 //See LICENSE file for permissible source code usage
+pub const w64 = @import("wozmon64.zig");
 
 const std = @import("std");
 const toolbox = @import("toolbox");
+const profiler = toolbox.profiler;
 const kernel_memory = @import("kernel_memory.zig");
-const w64 = @import("wozmon64.zig");
 const amd64 = @import("amd64.zig");
 const pcie = @import("drivers/pcie.zig");
 const usb_xhci = @import("drivers/usb_xhci.zig");
@@ -13,6 +14,7 @@ const commands = @import("commands.zig");
 const programs = @import("programs.zig");
 
 pub const THIS_PLATFORM = toolbox.Platform.Wozmon64;
+pub const ENABLE_PROFILER = true;
 
 const CURSOR_BLINK_TIME_MS = 500;
 const ENABLE_SERIAL = toolbox.IS_DEBUG;
@@ -46,6 +48,9 @@ const KernelState = struct {
     screen_pixel_height: *u64,
     frame_buffer_size: *u64,
     frame_buffer_stride: *u64,
+
+    //profiler state
+    show_profiler: bool,
 };
 
 const StackUnwinder = struct {
@@ -112,6 +117,8 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
             .usb_xhci_controllers = toolbox.RandomRemovalLinkedList(*usb_xhci.Controller).init(kernel_start_context.global_arena),
             .are_characters_shifted = false,
 
+            .show_profiler = false,
+
             .command_buffer = toolbox.DynamicArray(u8).init(
                 kernel_start_context.global_arena,
                 kernel_start_context.screen.width_in_runes * kernel_start_context.screen.height_in_runes,
@@ -148,6 +155,7 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
         g_state.frame_arena = toolbox.Arena.init(w64.KERNEL_FRAME_ARENA_SIZE);
         g_state.scratch_arena = toolbox.Arena.init(w64.KERNEL_SCRATCH_ARENA_SIZE);
     }
+    profiler.init(g_state.global_arena);
     //set up GDT
     set_up_gdt(g_state.global_arena);
 
@@ -695,13 +703,26 @@ pub fn print_serial(comptime fmt: []const u8, args: anytype) void {
 
 fn main_loop() void {
     while (true) {
-        var it = g_state.usb_xhci_controllers.iterator();
-        while (it.next_value()) |controller| {
-            if (usb_xhci.poll_controller(controller)) {
-                usb_hid.poll(
-                    controller,
-                    &g_state.input_state,
-                );
+        profiler.start_profiler();
+
+        {
+            profiler.begin("Poll USB controllers");
+            defer profiler.end();
+
+            var it = g_state.usb_xhci_controllers.iterator();
+            while (it.next_value()) |controller| {
+                profiler.begin("Poll XHCI controller");
+                const should_poll_hid = usb_xhci.poll_controller(controller);
+                profiler.end();
+
+                if (should_poll_hid) {
+                    profiler.begin("Poll USB HID");
+                    usb_hid.poll(
+                        controller,
+                        &g_state.input_state,
+                    );
+                    profiler.end();
+                }
             }
         }
         while (g_state.input_state.modifier_key_pressed_events.dequeue()) |scancode| {
@@ -720,26 +741,62 @@ fn main_loop() void {
                 else => {},
             }
         }
+        profiler.begin("Key pressed events");
         while (g_state.input_state.key_pressed_events.dequeue()) |scancode| {
-            if (scancode == .F1) {
-                type_program(programs.draw_red_screen);
-            } else {
-                type_key(scancode, g_state.are_characters_shifted);
+            switch (scancode) {
+                .F1 => type_program(programs.woz_and_jobs),
+                .F2 => g_state.show_profiler = !g_state.show_profiler,
+                else => type_key(scancode, g_state.are_characters_shifted),
             }
         }
+        profiler.end();
+
+        profiler.begin("Key released events");
         while (g_state.input_state.key_released_events.dequeue()) |scancode| {
             _ = scancode;
         }
+        profiler.end();
+
         blink_cursor();
 
         render();
     }
 }
 fn render() void {
+    profiler.begin("Clear back buffer");
     @memset(g_state.screen.back_buffer, .{ .data = 0 });
-    draw_runes();
-    draw_cursor();
+    profiler.end();
+    profiler.end_profiler();
+
+    if ((comptime ENABLE_PROFILER) and g_state.show_profiler) {
+        draw_profiler();
+    } else {
+        draw_runes();
+        draw_cursor();
+    }
+
     @memcpy(g_state.screen.frame_buffer, g_state.screen.back_buffer);
+}
+
+fn draw_profiler() void {
+    if (comptime !ENABLE_PROFILER) {
+        return;
+    }
+
+    const save_point = g_state.scratch_arena.create_save_point();
+    defer g_state.scratch_arena.restore_save_point(save_point);
+    var profiler_it = profiler.line_iterator(g_state.scratch_arena);
+
+    var rune_y: usize = 0;
+    while (profiler_it.next()) |line| {
+        var rune_x: usize = 0;
+        var it = line.iterator();
+        while (it.next()) |rune_and_length| {
+            draw_rune(rune_and_length.rune, rune_x, rune_y);
+            rune_x += 1;
+        }
+        rune_y += 1;
+    }
 }
 
 fn draw_runes() void {
@@ -756,10 +813,14 @@ fn draw_runes() void {
     }
 }
 fn draw_rune(rune: toolbox.Rune, rune_x: usize, rune_y: usize) void {
-    if (rune < ' ' or rune > '_') {
+    const r = switch (rune) {
+        'a'...'z' => rune - 32,
+        else => rune,
+    };
+    if (r < ' ' or r > '_') {
         return;
     }
-    const index = @as(u8, @intCast(rune)) - ' ';
+    const index = @as(u8, @intCast(r)) - ' ';
     const font = g_state.screen.font;
     const bitmap = font.character_bitmap(index);
     for (0..font.height) |y| {
@@ -773,6 +834,8 @@ fn draw_rune(rune: toolbox.Rune, rune_x: usize, rune_y: usize) void {
 }
 
 fn blink_cursor() void {
+    profiler.begin("blink cursor");
+    defer profiler.end();
     const now = w64.now();
     if (now.sub(g_state.last_cursor_update).milliseconds() >= CURSOR_BLINK_TIME_MS) {
         g_state.last_cursor_update = now;

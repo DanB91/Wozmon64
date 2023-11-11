@@ -1,6 +1,6 @@
 const w64 = @import("wozmon64.zig");
 
-pub const draw_red_screen = @embedFile("../sample_programs/red_screen.bin");
+pub const woz_and_jobs = @embedFile("../sample_programs/woz_and_jobs.bin");
 pub const draw_flashing_screen = [_]u8{
     0x48,
     0x8B,
