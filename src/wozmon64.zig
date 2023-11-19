@@ -122,6 +122,7 @@ pub const KernelStartContext = struct {
     next_free_virtual_address: u64,
     application_processor_contexts: []*BootloaderProcessorContext,
     tsc_mhz: u64,
+    kernel_elf_bytes: []const u8,
 };
 
 pub const ConventionalMemoryDescriptor = struct {

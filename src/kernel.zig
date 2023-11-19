@@ -33,6 +33,7 @@ const KernelState = struct {
     usb_xhci_controllers: toolbox.RandomRemovalLinkedList(*usb_xhci.Controller),
     input_state: w64.InputState,
     are_characters_shifted: bool,
+    debug_symbols: std.dwarf.DwarfInfo,
 
     global_arena: *toolbox.Arena,
     frame_arena: *toolbox.Arena,
@@ -85,8 +86,28 @@ pub fn panic(msg: []const u8, error_return_trace: ?*std.builtin.StackTrace, ret_
 
     echo_line("{s}", .{msg});
     var it = StackUnwinder.init();
+    const debug_symbols = &g_state.debug_symbols;
+    const global_allocator = g_state.global_arena.zstd_allocator;
     while (it.next()) |address| {
-        echo_line("At {X}", .{address});
+        const compile_unit = debug_symbols.findCompileUnit(address) catch |e| {
+            echo_line("At {X} CompileUnit error: {}", .{ address, e });
+            continue;
+        };
+        const line_info = debug_symbols.getLineNumberInfo(
+            global_allocator,
+            compile_unit.*,
+            address - 1,
+        ) catch |e| {
+            echo_line("At {X} Line info Error: {}", .{ address, e });
+            continue;
+        };
+        echo_line("At {s}:{}:{} -- {?s}: 0x{X}", .{
+            line_info.file_name,
+            line_info.line,
+            line_info.column,
+            debug_symbols.getSymbolName(address),
+            address,
+        });
     }
     render();
     toolbox.hang();
@@ -97,11 +118,17 @@ var g_state: KernelState = undefined;
 export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.C) noreturn {
     @setAlignStack(256);
     {
+        const vtable: *std.mem.Allocator.VTable =
+            @ptrFromInt(@intFromPtr(kernel_start_context.global_arena.zstd_allocator.vtable));
+        vtable.* = toolbox.Arena.ZSTD_VTABLE;
+    }
+    {
         const frame_arena_bytes =
             kernel_start_context.global_arena.push_bytes_aligned(w64.KERNEL_FRAME_ARENA_SIZE, 8);
         const scratch_arena_bytes =
             kernel_start_context.global_arena.push_bytes_aligned(w64.KERNEL_SCRATCH_ARENA_SIZE, 8);
         w64.Time.init(kernel_start_context.tsc_mhz);
+
         g_state = .{
             .cursor_x = 0,
             .cursor_y = 0,
@@ -116,6 +143,7 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
             .input_state = w64.InputState.init(kernel_start_context.global_arena),
             .usb_xhci_controllers = toolbox.RandomRemovalLinkedList(*usb_xhci.Controller).init(kernel_start_context.global_arena),
             .are_characters_shifted = false,
+            .debug_symbols = undefined,
 
             .show_profiler = false,
 
@@ -138,6 +166,14 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
             .frame_buffer_size = @ptrFromInt(w64.FRAME_BUFFER_SIZE_ADDRESS),
             .frame_buffer_stride = @ptrFromInt(w64.FRAME_BUFFER_STRIDE_ADDRESS),
         };
+        const debug_symbols = parse_elf_debug_symbols(
+            kernel_start_context.kernel_elf_bytes,
+            kernel_start_context.global_arena,
+        ) catch |e| {
+            print_serial("failed to parse debug symbols: {}", .{e});
+            toolbox.hang();
+        };
+        g_state.debug_symbols = debug_symbols;
         const mapped_memory = b: {
             var mapped_memory = toolbox.RandomRemovalLinkedList(w64.VirtualMemoryMapping).init(g_state.global_arena);
             for (kernel_start_context.mapped_memory) |mapping| {
@@ -371,6 +407,70 @@ pub inline fn allocate_memory(n: usize) []u8 {
 
 pub inline fn free_memory(data: []u8) void {
     kernel_memory.free(data);
+}
+
+fn parse_elf_debug_symbols(kernel_elf: []const u8, arena: *toolbox.Arena) !std.dwarf.DwarfInfo {
+    var section_store = toolbox.DynamicArray(std.elf.Elf64_Shdr).init(arena, 64);
+    const header = b: {
+        var kernel_image_byte_stream = std.io.fixedBufferStream(kernel_elf);
+        var header = std.elf.Header.read(&kernel_image_byte_stream) catch {
+            return error.ErrorParsingHeader;
+        };
+        var it = header.section_header_iterator(&kernel_image_byte_stream);
+
+        while (it.next() catch null) |section| {
+            section_store.append(section);
+        }
+        break :b header;
+    };
+
+    const sections = section_store.items();
+    const shstrhdr = sections[header.shstrndx];
+    const shstr = kernel_elf[shstrhdr.sh_offset .. shstrhdr.sh_offset + shstrhdr.sh_size];
+
+    const debug_section_names = [_][]const u8{
+        ".debug_info",
+        ".debug_abbrev",
+        ".debug_str",
+        ".debug_str_offsets",
+        ".debug_line",
+        ".debug_line_str",
+        ".debug_ranges",
+        ".debug_loclists",
+        ".debug_rnglists",
+        ".debug_addr",
+        ".debug_names",
+        ".debug_frame",
+        ".eh_frame",
+        ".eh_frame_hdr",
+    };
+
+    var debug_sections = std.dwarf.DwarfInfo.null_section_array;
+    for (sections) |section| {
+        const namez = @as([*:0]const u8, @ptrCast(shstr.ptr + section.sh_name));
+        const name = std.mem.span(namez);
+        for (debug_section_names, 0..) |debug_section_name, i| {
+            if (std.mem.eql(u8, debug_section_name, name)) {
+                debug_sections[i] = .{
+                    .data = kernel_elf[section.sh_offset .. section.sh_offset + section.sh_size],
+                    .owned = false,
+                };
+            }
+        }
+    }
+    var debug_info = std.dwarf.DwarfInfo{
+        .endian = header.endian,
+        .sections = debug_sections,
+        .is_macho = false,
+    };
+    std.dwarf.openDwarfDebugInfo(
+        &debug_info,
+        arena.zstd_allocator,
+    ) catch {
+        return error.ErrorOpeningDwarfDebugInfo;
+    };
+
+    return debug_info;
 }
 
 pub fn echo_welcome_line(comptime fmt: []const u8, args: anytype) void {
@@ -676,10 +776,7 @@ pub fn print_serial(comptime fmt: []const u8, args: anytype) void {
     StaticVars.print_lock.lock();
     defer StaticVars.print_lock.release();
 
-    const scratch_arena = g_state.scratch_arena;
-    const arena_save_point = scratch_arena.create_save_point();
-    defer scratch_arena.restore_save_point(arena_save_point);
-    const to_print = toolbox.str8fmt(fmt, args, scratch_arena);
+    const to_print = toolbox.str8fmtbuf(fmt, args, 2048);
 
     for (to_print.bytes) |byte| {
         asm volatile (

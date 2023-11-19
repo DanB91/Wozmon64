@@ -1,4 +1,5 @@
 const toolbox = @import("toolbox.zig");
+const std = @import("std");
 const root = @import("root");
 
 pub const PAGE_SIZE = switch (toolbox.THIS_PLATFORM) {
@@ -74,10 +75,22 @@ pub fn PoolAllocator(comptime T: type) type {
 }
 pub const Arena = struct {
     data: []u8,
+
     pos: usize = 0,
     to_free: ?[]u8 = null,
 
+    save_points: [64]SavePoint = [_]SavePoint{0} ** 64,
+    current_save: usize = 0,
+    zstd_allocator: std.mem.Allocator,
+
     pub const SavePoint = usize;
+
+    pub const ZSTD_VTABLE = std.mem.Allocator.VTable{
+        .alloc = zstd_alloc,
+        .resize = zstd_resize,
+        .free = zstd_free,
+    };
+
     pub fn init(comptime size: usize) *Arena {
         comptime {
             if (size < PAGE_SIZE) {
@@ -91,12 +104,15 @@ pub const Arena = struct {
         var tmp_arena = Arena{
             .data = data,
             .pos = 0,
+            .zstd_allocator = undefined,
         };
         const ret = tmp_arena.push(Arena);
         ret.* = .{
             .data = data[tmp_arena.pos..],
             .to_free = data,
+            .zstd_allocator = undefined,
         };
+        ret.zstd_allocator = ret.create_zstd_allocator();
         return ret;
     }
     pub fn init_with_buffer(buffer: []u8) *Arena {
@@ -106,12 +122,29 @@ pub const Arena = struct {
         var tmp_arena = Arena{
             .data = buffer,
             .pos = 0,
+            .zstd_allocator = undefined,
         };
         const ret = tmp_arena.push(Arena);
         ret.* = .{
             .data = buffer[tmp_arena.pos..],
+            .zstd_allocator = undefined,
         };
+        ret.zstd_allocator = ret.create_zstd_allocator();
+
         return ret;
+    }
+
+    pub fn save(self: *Arena) void {
+        toolbox.assert(self.current_save < self.save_points.len, "Too many save points in arena", .{});
+        const save_point = self.create_save_point();
+        self.save_points[self.current_save] = save_point;
+        self.current_save += 1;
+    }
+
+    pub fn restore(self: *Arena) void {
+        toolbox.assert(self.current_save > 0, "Restored without save point", .{});
+        self.restore_save_point(self.save_points[self.current_save]);
+        self.current_save -= 1;
     }
 
     pub fn create_arena_from_arena(self: *Arena, comptime size: usize) *Arena {
@@ -171,6 +204,83 @@ pub const Arena = struct {
             return ret;
         }
         toolbox.panic("Arena allocation request is too large. {} bytes", .{n});
+    }
+
+    pub fn push_bytes_aligned_runtime(arena: *Arena, n: usize, alignment: usize) []u8 {
+        const data_address = @intFromPtr(arena.data.ptr);
+        const aligned_address = toolbox.align_up(arena.pos + data_address, alignment);
+        const aligned_pos = aligned_address - data_address;
+        const total_size = (aligned_pos - arena.pos) + n;
+        if (arena.data.len - aligned_pos >= total_size) {
+            var ret: []u8 = arena.data[aligned_pos .. aligned_pos + n];
+            arena.pos += total_size;
+            toolbox.assert(arena.pos <= arena.data.len, "Arena position is bad!", .{});
+            return ret;
+        }
+        toolbox.panic("Arena allocation request is too large. {} bytes", .{n});
+    }
+
+    fn create_zstd_allocator(self: *Arena) std.mem.Allocator {
+        const vtable = self.push(std.mem.Allocator.VTable);
+        vtable.* = ZSTD_VTABLE;
+        return .{
+            .ptr = self,
+            .vtable = vtable,
+        };
+    }
+    /// Attempt to allocate exactly `len` bytes aligned to `1 << ptr_align`.
+    ///
+    /// `ret_addr` is optionally provided as the first return address of the
+    /// allocation call stack. If the value is `0` it means no return address
+    /// has been provided.
+    fn zstd_alloc(ctx: *anyopaque, len: usize, ptr_align: u8, ret_addr: usize) ?[*]u8 {
+        _ = ret_addr;
+        const self: *toolbox.Arena = @ptrCast(@alignCast(ctx));
+        const alignment = @as(usize, 1) << @as(u6, @intCast(ptr_align));
+        return self.push_bytes_aligned_runtime(len, alignment).ptr;
+    }
+
+    /// Attempt to expand or shrink memory in place. `buf.len` must equal the
+    /// length requested from the most recent successful call to `alloc` or
+    /// `resize`. `buf_align` must equal the same value that was passed as the
+    /// `ptr_align` parameter to the original `alloc` call.
+    ///
+    /// A result of `true` indicates the resize was successful and the
+    /// allocation now has the same address but a size of `new_len`. `false`
+    /// indicates the resize could not be completed without moving the
+    /// allocation to a different address.
+    ///
+    /// `new_len` must be greater than zero.
+    ///
+    /// `ret_addr` is optionally provided as the first return address of the
+    /// allocation call stack. If the value is `0` it means no return address
+    /// has been provided.
+    fn zstd_resize(ctx: *anyopaque, buf: []u8, buf_align: u8, new_len: usize, ret_addr: usize) bool {
+        _ = ret_addr;
+        _ = buf_align;
+        _ = ctx;
+        if (new_len <= buf.len) {
+            return true;
+        }
+        return false;
+    }
+
+    /// Free and invalidate a buffer.
+    ///
+    /// `buf.len` must equal the most recent length returned by `alloc` or
+    /// given to a successful `resize` call.
+    ///
+    /// `buf_align` must equal the same value that was passed as the
+    /// `ptr_align` parameter to the original `alloc` call.
+    ///
+    /// `ret_addr` is optionally provided as the first return address of the
+    /// allocation call stack. If the value is `0` it means no return address
+    /// has been provided.
+    fn zstd_free(ctx: *anyopaque, buf: []u8, buf_align: u8, ret_addr: usize) void {
+        _ = ret_addr;
+        _ = buf_align;
+        _ = buf;
+        _ = ctx;
     }
 
     fn push_single(

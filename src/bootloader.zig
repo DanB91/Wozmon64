@@ -292,10 +292,9 @@ pub fn main() noreturn {
     println("back buffer len: {}, screen len: {}", .{ screen.back_buffer.len, screen.frame_buffer.len });
 
     var kernel_parse_result = parse_kernel_elf(global_arena) catch |e| {
-        //TODO: proper fatal function
-        println("failed to parse kernel elf: {}", .{e});
-        toolbox.hang();
+        fatal("failed to parse kernel elf: {}", .{e});
     };
+
     var next_free_virtual_address = kernel_parse_result.next_free_virtual_address;
     const pml4_table = global_arena.push_clear(amd64.PageMappingLevel4Table);
 
@@ -353,7 +352,7 @@ pub fn main() noreturn {
             map_virtual_memory(
                 address,
                 &address,
-                1,
+                2,
                 .ToBeUnmapped,
                 &mapped_memory,
                 pml4_table,
@@ -363,7 +362,7 @@ pub fn main() noreturn {
             map_virtual_memory(
                 address,
                 &address,
-                1,
+                2,
                 .ToBeUnmapped,
                 &mapped_memory,
                 pml4_table,
@@ -492,8 +491,21 @@ pub fn main() noreturn {
     for (application_processor_contexts) |*context| {
         context.* = physical_to_virtual_pointer(context.*, mapped_memory.items());
     }
+    const kernel_elf_bytes = global_arena.push_slice(u8, KERNEL_ELF.len);
+    @memcpy(kernel_elf_bytes, KERNEL_ELF);
 
     var kernel_start_context = global_arena.push(w64.KernelStartContext);
+    // kernel_start_context.* = .{
+    //     .root_xsdt = root_xsdt,
+    //     .screen = screen,
+    //     .mapped_memory = mapped_memory.items(),
+    //     .free_conventional_memory = free_conventional_memory.items(),
+    //     .next_free_virtual_address = toolbox.align_up(next_free_virtual_address, w64.MEMORY_PAGE_SIZE),
+    //     .global_arena = global_arena,
+    //     .application_processor_contexts = application_processor_contexts,
+    //     .tsc_mhz = tsc_mhz,
+    //     .kernel_elf_bytes = kernel_elf_bytes,
+    // };
     kernel_start_context.* = .{
         .root_xsdt = physical_to_virtual_pointer(root_xsdt, mapped_memory.items()),
         .screen = screen,
@@ -503,6 +515,7 @@ pub fn main() noreturn {
         .global_arena = global_arena,
         .application_processor_contexts = physical_to_virtual_pointer(application_processor_contexts, mapped_memory.items()),
         .tsc_mhz = tsc_mhz,
+        .kernel_elf_bytes = physical_to_virtual_pointer(kernel_elf_bytes, mapped_memory.items()),
     };
     kernel_start_context.screen.back_buffer = physical_to_virtual_pointer(
         kernel_start_context.screen.back_buffer,
@@ -520,6 +533,15 @@ pub fn main() noreturn {
         kernel_start_context.global_arena.data,
         mapped_memory.items(),
     );
+    kernel_start_context.global_arena.zstd_allocator.ptr = physical_to_virtual_pointer(
+        kernel_start_context.global_arena,
+        mapped_memory.items(),
+    );
+    kernel_start_context.global_arena.zstd_allocator.vtable = physical_to_virtual_pointer(
+        kernel_start_context.global_arena.zstd_allocator.vtable,
+        mapped_memory.items(),
+    );
+
     kernel_start_context.global_arena = physical_to_virtual_pointer(
         kernel_start_context.global_arena,
         mapped_memory.items(),
@@ -1063,6 +1085,7 @@ fn parse_kernel_elf(arena: *toolbox.Arena) !KernelParseResult {
             else => return error.UnexpectedELFSection,
         }
     }
+
     return .{
         .next_free_virtual_address = next_free_virtual_address,
         .entry_point = header.entry,
@@ -1075,14 +1098,20 @@ fn fatal(comptime fmt: []const u8, args: anytype) noreturn {
     println(fmt, args);
     toolbox.hang();
 }
-fn physical_to_virtual_pointer(physical: anytype, mappings: []w64.VirtualMemoryMapping) @TypeOf(physical) {
+fn physical_to_virtual_pointer(
+    physical: anytype,
+    mappings: []w64.VirtualMemoryMapping,
+) @TypeOf(physical) {
     const T = @TypeOf(physical);
-    const pointer_size = switch (@typeInfo(T)) {
+    const type_info = @typeInfo(T);
+
+    const pointer_size = switch (type_info) {
         .Pointer => |ptr| ptr.size,
         else => {
             @compileError("Must be a pointer!");
         },
     };
+
     const physical_address = if (pointer_size == .Slice)
         @intFromPtr(physical.ptr)
     else
@@ -1466,11 +1495,12 @@ export fn processor_entry(
     amd64.wrmsr(amd64.IA32_TSC_AUX_MSR, processor_id);
     while (true) {
         if (context.application_processor_kernel_entry_data.get()) |entry_data| {
-            console.serial_println("starting processor id: {}, rsp {X},entry: {X}", .{
-                processor_id,
-                entry_data.rsp,
-                @intFromPtr(entry_data.entry),
-            });
+            console.serial_println(
+                "starting processor id: {}, rsp {X},entry: {X}",
+                .{
+                    processor_id, entry_data.rsp, @intFromPtr(entry_data.entry),
+                },
+            );
 
             asm volatile (
                 \\movq %[cr3_data], %%cr3

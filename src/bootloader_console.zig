@@ -4,7 +4,7 @@ const std = @import("std");
 const w64 = @import("wozmon64.zig");
 const toolbox = @import("toolbox");
 
-const ENABLE_CONSOLE = toolbox.IS_DEBUG;
+const ENABLE_CONSOLE = true; //toolbox.IS_DEBUG;
 const BootloaderStage = enum {
     UEFI,
     AfterExitButBeforeScreenIsSetup,
