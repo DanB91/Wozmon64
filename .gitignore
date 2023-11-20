@@ -3,3 +3,4 @@ zig-cache
 *.swp
 *.swo
 .DS_Store
+.vscode

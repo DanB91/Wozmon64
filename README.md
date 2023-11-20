@@ -1,5 +1,7 @@
 # Plan for Wozmon64
 ---
+![](img/wozandjobs.png)
+---
 ## Overview
 This project will be a "reimagining" of Steve Wozniak's Apple I WozMon on AMD64 called Wozmon64.  The monitor will run in high memory (0xFFFF_FFFF_8000_0000). The bootloader will be written for UEFI. Everything will be written in Zig, AMD64 assembly and possibly C if I use any external libraries.
 

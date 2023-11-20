@@ -912,7 +912,7 @@ fn map_virtual_memory(
                     if (mapped_paddr != aligned_physical_address) {
                         toolbox.panic("Trying to map {X} to {X}, when it is already mapped to {X}!", .{
                             vaddr,
-                            paddr,
+                            aligned_physical_address,
                             mapped_paddr,
                         });
                     }
@@ -949,7 +949,7 @@ fn map_virtual_memory(
                         );
                     }
                     const mapped_paddr = @as(u64, pde.physical_page_base_address) << 21;
-                    if (mapped_paddr != aligned_physical_address) {
+                    if (mapped_paddr != paddr) {
                         toolbox.panic("Trying to map {X} to {X}, when it is already mapped to {X}!", .{
                             vaddr,
                             paddr,
@@ -1019,7 +1019,7 @@ fn map_virtual_memory(
                     };
                 } else {
                     const mapped_paddr = @as(u64, pte.physical_page_base_address) << 12;
-                    if (mapped_paddr != aligned_physical_address) {
+                    if (mapped_paddr != paddr) {
                         toolbox.panic("Trying to map {X} to {X}, when it is already mapped to {X}!", .{
                             vaddr,
                             paddr,
