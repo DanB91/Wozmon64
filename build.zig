@@ -10,8 +10,55 @@ pub fn build(b: *std.Build) !void {
         .source_file = .{ .path = "src/toolbox/src/toolbox.zig" },
     });
 
-    const kernel_step = b: {
-        const kernel_target = try std.zig.CrossTarget.parse(.{ .arch_os_abi = "x86_64-freestanding-gnu" });
+    const w64_module = b.addModule("wozmon64", .{
+        .source_file = .{ .path = "src/wozmon64.zig" },
+    });
+    try w64_module.dependencies.put("toolbox", toolbox_module);
+
+    var woz_and_jobs_step: *std.Build.Step.Compile = undefined;
+    var woz_and_jobs_install_step: *std.Build.Step.InstallFile = undefined;
+    {
+        const target = try std.zig.CrossTarget.parse(.{
+            .arch_os_abi = "x86_64-freestanding-gnu",
+        });
+        const exe = b.addExecutable(.{
+            .name = "woz_and_jobs",
+            .root_source_file = .{ .path = "sample_programs/woz_and_jobs.zig" },
+            .target = target,
+            .optimize = b.standardOptimizeOption(.{
+                .preferred_optimize_mode = .ReleaseFast,
+            }),
+            .main_pkg_path = .{ .path = "sample_programs" },
+        });
+
+        exe.linker_script = .{ .path = "sample_programs/linker.ld" };
+        exe.addModule("wozmon64", w64_module);
+        exe.force_pic = true;
+        exe.red_zone = false;
+
+        woz_and_jobs_step = exe;
+        const install_elf =
+            b.addInstallArtifact(exe, .{});
+        //const install_step = b.addInstallArtifact(exe, .{});
+        const objcopy = exe.addObjCopy(.{
+            .format = .bin,
+        });
+
+        woz_and_jobs_install_step =
+            b.addInstallBinFile(objcopy.getOutput(), "woz_and_jobs.bin");
+
+        //woz_and_jobs_install_step.step.dependOn(&install_step.step);
+        install_elf.step.dependOn(&exe.step);
+        objcopy.step.dependOn(&install_elf.step);
+        woz_and_jobs_install_step.step.dependOn(&objcopy.step);
+    }
+
+    var kernel_step: *std.Build.Step.Compile = undefined;
+    var kernel_install_step: *std.Build.Step.InstallArtifact = undefined;
+    {
+        const kernel_target = try std.zig.CrossTarget.parse(.{
+            .arch_os_abi = "x86_64-freestanding-gnu",
+        });
         const exe = b.addExecutable(.{
             .name = "kernel.elf",
             .root_source_file = .{ .path = "src/kernel.zig" },
@@ -25,12 +72,20 @@ pub fn build(b: *std.Build) !void {
         exe.addModule("toolbox", toolbox_module);
         exe.force_pic = true;
         exe.red_zone = false;
-        break :b exe;
-    };
+
+        exe.step.dependOn(&woz_and_jobs_step.step);
+
+        kernel_step = exe;
+        kernel_install_step = b.addInstallArtifact(exe, .{});
+
+        kernel_install_step.step.dependOn(&woz_and_jobs_install_step.step);
+    }
 
     //compile bootloader
     const bootloader_install_step = b: {
-        const uefi_target = try std.zig.CrossTarget.parse(.{ .arch_os_abi = "x86_64-uefi-gnu" });
+        const uefi_target = try std.zig.CrossTarget.parse(.{
+            .arch_os_abi = "x86_64-uefi-gnu",
+        });
         const exe = b.addExecutable(.{
             .name = "bootx64",
             .root_source_file = .{ .path = "src/bootloader.zig" },
@@ -44,7 +99,6 @@ pub fn build(b: *std.Build) !void {
 
         exe.step.dependOn(&kernel_step.step);
 
-        const kernel_install_step = b.addInstallArtifact(kernel_step, .{});
         const bootloader_install_step = b.addInstallArtifact(exe, .{});
         bootloader_install_step.dest_dir = .{ .custom = "img/EFI/BOOT/" };
         bootloader_install_step.step.dependOn(&kernel_install_step.step);

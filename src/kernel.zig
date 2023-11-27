@@ -19,6 +19,12 @@ pub const ENABLE_PROFILER = true;
 const CURSOR_BLINK_TIME_MS = 500;
 const ENABLE_SERIAL = toolbox.IS_DEBUG;
 
+//userspace functions
+pub fn echo(bytes: [*c]u8, len: u64) callconv(.C) void {
+    const str = toolbox.str8(bytes[0..len]);
+    echo_fmt("{}", .{str});
+}
+
 const KernelState = struct {
     cursor_x: usize,
     cursor_y: usize,
@@ -220,24 +226,33 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
                 w64.MEMORY_PAGE_SIZE,
                 w64.MEMORY_PAGE_SIZE,
             );
-            const ap_kernel_context: *w64.ApplicationProcessorKernelContext = @ptrFromInt(
-                @intFromPtr(stack.ptr) + stack.len -
-                    @sizeOf(w64.ApplicationProcessorKernelContext),
+            const thread_local_storage = g_state.global_arena.push_slice_clear_aligned(
+                u8,
+                w64.MEMORY_PAGE_SIZE,
+                w64.MEMORY_PAGE_SIZE,
             );
-            ap_kernel_context.* = .{
-                .processor_id = context.processor_id,
-                .job = .{ .value = null },
-            };
-            const rsp = @intFromPtr(ap_kernel_context);
+            const ap_kernel_context = g_state.global_arena.push_clear_aligned(
+                w64.ApplicationProcessorKernelContext,
+                w64.MEMORY_PAGE_SIZE,
+            );
+            const rsp = @intFromPtr(stack.ptr);
             const cr3: u64 =
                 asm volatile ("mov %%cr3, %[cr3]"
                 : [cr3] "=r" (-> u64),
             );
-            context.application_processor_kernel_entry_data.set(.{
+            ap_kernel_context.* = .{
                 .cr3 = cr3,
-                .rsp = toolbox.align_down(rsp, 16),
+                .rsp = rsp,
+                .fsbase = @intFromPtr(thread_local_storage.ptr),
+                .gsbase = @intFromPtr(ap_kernel_context),
+                .processor_id = context.processor_id,
+                .job = .{ .value = null },
+            };
+            context.application_processor_kernel_entry_data.set(.{
                 .start_context_data = ap_kernel_context,
                 .entry = core_entry,
+                .cr3 = cr3,
+                .rsp = rsp,
             });
             g_state.application_processor_contexts[i] = ap_kernel_context;
         }
@@ -377,6 +392,8 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
 
     toolbox.hang();
 }
+
+threadlocal var fbase_tls: usize = 0;
 fn core_entry(context: *w64.ApplicationProcessorKernelContext) callconv(.C) noreturn {
     //TODO some bug is preventing this from working on desktop.  There might be
     //     some sort of race condition.  Debug
@@ -388,7 +405,15 @@ fn core_entry(context: *w64.ApplicationProcessorKernelContext) callconv(.C) nore
 
     set_up_gdt(arena);
     set_up_idt(arena);
+    asm volatile (
+        \\wrfsbase %[fsbase]
+        \\wrgsbase %[gsbase]
+        :
+        : [fsbase] "r" (context.fsbase),
+          [gsbase] "r" (context.gsbase),
+    );
     //print_serial("APIC register {X}", .{amd64.rdmsr(amd64.IA32_APIC_BASE_MSR)});
+    fbase_tls = context.fsbase;
     print_apic_id_and_core_id();
 
     while (true) {
@@ -580,6 +605,20 @@ noinline fn set_up_gdt(arena: *toolbox.Arena) void {
             .is_granular = true,
             .base_addr_bits_24_to_31 = 0,
         },
+        // //FS segment
+        // .{
+        //     .segment_limit_bits_0_to_15 = 0xFFFF,
+        //     .base_addr_bits_0_to_23 = 0,
+        //     .type_bits = @intFromEnum(amd64.GDTDescriptorType.ReadWrite),
+        //     .is_not_system_segment = true,
+        //     .privilege_bits = 0,
+        //     .is_present = true,
+        //     .segment_limit_bits_16_to_19 = 0xF,
+        //     .is_for_long_mode_code = false,
+        //     .is_big = true,
+        //     .is_granular = true,
+        //     .base_addr_bits_24_to_31 = 0,
+        // },
     };
     const gdt = arena.push_slice(amd64.GDTDescriptor, gdt_array.len);
     @memcpy(gdt, gdt_array[0..]);
@@ -596,7 +635,7 @@ noinline fn set_up_gdt(arena: *toolbox.Arena) void {
         \\movw %%ax, %%es
         \\movw %%ax, %%ss
         \\movw $0, %%ax
-        \\movw %%ax, %%fs #TODO: TLS
+        \\movw %%ax, %%fs 
         \\movw %%ax, %%gs
         \\pushq $8
         \\lea .long_jump(%%rip), %%rax
@@ -628,9 +667,27 @@ fn set_up_idt(arena: *toolbox.Arena) void {
     );
 }
 fn nmi_handler() callconv(.Interrupt) void {
-    while (true) {
-        std.atomic.spinLoopHint();
-    }
+    const processor_context = get_processor_context();
+
+    processor_context.job.set(null);
+    asm volatile (
+        \\movq %[ksc_addr], %%rdi
+        \\
+        \\pushq $0x10 #SS
+        \\pushq %[stack_virtual_address]
+        \\pushfq
+        \\pushq $0x8 #CS
+        \\pushq %[entry_point]
+        \\iretq
+        \\ud2 #this instruction is for searchability in the disassembly
+        :
+        :
+        //TODO no idea why i have to subtract 8 here.  If I don't I get SSE alignment errors
+          [stack_virtual_address] "r" (processor_context.rsp - 8),
+          [ksc_addr] "r" (@intFromPtr(processor_context)),
+          [entry_point] "r" (@intFromPtr(&core_entry)),
+        : "rdi"
+    );
 }
 
 fn invalid_opcode_handler() callconv(.Interrupt) void {
@@ -1176,7 +1233,21 @@ fn handle_command(command: commands.Command) void {
 fn print_apic_id_and_core_id() void {
     const core_id = w64.get_core_id();
     const apic_id = @as(*u32, @ptrFromInt(g_state.apic_address + 0x20)).*;
-    print_serial("Core id {}, APIC ID {X}", .{ core_id, apic_id });
+    print_serial(
+        "Core id {}, APIC ID {X}: fbase tls: {x} context: {x},",
+        .{
+            core_id,
+            apic_id,
+            fbase_tls,
+            @as(u64, @intFromPtr(get_processor_context())),
+        },
+    );
+}
+fn get_processor_context() *w64.ApplicationProcessorKernelContext {
+    return asm volatile (
+        \\rdgsbase %[ret]
+        : [ret] "=r" (-> *w64.ApplicationProcessorKernelContext),
+    );
 }
 fn exit_running_program() void {
     print_serial("Escape hit", .{});

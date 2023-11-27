@@ -234,9 +234,12 @@ pub const Arena = struct {
     /// allocation call stack. If the value is `0` it means no return address
     /// has been provided.
     fn zstd_alloc(ctx: *anyopaque, len: usize, ptr_align: u8, ret_addr: usize) ?[*]u8 {
+        const ShiftSize = if (comptime @sizeOf(usize) == 8) u6 else u5;
+
         _ = ret_addr;
         const self: *toolbox.Arena = @ptrCast(@alignCast(ctx));
-        const alignment = @as(usize, 1) << @as(u6, @intCast(ptr_align));
+
+        const alignment = @as(usize, 1) << @as(ShiftSize, @intCast(ptr_align));
         return self.push_bytes_aligned_runtime(len, alignment).ptr;
     }
 

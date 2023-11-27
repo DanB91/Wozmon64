@@ -607,6 +607,7 @@ pub const ExceptionCode = enum(usize) {
 
     GeneralProtectionFault = 13,
     PageFault = 14,
+    CustomVector = 32,
 };
 
 pub inline fn get_idt_register() IDTRegister {

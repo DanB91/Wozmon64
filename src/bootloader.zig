@@ -1079,6 +1079,11 @@ fn parse_kernel_elf(arena: *toolbox.Arena) !KernelParseResult {
 
                 page_table_data.append(page_table_setup_data);
             }, //TODO
+            std.elf.PT_TLS => {
+                if (program_header.p_memsz > w64.MEMORY_PAGE_SIZE) {
+                    return error.TLSSizeTooBig;
+                }
+            },
             std.elf.PT_GNU_RELRO => {},
             std.elf.PT_PHDR => {},
             //else => toolbox.panic("Unexpected ELF section: {x}", .{program_header.p_type}),
@@ -1357,6 +1362,7 @@ comptime {
         \\
         \\mov %cr4, %eax 
         \\bts $5, %eax #enable PAE
+        \\bts $16, %eax #enable FSGSBASE
         \\mov %eax, %cr4 
         \\
         \\mov (cr3_data - processor_bootstrap_program_start) + LOAD_ADDRESS, %eax
@@ -1716,6 +1722,9 @@ pub fn map_conventional_memory_physical_address(
 }
 
 fn print_serial(comptime fmt: []const u8, args: anytype) void {
+    //TODO: remove
+    if (true) return;
+
     var buf: [1024]u8 = undefined;
     const to_print = std.fmt.bufPrint(&buf, fmt ++ "\n", args) catch unreachable;
 

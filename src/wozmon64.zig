@@ -4,7 +4,6 @@
 const std = @import("std");
 const toolbox = @import("toolbox");
 const amd64 = @import("amd64.zig");
-const kernel = @import("kernel.zig");
 const bitmaps = @import("bitmaps.zig");
 
 pub const MEMORY_PAGE_SIZE = toolbox.mb(2);
@@ -17,12 +16,18 @@ pub const KERNEL_FRAME_ARENA_SIZE = toolbox.mb(4);
 pub const KERNEL_SCRATCH_ARENA_SIZE = toolbox.mb(4);
 
 pub const FRAME_BUFFER_VIRTUAL_ADDRESS = 0x20_0000;
+pub const FRAME_BUFFER_PTR: [*]Pixel = @ptrFromInt(FRAME_BUFFER_VIRTUAL_ADDRESS);
 
 //Frame buffer data
 pub const SCREEN_PIXEL_WIDTH_ADDRESS = 0x220_0030;
 pub const SCREEN_PIXEL_HEIGHT_ADDRESS = 0x220_0038;
 pub const FRAME_BUFFER_SIZE_ADDRESS = 0x220_0040;
 pub const FRAME_BUFFER_STRIDE_ADDRESS = 0x220_0048;
+
+pub const SCREEN_PIXEL_WIDTH_PTR: *const u64 = @ptrFromInt(SCREEN_PIXEL_WIDTH_ADDRESS);
+pub const SCREEN_PIXEL_HEIGHT_PTR: *const u64 = @ptrFromInt(SCREEN_PIXEL_HEIGHT_ADDRESS);
+pub const FRAME_BUFFER_SIZE_PTR: *const u64 = @ptrFromInt(FRAME_BUFFER_SIZE_ADDRESS);
+pub const FRAME_BUFFER_STRIDE_PTR: *const u64 = @ptrFromInt(FRAME_BUFFER_STRIDE_ADDRESS);
 
 pub const PAGE_TABLE_RECURSIVE_OFFSET = 510;
 
@@ -107,6 +112,10 @@ pub const BootloaderProcessorContext = struct {
 
 pub const ApplicationProcessorKernelContext = struct {
     processor_id: u64,
+    rsp: u64, //initial stack pointer
+    cr3: u64, //page table address
+    fsbase: u64, //fs base address
+    gsbase: u64, //gs base address
     job: Atomic(?struct {
         entry: *const fn (user_data: ?*anyopaque) callconv(.C) void,
         user_data: ?*anyopaque,
@@ -358,10 +367,6 @@ comptime {
 }
 
 //userspace functions
-pub fn echo(bytes: [*c]u8, len: u64) callconv(.C) void {
-    const str = toolbox.str8(bytes[0..len]);
-    kernel.echo_str8("{}", .{str});
-}
 
 pub const InputState = struct {
     modifier_key_pressed_events: toolbox.RingQueue(ScanCode),
