@@ -6,7 +6,7 @@
 Please see [the plan](https://github.com/DanB91/Wozmon64/blob/main/Plan.md).
 ## Requirements
 - Either macOS or Linux. Windows may work, but can be difficult to get QEMU to run properly on.
-- Zig compiler 0.11.0-dev.3867+ff37ccd29 or newer. Pulling down the latest build is your best bet.
+- Zig compiler 0.12.0-dev.1101+25400fadf or newer. Pulling down the latest build is your best bet.
 - qemu-system-x86_64 in $PATH.
 - If you want to run bare-metal:
     - Flash drive
@@ -17,6 +17,7 @@ Please see [the plan](https://github.com/DanB91/Wozmon64/blob/main/Plan.md).
 ## Compile
 - Run `zig build run` which should build and run QEMU.
 - If you want to try running bare metal on your machine:
+    - Run `zig build` to build the UEFI executable.     
     - Insert your flash drive into your dev machine.
     - Run `cp -r zig-out/img/EFI/ <your flash drive mount point>`
     - Insert your flash drive into the target machine.
