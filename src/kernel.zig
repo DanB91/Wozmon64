@@ -754,7 +754,6 @@ comptime {
             \\mov %cr2, %rsi
             \\
             \\
-            \\#TODO: we must save all caller registers!!! (e.g. RAX, RCX, etc)
             \\call page_fault_handler_inner
             \\
             \\
@@ -800,7 +799,7 @@ export fn page_fault_handler_inner(error_code: u64, unmapped_address: u64) callc
     _ = error_code;
     const to_map = toolbox.align_down(unmapped_address, w64.MEMORY_PAGE_SIZE);
     if (to_map == 0) {
-        toolbox.panic("Allocating memory at null page!", .{});
+        toolbox.panic("Allocating memory at null page! Address: {X}", .{unmapped_address});
     }
     print_serial("Allocating page for address: {X}", .{to_map});
     var it = StackUnwinder.init();
@@ -827,6 +826,10 @@ export fn page_fault_handler_inner(error_code: u64, unmapped_address: u64) callc
 
 //for debugging within print routines
 pub fn print_serial(comptime fmt: []const u8, args: anytype) void {
+    if (comptime !ENABLE_SERIAL) {
+        return;
+    }
+
     const StaticVars = struct {
         var print_lock: w64.ReentrantTicketLock = .{};
     };

@@ -44,8 +44,8 @@ pub const Pixel = packed union {
 };
 
 pub const SUPPORTED_RESOLUTIONS = [_]struct { width: u32, height: u32 }{
-    //.{ .width = 3840, .height = 2160 },
-    //.{ .width = 1920, .height = 1080 },
+    // .{ .width = 3840, .height = 2160 },
+    // .{ .width = 1920, .height = 1080 },
     .{ .width = 1280, .height = 720 },
 };
 

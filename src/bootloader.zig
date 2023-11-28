@@ -1722,8 +1722,9 @@ pub fn map_conventional_memory_physical_address(
 }
 
 fn print_serial(comptime fmt: []const u8, args: anytype) void {
-    //TODO: remove
-    if (true) return;
+    if (comptime toolbox.IS_DEBUG) {
+        return;
+    }
 
     var buf: [1024]u8 = undefined;
     const to_print = std.fmt.bufPrint(&buf, fmt ++ "\n", args) catch unreachable;
