@@ -3,7 +3,7 @@
 ![](img/wozandjobs.png)
 ---
 ## Overview
-Please see [the plan](https://github.com/DanB91/Wozmon64/Plan.md).
+Please see [the plan](https://github.com/DanB91/Wozmon64/blob/main/Plan.md).
 ## Requirements
 - Either macOS or Linux. Windows may work, but can be difficult to get QEMU to run properly on.
 - Zig compiler 0.11.0-dev.3867+ff37ccd29 or newer. Pulling down the latest build is your best bet.
