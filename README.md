@@ -17,9 +17,10 @@ Please see [the plan](https://github.com/DanB91/Wozmon64/blob/main/Plan.md).
 ## Compile
 - Run `zig build run` which should build and run QEMU.
 - If you want to try running bare metal on your machine:
-    - Insert your flash drive 
+    - Insert your flash drive into your dev machine.
     - Run `cp -r zig-out/img/EFI/ <your flash drive mount point>`
-    - Boot your machine with the flash drive.
+    - Insert your flash drive into the target machine.
+    - Boot your machine from your machine in the UEFI/BIOS settings.
     - If you are successful you should reach the Wozmon64 prompt.
     - If unsuccessful, your machine will reboot or hang.
 
