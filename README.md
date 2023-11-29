@@ -9,8 +9,9 @@ Please see [the plan](https://github.com/DanB91/Wozmon64/blob/main/Plan.md).
 - Zig compiler 0.12.0-dev.1101+25400fadf or newer. Pulling down the latest build is your best bet.
 - qemu-system-x86_64 in $PATH.
 - If you want to run bare-metal:
-    - Flash drive
+    - Flash drive.
     - PC with UEFI firmware.
+    - USB Keyboard.
     - x86-64 CPU that has more than one core.
     - Graphics card/chip that supports the Graphics Output Protocol (which most modern  chips should).
 
