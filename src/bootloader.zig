@@ -255,19 +255,21 @@ pub fn main() noreturn {
         const size = w64.KERNEL_GLOBAL_ARENA_SIZE;
         for (memory_map) |*desc| {
             switch (desc.type) {
-                .ConventionalMemory => case: {
+                .ConventionalMemory => {
                     //must be aligned on a 2MB boundary
                     const target_address = toolbox.align_up(desc.physical_start, w64.MEMORY_PAGE_SIZE);
                     const padding = target_address - desc.physical_start;
-                    const descriptor_size = desc.number_of_pages * UEFI_PAGE_SIZE;
-                    if (padding > descriptor_size) {
-                        break :case;
-                    }
 
-                    if (descriptor_size - padding >= size) {
+                    const descriptor_size = desc.number_of_pages * UEFI_PAGE_SIZE;
+                    const capacity_taken = padding + size;
+
+                    if (descriptor_size >= capacity_taken) {
                         const ret = @as([*]u8, @ptrFromInt(target_address))[0..size];
-                        desc.number_of_pages -= size / UEFI_PAGE_SIZE;
-                        desc.physical_start += size;
+                        desc.number_of_pages -= capacity_taken / UEFI_PAGE_SIZE;
+                        if (capacity_taken % UEFI_PAGE_SIZE != 0) {
+                            desc.number_of_pages -= 1;
+                        }
+                        desc.physical_start += capacity_taken;
                         break :b ret;
                     }
                 },
@@ -475,12 +477,12 @@ pub fn main() noreturn {
     //TODO, probably shouldn't assume BSP is 0 for core id
     amd64.wrmsr(amd64.IA32_TSC_AUX_MSR, 0);
 
-    const application_processor_contexts =
+    const bootloader_processor_contexts =
         bootstrap_application_processors(global_arena, number_of_enabled_processors);
 
     //wait for application processors to come up
     {
-        for (application_processor_contexts) |context| {
+        for (bootloader_processor_contexts) |context| {
             while (!@atomicLoad(bool, &context.is_booted, .SeqCst)) {
                 std.atomic.spinLoopHint();
             }
@@ -488,24 +490,13 @@ pub fn main() noreturn {
     }
     println("APs booted!", .{});
 
-    for (application_processor_contexts) |*context| {
+    for (bootloader_processor_contexts) |*context| {
         context.* = physical_to_virtual_pointer(context.*, mapped_memory.items());
     }
     const kernel_elf_bytes = global_arena.push_slice(u8, KERNEL_ELF.len);
     @memcpy(kernel_elf_bytes, KERNEL_ELF);
 
     var kernel_start_context = global_arena.push(w64.KernelStartContext);
-    // kernel_start_context.* = .{
-    //     .root_xsdt = root_xsdt,
-    //     .screen = screen,
-    //     .mapped_memory = mapped_memory.items(),
-    //     .free_conventional_memory = free_conventional_memory.items(),
-    //     .next_free_virtual_address = toolbox.align_up(next_free_virtual_address, w64.MEMORY_PAGE_SIZE),
-    //     .global_arena = global_arena,
-    //     .application_processor_contexts = application_processor_contexts,
-    //     .tsc_mhz = tsc_mhz,
-    //     .kernel_elf_bytes = kernel_elf_bytes,
-    // };
     kernel_start_context.* = .{
         .root_xsdt = physical_to_virtual_pointer(root_xsdt, mapped_memory.items()),
         .screen = screen,
@@ -513,7 +504,7 @@ pub fn main() noreturn {
         .free_conventional_memory = physical_to_virtual_pointer(free_conventional_memory.items(), mapped_memory.items()),
         .next_free_virtual_address = toolbox.align_up(next_free_virtual_address, w64.MEMORY_PAGE_SIZE),
         .global_arena = global_arena,
-        .application_processor_contexts = physical_to_virtual_pointer(application_processor_contexts, mapped_memory.items()),
+        .bootloader_processor_contexts = physical_to_virtual_pointer(bootloader_processor_contexts, mapped_memory.items()),
         .tsc_mhz = tsc_mhz,
         .kernel_elf_bytes = physical_to_virtual_pointer(kernel_elf_bytes, mapped_memory.items()),
     };
@@ -1722,9 +1713,9 @@ pub fn map_conventional_memory_physical_address(
 }
 
 fn print_serial(comptime fmt: []const u8, args: anytype) void {
-    if (comptime toolbox.IS_DEBUG) {
-        return;
-    }
+    // if (comptime toolbox.IS_DEBUG) {
+    //     return;
+    // }
 
     var buf: [1024]u8 = undefined;
     const to_print = std.fmt.bufPrint(&buf, fmt ++ "\n", args) catch unreachable;

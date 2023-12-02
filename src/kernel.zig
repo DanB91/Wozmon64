@@ -217,10 +217,10 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
     {
         g_state.application_processor_contexts = g_state.global_arena.push_slice(
             *w64.ApplicationProcessorKernelContext,
-            kernel_start_context.application_processor_contexts.len,
+            kernel_start_context.bootloader_processor_contexts.len,
         );
 
-        for (kernel_start_context.application_processor_contexts, 0..) |context, i| {
+        for (kernel_start_context.bootloader_processor_contexts, 0..) |context, i| {
             const stack = g_state.global_arena.push_slice_clear_aligned(
                 u8,
                 w64.MEMORY_PAGE_SIZE,
@@ -235,7 +235,7 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
                 w64.ApplicationProcessorKernelContext,
                 w64.MEMORY_PAGE_SIZE,
             );
-            const rsp = @intFromPtr(stack.ptr);
+            const rsp = @intFromPtr(stack.ptr) + stack.len;
             const cr3: u64 =
                 asm volatile ("mov %%cr3, %[cr3]"
                 : [cr3] "=r" (-> u64),
@@ -248,13 +248,15 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
                 .processor_id = context.processor_id,
                 .job = .{ .value = null },
             };
-            context.application_processor_kernel_entry_data.set(.{
-                .start_context_data = ap_kernel_context,
-                .entry = core_entry,
-                .cr3 = cr3,
-                .rsp = rsp,
-            });
             g_state.application_processor_contexts[i] = ap_kernel_context;
+        }
+        for (g_state.application_processor_contexts, 0..) |context, i| {
+            kernel_start_context.bootloader_processor_contexts[i].application_processor_kernel_entry_data.set(.{
+                .start_context_data = context,
+                .entry = core_entry,
+                .cr3 = context.cr3,
+                .rsp = context.rsp,
+            });
         }
     }
 
@@ -705,7 +707,7 @@ const ExceptionRegisters = packed struct {
 comptime {
     const SAVE_FRAME_POINTER = if (toolbox.IS_DEBUG)
         \\
-        \\mov %rsp, %rbp
+        \\lea 8(%rsp), %rbp
         \\
     else
         \\
@@ -717,8 +719,9 @@ comptime {
         \\.extern page_fault_handler_inner
         \\page_fault_handler:
         \\
-        \\xchg %rdi, (%rsp) #save and pop error code
-        \\push %rbp
+        \\xchg %rbp, (%rsp) #save and pop error code
+        \\push %rdi
+        \\mov %rbp, %rdi #rdi now has the error code
         ++ SAVE_FRAME_POINTER ++
             \\push %rsi
             \\push %rax
@@ -753,9 +756,7 @@ comptime {
             \\
             \\mov %cr2, %rsi
             \\
-            \\
             \\call page_fault_handler_inner
-            \\
             \\
             \\movdqu 0(%rsp), %xmm15 
             \\movdqu 0x10(%rsp), %xmm14
@@ -787,8 +788,8 @@ comptime {
             \\pop %rbx
             \\pop %rax
             \\pop %rsi
-            \\pop %rbp
             \\pop %rdi
+            \\pop %rbp
             \\iretq
     );
 }
@@ -796,12 +797,14 @@ comptime {
 extern fn page_fault_handler() void;
 
 export fn page_fault_handler_inner(error_code: u64, unmapped_address: u64) callconv(.C) void {
-    _ = error_code;
     const to_map = toolbox.align_down(unmapped_address, w64.MEMORY_PAGE_SIZE);
     if (to_map == 0) {
         toolbox.panic("Allocating memory at null page! Address: {X}", .{unmapped_address});
     }
-    print_serial("Allocating page for address: {X}", .{to_map});
+    print_serial("Allocating page for address: {X}, Error code: {}", .{
+        to_map,
+        error_code,
+    });
     var it = StackUnwinder.init();
     while (it.next()) |address| {
         print_serial("At {X}", .{address});
