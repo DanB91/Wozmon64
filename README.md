@@ -14,6 +14,7 @@ Please see [the plan](https://github.com/DanB91/Wozmon64/blob/main/Plan.md).
     - USB Keyboard.
     - x86-64 CPU that has more than one core.
     - Graphics card/chip that supports the Graphics Output Protocol (which most modern  chips should).
+- If you want to change the resolution, comment out the resolutions that you don't want in the `SUPPORTED_RESOLUTIONS` constant `wozmon64.zig` and recompile.
 
 ## Compile
 - Run `zig build run` which should build and run QEMU.

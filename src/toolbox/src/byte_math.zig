@@ -15,8 +15,9 @@ pub inline fn gb(n: anytype) @TypeOf(n) {
 
 pub inline fn align_up(n: anytype, alignment: usize) @TypeOf(n) {
     comptime {
-        if (@typeInfo(@TypeOf(n)) != .Int) {
-            @compileError("align_up only supports ints!");
+        switch (@typeInfo(@TypeOf(n))) {
+            .Int, .ComptimeInt => {},
+            else => @compileError("align_up only supports ints!"),
         }
         // if (!(alignment == 0 or (alignment & (alignment - 1)) == 0)) {
         //     @compileError("Alignment is not a power of 2!");

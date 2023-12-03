@@ -282,7 +282,10 @@ pub fn main() noreturn {
     var global_arena = toolbox.Arena.init_with_buffer(kernel_start_context_bytes);
 
     //set up screen
-    const frame_buffer = @as([*]w64.Pixel, @ptrFromInt(gop_mode.frame_buffer_base))[0 .. gop_mode.frame_buffer_size / @sizeOf(w64.Pixel)];
+    const frame_buffer = @as(
+        [*]w64.Pixel,
+        @ptrFromInt(gop_mode.frame_buffer_base),
+    )[0 .. gop_mode.frame_buffer_size / @sizeOf(w64.Pixel)];
     const screen = w64.Screen.init(
         gop_mode.info.horizontal_resolution,
         gop_mode.info.vertical_resolution,
@@ -291,6 +294,12 @@ pub fn main() noreturn {
         global_arena,
     );
     console.init_graphics_console(screen);
+    if (screen.frame_buffer.len >= w64.DEFAULT_PROGRAM_LOAD_ADDRESS - w64.FRAME_BUFFER_VIRTUAL_ADDRESS) {
+        fatal(
+            "Resolution chosen is not yet supported due to the frame buffer being too big.  Please report this as a bug.",
+            .{},
+        );
+    }
     println("back buffer len: {}, screen len: {}", .{ screen.back_buffer.len, screen.frame_buffer.len });
 
     var kernel_parse_result = parse_kernel_elf(global_arena) catch |e| {

@@ -379,8 +379,8 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
         g_state.frame_buffer_stride.* = g_state.screen.stride;
     }
 
-    echo_welcome_line("*** Wozmon64 ***\n", .{});
     {
+        echo_welcome_line("*** Wozmon64 ***\n", .{});
         echo_welcome_line("{} bytes free *** {} processors free *** {} x {} pixels free\n", .{
             kernel_memory.pages_free() * w64.MEMORY_PAGE_SIZE,
             g_state.application_processor_contexts.len,
@@ -719,7 +719,7 @@ comptime {
         \\.extern page_fault_handler_inner
         \\page_fault_handler:
         \\
-        \\xchg %rbp, (%rsp) #save and pop error code
+        \\xchg %rbp, (%rsp) #save previous frame pointer and pop error code
         \\push %rdi
         \\mov %rbp, %rdi #rdi now has the error code
         ++ SAVE_FRAME_POINTER ++
@@ -1037,7 +1037,7 @@ fn carriage_return() void {
     }
 }
 fn type_program(program: []const u8) void {
-    const load_address: u32 = 0x230_0000;
+    const load_address: u32 = w64.DEFAULT_PROGRAM_LOAD_ADDRESS;
     const dest = @as([*]u8, @ptrFromInt(load_address))[0..program.len];
     @memcpy(dest, program);
     echo_line("Loaded program to address {X}!", .{load_address});

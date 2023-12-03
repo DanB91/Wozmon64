@@ -189,6 +189,7 @@ In the future we could support:
 - Ethernet with TCP/IP stack and maybe a QUIC stack
 
 ## Memory Map
+**NOTE: the actual address range values have changed. Will update when more solidified**
 
 This will be the virtual memory map of Wozmon64.  2MiB pages are used, so there maybe some invalid address space after some MMIO memory.
 

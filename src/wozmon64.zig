@@ -19,10 +19,14 @@ pub const FRAME_BUFFER_VIRTUAL_ADDRESS = 0x20_0000;
 pub const FRAME_BUFFER_PTR: [*]Pixel = @ptrFromInt(FRAME_BUFFER_VIRTUAL_ADDRESS);
 
 //Frame buffer data
-pub const SCREEN_PIXEL_WIDTH_ADDRESS = 0x220_0030;
-pub const SCREEN_PIXEL_HEIGHT_ADDRESS = 0x220_0038;
-pub const FRAME_BUFFER_SIZE_ADDRESS = 0x220_0040;
-pub const FRAME_BUFFER_STRIDE_ADDRESS = 0x220_0048;
+
+const W64_API_ADDRESS_BASE = 0x240_0000;
+pub const SCREEN_PIXEL_WIDTH_ADDRESS = W64_API_ADDRESS_BASE + 0x30;
+pub const SCREEN_PIXEL_HEIGHT_ADDRESS = W64_API_ADDRESS_BASE + 0x38;
+pub const FRAME_BUFFER_SIZE_ADDRESS = W64_API_ADDRESS_BASE + 0x40;
+pub const FRAME_BUFFER_STRIDE_ADDRESS = W64_API_ADDRESS_BASE + 0x48;
+
+pub const DEFAULT_PROGRAM_LOAD_ADDRESS = toolbox.align_up(FRAME_BUFFER_STRIDE_ADDRESS, MEMORY_PAGE_SIZE);
 
 pub const SCREEN_PIXEL_WIDTH_PTR: *const u64 = @ptrFromInt(SCREEN_PIXEL_WIDTH_ADDRESS);
 pub const SCREEN_PIXEL_HEIGHT_PTR: *const u64 = @ptrFromInt(SCREEN_PIXEL_HEIGHT_ADDRESS);
@@ -43,9 +47,12 @@ pub const Pixel = packed union {
     data: u32,
 };
 
-pub const SUPPORTED_RESOLUTIONS = [_]struct { width: u32, height: u32 }{
-    // .{ .width = 3840, .height = 2160 },
-    // .{ .width = 1920, .height = 1080 },
+pub const SUPPORTED_RESOLUTIONS = [_]struct {
+    width: u32,
+    height: u32,
+}{
+    .{ .width = 3840, .height = 2160 },
+    .{ .width = 1920, .height = 1080 },
     .{ .width = 1280, .height = 720 },
 };
 
