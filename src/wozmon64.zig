@@ -35,8 +35,6 @@ pub const FRAME_BUFFER_STRIDE_PTR: *const u64 = @ptrFromInt(FRAME_BUFFER_STRIDE_
 
 pub const PAGE_TABLE_RECURSIVE_OFFSET = 510;
 
-pub const DisplayConfiguration = struct {};
-
 pub const Pixel = packed union {
     colors: packed struct(u32) {
         b: u8,

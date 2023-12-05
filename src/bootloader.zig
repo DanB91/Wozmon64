@@ -4,7 +4,6 @@
 const std = @import("std");
 const toolbox = @import("toolbox");
 const mpsp = @import("mp_service_protocol.zig");
-const tsp = @import("timestamp_protocol.zig");
 const w64 = @import("wozmon64.zig");
 const amd64 = @import("amd64.zig");
 const console = @import("bootloader_console.zig");
@@ -65,7 +64,10 @@ pub fn panic(msg: []const u8, error_return_trace: ?*std.builtin.StackTrace, ret_
 }
 
 var bootloader_arena_buffer = [_]u8{0} ** toolbox.kb(512);
+
+//For possible debugging purposes
 var image_load_address: usize = 0;
+
 pub fn main() noreturn {
     //disable interrupts
     asm volatile ("cli");
@@ -369,7 +371,7 @@ pub fn main() noreturn {
                 pml4_table,
                 global_arena,
             );
-            address = toolbox.align_down(@intFromPtr(&processor_entry), w64.MMIO_PAGE_SIZE);
+            address = toolbox.align_down(@intFromPtr(&core_entry), w64.MMIO_PAGE_SIZE);
             map_virtual_memory(
                 address,
                 &address,
@@ -1162,122 +1164,9 @@ pub fn find_acpi_table(root_xsdt: *const amd64.XSDT, comptime name: []const u8, 
     return @ptrCast(table_xsdt);
 }
 
-//TODO:
-//multicore
-
-// const BootstrapCoreContext = struct {
-//     cores_started: *usize,
-//     mp: *mpsp.MPServiceProtocol,
-//     print_strip: *const bool,
-
-//     cores_detected: usize,
-//     core_id: usize,
-//     screen: Screen,
-// };
-// fn ap_entry_point(arg: ?*anyopaque) callconv(.C) void {
-//     const ctx = @ptrCast(*BootstrapCoreContext, @alignCast(@alignOf(mpsp.MPServiceProtocol), arg.?));
-
-//     _ = @atomicRmw(usize, ctx.cores_started, .Add, 1, .Monotonic);
-
-//     while (!@atomicLoad(bool, ctx.print_strip, .SeqCst)) {
-//         std.atomic.spinLoopHint();
-//         serialprintln("before ", .{});
-//     }
-//     serialprintln("yes", .{});
-
-//     draw_strip(ctx.core_id, ctx.cores_detected, ctx.screen);
-//     toolbox.hang();
-// }
-// fn draw_strip(core_id: usize, cores_detected: usize, screen: Screen) void {
-//     const height = screen.height / cores_detected;
-//     const y0 = core_id * height;
-//     serialprintln(
-//         "y0: {}, height: {}, screen width: {}, screen height: {}, screen stride: {}",
-//         .{ y0, height, screen.width, screen.height, screen.stride },
-//     );
-//     for (y0..y0 + height) |y| {
-//         for (0..screen.width) |x| {
-//             screen.frame_buffer[y * screen.stride + x].colors = .{
-//                 .r = @intCast(u8, core_id) * 100,
-//                 .g = 0,
-//                 .b = 0,
-//             };
-//         }
-//     }
-// }
-
-// var cores_detected: usize = 1;
-// var core_contexts = toolbox.DynamicArray(*BootstrapCoreContext).init(&bootloader_arena, 128);
-// var print_strip = false;
-// {
-//     var cores_started: usize = 1;
-//     var core_id: usize = 1;
-//     {
-//         var mp: *mpsp.MPServiceProtocol = undefined;
-//         var status = bs.locateProtocol(&mpsp.MPServiceProtocol.guid, null, @ptrCast(*?*anyopaque, &mp));
-//         if (status != ZSUEFIStatus.Success) {
-//             fatal("Cannot init multicore support! Error locating MP protocol: {}", .{status});
-//         }
-
-//         var number_of_enabled_processors: usize = 0;
-//         var number_of_processors: usize = 0;
-//         status = mp.mp_services_get_number_of_processors(&number_of_processors, &number_of_enabled_processors);
-//         if (status != ZSUEFIStatus.Success) {
-//             fatal("Cannot init multicore support! Error getting number of processors: {}", .{status});
-//         }
-
-//         var dummy_event: std.os.uefi.Event = undefined;
-//         status = bs.createEvent(
-//             std.os.uefi.tables.BootServices.event_notify_signal,
-//             std.os.uefi.tables.BootServices.tpl_callback,
-//             event_notification_callback,
-//             null,
-//             &dummy_event,
-//         );
-//         if (status != ZSUEFIStatus.Success) {
-//             fatal("Failed to create dummy event to start multicore support! Error: {}", .{status});
-//         }
-
-//         //processor 0 is the BSP (main processor)
-//         for (1..number_of_enabled_processors) |i| {
-//             var processor_info_buffer: mpsp.ProcessorInformation = undefined;
-//             status = mp.mp_services_get_processor_info(i, &processor_info_buffer);
-//             if (status != ZSUEFIStatus.Success) {
-//                 fatal("Failed to start multicore support! Error getting processor info: {}", .{status});
-//             }
-
-//             //ignore hyperthreads
-//             if (processor_info_buffer.location.thread != 0) {
-//                 continue;
-//             }
-//             var ctx = bootloader_arena.push(BootstrapCoreContext);
-//             ctx.* = .{
-//                 .mp = mp,
-//                 .cores_started = &cores_started,
-//                 .core_id = core_id,
-
-//                 .screen = screen,
-//                 .cores_detected = number_of_enabled_processors,
-//                 .print_strip = &print_strip,
-//             };
-//             core_contexts.append(ctx);
-
-//             core_id += 1;
-//             cores_detected += 1;
-//             status = mp.mp_services_startup_this_ap(ap_entry_point, i, dummy_event, 0, ctx, null);
-//             if (status != ZSUEFIStatus.Success) {
-//                 fatal("Failed to start multicore support! Error: {}", .{status});
-//             }
-//         }
-//     }
-//     while (@atomicLoad(usize, &cores_started, .Monotonic) < cores_detected) {
-//         std.atomic.spinLoopHint();
-//     }
-//     uefiprintln("Started {} cores", .{cores_started});
-// }
 fn calculaute_tsc_mhz(root_xsdt: *const amd64.XSDT, arena: *toolbox.Arena) u64 {
-    const save_point = arena.create_save_point();
-    defer arena.restore_save_point(save_point);
+    arena.save();
+    defer arena.restore();
 
     const hpet = find_acpi_table(root_xsdt, "HPET", amd64.HPET) catch
         fatal("Cannot find HPET ACPI table", .{});
@@ -1330,7 +1219,7 @@ fn calculaute_tsc_mhz(root_xsdt: *const amd64.XSDT, arena: *toolbox.Arena) u64 {
 
 comptime {
     asm (
-        \\.extern processor_entry
+        \\.extern core_entry
         \\.macro hang
         \\.hang: jmp .hang
         \\.endm
@@ -1424,7 +1313,7 @@ comptime {
         \\
         \\#Microsoft ABI has second parameter in rdx
         \\mov %rdi, %rdx
-        \\movabs $processor_entry, %rax
+        \\movabs $core_entry, %rax
         \\jmp *%rax
         \\.loop: jmp .loop
         \\ud2
@@ -1489,7 +1378,7 @@ comptime {
     );
 }
 
-export fn processor_entry(
+export fn core_entry(
     context: *w64.BootloaderProcessorContext,
     processor_id: u64,
 ) callconv(.C) noreturn {
@@ -1543,49 +1432,10 @@ pub fn physical_to_virtual(
     return error.PhysicalAddressNotMapped;
 }
 
-//TODO: remove
-pub fn virtual_to_physical(
+fn virtual_to_physical(
     virtual_address: u64,
     mappings: *const toolbox.RandomRemovalLinkedList(w64.VirtualMemoryMapping),
 ) !u64 {
-    //TODO: enable
-    // {
-    //     {
-    //         const vaddr_2mb: amd64.VirtualAddress2MBPage = @bitCast(virtual_address);
-    //         const pd_entry_2mb = get_pd_2mb(virtual_address).entries[vaddr_2mb.pd_offset];
-    //         if (!pd_entry_2mb.present) {
-    //             return error.VirtualAddressNotMapped;
-    //         }
-
-    //         //is it actually a 2MB page?
-    //         if (pd_entry_2mb.must_be_one == 1) {
-    //             const base_physical_address = @as(
-    //                 u64,
-    //                 pd_entry_2mb.physical_page_base_address,
-    //             ) << 21;
-    //             const effective_address = base_physical_address + (virtual_address &
-    //                 toolbox.mask_for_bit_range(0, 21, u64));
-    //             return effective_address;
-    //         }
-    //     }
-
-    //     //It is a 4KB page
-    //     {
-    //         const vaddr_4kb: amd64.VirtualAddress4KBPage = @bitCast(virtual_address);
-    //         const pt_entry = get_pt(virtual_address).entries[vaddr_4kb.pt_offset];
-    //         if (!pt_entry.present) {
-    //             return error.VirtualAddressNotMapped;
-    //         }
-    //         const base_physical_address = @as(
-    //             u64,
-    //             pt_entry.physical_page_base_address,
-    //         ) << 12;
-    //         const effective_address = base_physical_address + (virtual_address &
-    //             toolbox.mask_for_bit_range(0, 12, u64));
-    //         return effective_address;
-    //     }
-    // }
-    //TODO use recursive mapping
     var it = mappings.iterator();
     while (it.next()) |mapping| {
         if (virtual_address >= mapping.virtual_address and
@@ -1597,135 +1447,8 @@ pub fn virtual_to_physical(
     }
     return error.VirtualAddressNotMapped;
 }
-pub const MapMemoryResult = struct {
-    virtual_address: u64,
-    next_free_virtual_address: u64,
-};
-pub fn map_conventional_memory_physical_address(
-    starting_physical_address: u64,
-    //TODO: i think we should get rid of this pointer and return the new virtual address instead
-    starting_virtual_address: u64,
-    number_of_pages: usize,
-    arena: *toolbox.Arena,
-    mappings: *toolbox.RandomRemovalLinkedList(w64.VirtualMemoryMapping),
-) !MapMemoryResult {
-    if (!toolbox.is_aligned_to(starting_virtual_address, w64.MEMORY_PAGE_SIZE)) {
-        return error.VirtualAddressNotPageAligned;
-    }
-    if (!toolbox.is_aligned_to(starting_physical_address, w64.MEMORY_PAGE_SIZE)) {
-        return error.PhysicalAddressNotPageAligned;
-    }
-
-    var virtual_address = starting_virtual_address;
-    var physical_address = starting_physical_address;
-    for (0..number_of_pages) |_| {
-        toolbox.assert(
-            virtual_address > 0xFFFF_FF7F_FFFF_FFFF or virtual_address < 0xFFFF_FF80_0000_0000,
-            "Mapping page table virtual address! physical address: {x}, virtual_address: {x}",
-            .{ virtual_address, physical_address },
-        );
-        // if (comptime toolbox.IS_DEBUG) {
-        //     var it = mappings.iterator();
-        //     while (it.next()) |mapping| {
-        //         toolbox.assert(
-        //             virtual_address + MEMORY_PAGE_SIZE <= mapping.virtual_address or virtual_address >= mapping.virtual_address + mapping.size,
-        //             "Mapping virtual address {X}, when it is already mapped to {X}!",
-        //             .{ virtual_address, mapping.physical_address },
-        //         );
-        //     }
-        // }
-        const vaddr_bits: amd64.VirtualAddress2MBPage = @bitCast(virtual_address);
-        const pdp = b: {
-            const pml4t = w64.get_pml4t();
-            const entry = &pml4t.entries[vaddr_bits.pml4t_offset];
-            if (!entry.present) {
-                const pdp = arena.push_clear(amd64.PageDirectoryPointer);
-                const page_physical_address = virtual_to_physical(
-                    @intFromPtr(pdp),
-                    mappings,
-                ) catch unreachable;
-                entry.* = .{
-                    .present = true,
-                    .write_enable = true,
-                    .ring3_accessible = false,
-                    .writethrough = false,
-                    .cache_disable = false,
-                    .pdp_base_address = @intCast(page_physical_address >> 12),
-                    .no_execute = true,
-                };
-                break :b pdp;
-            } else {
-                break :b w64.get_pdp(virtual_address);
-            }
-        };
-        const pd = b: {
-            const entry = &pdp.entries[vaddr_bits.pdp_offset];
-            if (!entry.present) {
-                const pd = arena.push_clear(amd64.PageDirectory2MB);
-                const page_physical_address = virtual_to_physical(
-                    @intFromPtr(pd),
-                    mappings,
-                ) catch unreachable;
-                entry.* = .{
-                    .present = true,
-                    .write_enable = true,
-                    .ring3_accessible = false,
-                    .writethrough = false,
-                    .cache_disable = false,
-                    .pd_base_address = @intCast(page_physical_address >> 12),
-                    .no_execute = true,
-                };
-                break :b pd;
-            } else {
-                break :b w64.get_pd_2mb(virtual_address);
-            }
-        };
-        //Finally map the actual page
-        {
-            const entry = &pd.entries[vaddr_bits.pd_offset];
-            if (!entry.present) {
-                entry.* = .{
-                    .present = true,
-                    .write_enable = true,
-                    .ring3_accessible = false,
-                    .pat_bit_0 = 0, //cachable
-                    .pat_bit_1 = 0,
-                    .pat_bit_2 = 0,
-                    .global = (virtual_address & (1 << 63)) != 0,
-                    .physical_page_base_address = @intCast(physical_address >> 21),
-                    .memory_protection_key = 0,
-                    .no_execute = false,
-                };
-            } else {
-                if (entry.must_be_one == 1) {
-                    toolbox.panic(
-                        "Expected 2MB PD, but was 4KB! Attempted virtual address to map: {X}",
-                        .{virtual_address},
-                    );
-                }
-                return error.VirtualAddressAlreadyMapped;
-            }
-        }
-        virtual_address += w64.MEMORY_PAGE_SIZE;
-        physical_address += w64.MEMORY_PAGE_SIZE;
-    }
-    _ = mappings.append(.{
-        .physical_address = starting_physical_address,
-        .virtual_address = starting_virtual_address,
-        .size = number_of_pages * w64.MEMORY_PAGE_SIZE,
-        .memory_type = .ConventionalMemory,
-    });
-    return .{
-        .virtual_address = starting_virtual_address,
-        .next_free_virtual_address = virtual_address,
-    };
-}
 
 fn print_serial(comptime fmt: []const u8, args: anytype) void {
-    // if (comptime toolbox.IS_DEBUG) {
-    //     return;
-    // }
-
     var buf: [1024]u8 = undefined;
     const to_print = std.fmt.bufPrint(&buf, fmt ++ "\n", args) catch unreachable;
 
@@ -1739,137 +1462,4 @@ fn print_serial(comptime fmt: []const u8, args: anytype) void {
             : "rax", "rdx"
         );
     }
-}
-//returns mapped address
-pub fn map_mmio_physical_address(
-    starting_physical_address: u64,
-    starting_virtual_address_ptr: *u64, //increments to next free address
-    number_of_pages: usize,
-    arena: *toolbox.Arena,
-    mappings: *toolbox.RandomRemovalLinkedList(w64.VirtualMemoryMapping),
-) u64 {
-    starting_virtual_address_ptr.* = toolbox.align_up(starting_virtual_address_ptr.*, w64.MMIO_PAGE_SIZE);
-
-    const starting_virtual_address = starting_virtual_address_ptr.*;
-    for (0..number_of_pages) |i| {
-        const virtual_address = starting_virtual_address + i * w64.MMIO_PAGE_SIZE;
-        const physical_address = starting_physical_address + i * w64.MMIO_PAGE_SIZE;
-
-        defer starting_virtual_address_ptr.* += w64.MMIO_PAGE_SIZE;
-
-        toolbox.assert(
-            virtual_address > 0xFFFF_FF7F_FFFF_FFFF or virtual_address < 0xFFFF_FF80_0000_0000,
-            "Mapping page table virtual address! physical address: {x}, virtual_address: {x}",
-            .{ virtual_address, physical_address },
-        );
-        const vaddr_bits: amd64.VirtualAddress4KBPage = @bitCast(virtual_address);
-        const pdp = b: {
-            const pml4t = w64.get_pml4t();
-            const entry = &pml4t.entries[vaddr_bits.pml4t_offset];
-            if (!entry.present) {
-                const pdp = arena.push_clear(amd64.PageDirectoryPointer);
-                const page_physical_address = virtual_to_physical(
-                    @intFromPtr(pdp),
-                    mappings,
-                ) catch unreachable;
-                entry.* = .{
-                    .present = true,
-                    .write_enable = true,
-                    .ring3_accessible = false,
-                    .writethrough = false,
-                    .cache_disable = false,
-                    .pdp_base_address = @intCast(page_physical_address >> 12),
-                    .no_execute = true,
-                };
-                break :b pdp;
-            } else {
-                break :b w64.get_pdp(virtual_address);
-            }
-        };
-        const pd = b: {
-            const entry = &pdp.entries[vaddr_bits.pdp_offset];
-            if (!entry.present) {
-                const pd = arena.push_clear(amd64.PageDirectory4KB);
-                const page_physical_address = virtual_to_physical(
-                    @intFromPtr(pd),
-                    mappings,
-                ) catch unreachable;
-                entry.* = .{
-                    .present = true,
-                    .write_enable = true,
-                    .ring3_accessible = false,
-                    .writethrough = false,
-                    .cache_disable = false,
-                    .pd_base_address = @intCast(page_physical_address >> 12),
-                    .no_execute = true,
-                };
-                break :b pd;
-            } else {
-                break :b w64.get_pd_4kb(virtual_address);
-            }
-        };
-        const pt = b: {
-            const entry = &pd.entries[vaddr_bits.pd_offset];
-            if (!entry.present) {
-                const pt = arena.push_clear(amd64.PageTable);
-                const page_physical_address = virtual_to_physical(
-                    @intFromPtr(pt),
-                    mappings,
-                ) catch unreachable;
-                entry.* = .{
-                    .present = true,
-                    .write_enable = true,
-                    .ring3_accessible = false,
-                    .writethrough = false,
-                    .cache_disable = false,
-                    .pt_base_address = @intCast(page_physical_address >> 12),
-                    .no_execute = true,
-                };
-                break :b pt;
-            } else {
-                toolbox.assert(
-                    entry.must_be_zero == 0,
-                    "Expected 4KB PD, but was 2MB! Attempted virtual address to map: {X}",
-                    .{virtual_address},
-                );
-                break :b w64.get_pt(virtual_address);
-            }
-        };
-        //Finally map the actual page
-        {
-            const entry = &pt.entries[vaddr_bits.pt_offset];
-            if (!entry.present) {
-                entry.* = .{
-                    .present = true,
-                    .write_enable = true,
-                    .ring3_accessible = false,
-                    .pat_bit_0 = 1, //uncachable
-                    .pat_bit_1 = 1,
-                    .pat_bit_2 = 0,
-                    .global = true,
-                    .physical_page_base_address = @intCast(physical_address >> 12),
-                    .memory_protection_key = 0,
-                    .no_execute = true,
-                };
-            } else {
-                toolbox.assert(
-                    false,
-                    "Trying map {x} to {x}, which is already mapped to {x}. Starting virtual address: {x}",
-                    .{
-                        virtual_address,
-                        physical_address,
-                        entry.physical_page_base_address,
-                        starting_virtual_address,
-                    },
-                );
-            }
-        }
-    }
-    _ = mappings.append(.{
-        .physical_address = starting_physical_address,
-        .virtual_address = starting_virtual_address,
-        .size = number_of_pages * w64.MMIO_PAGE_SIZE,
-        .memory_type = .MMIOMemory,
-    });
-    return starting_virtual_address;
 }

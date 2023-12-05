@@ -91,12 +91,12 @@ Wozmon64 is line based and support similar syntax as the original WozMon. That i
     - Hit F1 and you should see:
     ```
     \
-    LOADED PROGRAM TO ADDRESS 2300000!
-    02300000/00000010
-    230000: [FIRST 16 BYTES OF THE PROGRAM]
+    LOADED PROGRAM TO ADDRESS 2600000!
+    02600000/00000010
+    260000: 55 48 89 E5 48 81 EC 40 1 0 0 B8 30 0 40 2 
 
     \
-    2300000R
+    2600000R
     ```
     - Hit Enter to run the program.
     - You now see the picture of Woz and Jobs on the screen.

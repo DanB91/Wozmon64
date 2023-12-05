@@ -129,10 +129,10 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
         vtable.* = toolbox.Arena.ZSTD_VTABLE;
     }
     {
-        const frame_arena_bytes =
-            kernel_start_context.global_arena.push_bytes_aligned(w64.KERNEL_FRAME_ARENA_SIZE, 8);
-        const scratch_arena_bytes =
-            kernel_start_context.global_arena.push_bytes_aligned(w64.KERNEL_SCRATCH_ARENA_SIZE, 8);
+        const frame_arena =
+            kernel_start_context.global_arena.create_arena_from_arena(w64.KERNEL_FRAME_ARENA_SIZE);
+        const scratch_arena =
+            kernel_start_context.global_arena.create_arena_from_arena(w64.KERNEL_SCRATCH_ARENA_SIZE);
         w64.Time.init(kernel_start_context.tsc_mhz);
 
         g_state = .{
@@ -164,15 +164,15 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
             ),
 
             .global_arena = kernel_start_context.global_arena,
-            .frame_arena = toolbox.Arena.init_with_buffer(frame_arena_bytes),
-            .scratch_arena = toolbox.Arena.init_with_buffer(scratch_arena_bytes),
+            .frame_arena = frame_arena,
+            .scratch_arena = scratch_arena,
 
             .screen_pixel_height = @ptrFromInt(w64.SCREEN_PIXEL_HEIGHT_ADDRESS),
             .screen_pixel_width = @ptrFromInt(w64.SCREEN_PIXEL_WIDTH_ADDRESS),
             .frame_buffer_size = @ptrFromInt(w64.FRAME_BUFFER_SIZE_ADDRESS),
             .frame_buffer_stride = @ptrFromInt(w64.FRAME_BUFFER_STRIDE_ADDRESS),
         };
-        const debug_symbols = parse_elf_debug_symbols(
+        const debug_symbols = parse_dwarf_debug_symbols(
             kernel_start_context.kernel_elf_bytes,
             kernel_start_context.global_arena,
         ) catch |e| {
@@ -436,7 +436,7 @@ pub inline fn free_memory(data: []u8) void {
     kernel_memory.free(data);
 }
 
-fn parse_elf_debug_symbols(kernel_elf: []const u8, arena: *toolbox.Arena) !std.dwarf.DwarfInfo {
+fn parse_dwarf_debug_symbols(kernel_elf: []const u8, arena: *toolbox.Arena) !std.dwarf.DwarfInfo {
     var section_store = toolbox.DynamicArray(std.elf.Elf64_Shdr).init(arena, 64);
     const header = b: {
         var kernel_image_byte_stream = std.io.fixedBufferStream(kernel_elf);
@@ -502,8 +502,8 @@ fn parse_elf_debug_symbols(kernel_elf: []const u8, arena: *toolbox.Arena) !std.d
 
 pub fn echo_welcome_line(comptime fmt: []const u8, args: anytype) void {
     const scratch_arena = g_state.scratch_arena;
-    const arena_save_point = scratch_arena.create_save_point();
-    defer scratch_arena.restore_save_point(arena_save_point);
+    scratch_arena.save();
+    defer scratch_arena.restore();
 
     const str = toolbox.str8fmt(fmt, args, scratch_arena);
 

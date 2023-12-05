@@ -158,54 +158,41 @@ pub fn virtual_to_physical(
 ) !u64 {
     g_state.lock.lock();
     defer g_state.lock.release();
-    //TODO: enable
-    // {
-    //     {
-    //         const vaddr_2mb: amd64.VirtualAddress2MBPage = @bitCast(virtual_address);
-    //         const pd_entry_2mb = get_pd_2mb(virtual_address).entries[vaddr_2mb.pd_offset];
-    //         if (!pd_entry_2mb.present) {
-    //             return error.VirtualAddressNotMapped;
-    //         }
 
-    //         //is it actually a 2MB page?
-    //         if (pd_entry_2mb.must_be_one == 1) {
-    //             const base_physical_address = @as(
-    //                 u64,
-    //                 pd_entry_2mb.physical_page_base_address,
-    //             ) << 21;
-    //             const effective_address = base_physical_address + (virtual_address &
-    //                 toolbox.mask_for_bit_range(0, 21, u64));
-    //             return effective_address;
-    //         }
-    //     }
+    {
+        const vaddr_2mb: amd64.VirtualAddress2MBPage = @bitCast(virtual_address);
+        const pd_entry_2mb = w64.get_pd_2mb(virtual_address).entries[vaddr_2mb.pd_offset];
+        if (!pd_entry_2mb.present) {
+            return error.VirtualAddressNotMapped;
+        }
 
-    //     //It is a 4KB page
-    //     {
-    //         const vaddr_4kb: amd64.VirtualAddress4KBPage = @bitCast(virtual_address);
-    //         const pt_entry = get_pt(virtual_address).entries[vaddr_4kb.pt_offset];
-    //         if (!pt_entry.present) {
-    //             return error.VirtualAddressNotMapped;
-    //         }
-    //         const base_physical_address = @as(
-    //             u64,
-    //             pt_entry.physical_page_base_address,
-    //         ) << 12;
-    //         const effective_address = base_physical_address + (virtual_address &
-    //             toolbox.mask_for_bit_range(0, 12, u64));
-    //         return effective_address;
-    //     }
-    // }
-    //TODO use recursive mapping
-    var it = g_state.virtual_address_mappings.iterator();
-    while (it.next()) |mapping| {
-        if (virtual_address >= mapping.virtual_address and
-            virtual_address < mapping.virtual_address + mapping.size)
-        {
-            const offset = virtual_address - mapping.virtual_address;
-            return mapping.physical_address + offset;
+        //is it actually a 2MB page?
+        if (pd_entry_2mb.must_be_one == 1) {
+            const base_physical_address = @as(
+                u64,
+                pd_entry_2mb.physical_page_base_address,
+            ) << 21;
+            const effective_address = base_physical_address + (virtual_address &
+                toolbox.mask_for_bit_range(0, 21, u64));
+            return effective_address;
         }
     }
-    return error.VirtualAddressNotMapped;
+
+    //It is a 4KB page
+    {
+        const vaddr_4kb: amd64.VirtualAddress4KBPage = @bitCast(virtual_address);
+        const pt_entry = w64.get_pt(virtual_address).entries[vaddr_4kb.pt_offset];
+        if (!pt_entry.present) {
+            return error.VirtualAddressNotMapped;
+        }
+        const base_physical_address = @as(
+            u64,
+            pt_entry.physical_page_base_address,
+        ) << 12;
+        const effective_address = base_physical_address + (virtual_address &
+            toolbox.mask_for_bit_range(0, 12, u64));
+        return effective_address;
+    }
 }
 
 //returns mapped address
@@ -367,16 +354,16 @@ pub fn map_conventional_memory_physical_address(
             "Mapping page table virtual address! physical address: {x}, virtual_address: {x}",
             .{ virtual_address, physical_address },
         );
-        // if (comptime toolbox.IS_DEBUG) {
-        //     var it = mappings.iterator();
-        //     while (it.next()) |mapping| {
-        //         toolbox.assert(
-        //             virtual_address + MEMORY_PAGE_SIZE <= mapping.virtual_address or virtual_address >= mapping.virtual_address + mapping.size,
-        //             "Mapping virtual address {X}, when it is already mapped to {X}!",
-        //             .{ virtual_address, mapping.physical_address },
-        //         );
-        //     }
-        // }
+        if (comptime toolbox.IS_DEBUG) {
+            var it = g_state.virtual_address_mappings.iterator();
+            while (it.next()) |mapping| {
+                toolbox.assert(
+                    virtual_address + w64.MEMORY_PAGE_SIZE <= mapping.virtual_address or virtual_address >= mapping.virtual_address + mapping.size,
+                    "Mapping virtual address {X}, when it is already mapped to {X}!",
+                    .{ virtual_address, mapping.physical_address },
+                );
+            }
+        }
         const vaddr_bits: amd64.VirtualAddress2MBPage = @bitCast(virtual_address);
         const pdp = b: {
             const pml4t = w64.get_pml4t();
