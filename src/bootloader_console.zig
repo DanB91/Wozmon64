@@ -1,7 +1,7 @@
 //Screen can fit 53x20 characters
 //should only be called by BSP (main processor) and before getMemoryMap
 const std = @import("std");
-const w64 = @import("wozmon64.zig");
+const w64 = @import("wozmon64_kernel.zig");
 const toolbox = @import("toolbox");
 
 const ENABLE_CONSOLE = toolbox.IS_DEBUG;
@@ -88,7 +88,9 @@ fn graphics_println(comptime fmt: []const u8, args: anytype) void {
             carriage_return();
         }
     }
+    //TODO:
     @memcpy(g_state.screen.frame_buffer, g_state.screen.back_buffer);
+    //@memset(g_state.screen.frame_buffer, .{ .data = 0 });
 }
 
 fn carriage_return() void {

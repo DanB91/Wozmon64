@@ -5,7 +5,7 @@ const kernel = @import("../kernel.zig");
 const amd64 = @import("../amd64.zig");
 const pcie = @import("pcie.zig");
 const usb_hid = @import("usb_hid.zig");
-const w64 = @import("../wozmon64.zig");
+const w64 = @import("../wozmon64_kernel.zig");
 const kernel_memory = @import("../kernel_memory.zig");
 const static_assert = toolbox.static_assert;
 const print_serial = kernel.print_serial;
@@ -1977,47 +1977,49 @@ pub fn poll_controller(controller: *Controller) bool {
     //var i: usize = 0;
     //while (i < max_retries) : (i += 1) {
     const trb: *volatile TransferRequestBlock = &event_trb_ring.ring.ring[event_trb_ring.ring.index];
-    if (trb.read_cycle_bit() == event_trb_ring.ring.cs) {
-        event_trb_ring.ring.index += 1;
-        if (event_trb_ring.ring.index >= event_trb_ring.ring.ring.len) {
-            event_trb_ring.ring.cs ^= 1;
-            event_trb_ring.ring.index = 0;
-        }
-        event_trb_ring.erdp.* = (event_trb_ring.event_trb_ring_physical_address +
-            (event_trb_ring.ring.index * @sizeOf(TransferRequestBlock))) | (1 << 3);
-        @fence(.SeqCst);
+    if (trb.read_cycle_bit() != event_trb_ring.ring.cs) {
+        return false;
+    }
+    print_serial("USB event occurred!", .{});
+    event_trb_ring.ring.index += 1;
+    if (event_trb_ring.ring.index >= event_trb_ring.ring.ring.len) {
+        event_trb_ring.ring.cs ^= 1;
+        event_trb_ring.ring.index = 0;
+    }
+    event_trb_ring.erdp.* = (event_trb_ring.event_trb_ring_physical_address +
+        (event_trb_ring.ring.index * @sizeOf(TransferRequestBlock))) | (1 << 3);
+    @fence(.SeqCst);
 
-        switch (trb.read_trb_type()) {
-            .CommandCompletionEvent,
-            .TransferEvent,
-            => {
-                var err_opt: ?anyerror = null;
-                if (trb.read_completion_code() != 1) {
-                    const err = completion_code_to_error(trb.read_completion_code());
-                    if (err != error.ShortPacketError) {
-                        err_opt = err;
-                    }
+    switch (trb.read_trb_type()) {
+        .CommandCompletionEvent,
+        .TransferEvent,
+        => {
+            var err_opt: ?anyerror = null;
+            if (trb.read_completion_code() != 1) {
+                const err = completion_code_to_error(trb.read_completion_code());
+                if (err != error.ShortPacketError) {
+                    err_opt = err;
                 }
-                const ret = PollEventRingResult{
-                    .trb = trb.*,
-                    .number_of_bytes_not_transferred = trb.read_number_of_bytes_not_transferred(),
-                    .err = err_opt,
-                };
-                toolbox.assert(
-                    event_response_map.get(trb.data_pointer) == null,
-                    "Event ring response should not be full",
-                    .{},
-                );
-                event_response_map.put(trb.data_pointer, ret);
-                return true;
-            },
-            .PortStatusChangeEvent => {
-                //TODO
-            },
-            else => {
-                print_serial("Unhandled USB event: {} -- {}", .{ trb.read_trb_type(), trb });
-            },
-        }
+            }
+            const ret = PollEventRingResult{
+                .trb = trb.*,
+                .number_of_bytes_not_transferred = trb.read_number_of_bytes_not_transferred(),
+                .err = err_opt,
+            };
+            toolbox.assert(
+                event_response_map.get(trb.data_pointer) == null,
+                "Event ring response should not be full",
+                .{},
+            );
+            event_response_map.put(trb.data_pointer, ret);
+            return true;
+        },
+        .PortStatusChangeEvent => {
+            //TODO
+        },
+        else => {
+            print_serial("Unhandled USB event: {} -- {}", .{ trb.read_trb_type(), trb });
+        },
     }
     return false;
 }

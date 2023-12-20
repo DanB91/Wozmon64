@@ -1,12 +1,14 @@
 //Copyright Daniel Bokser 2023
 //See LICENSE file for permissible source code usage
 
+pub usingnamespace @import("wozmon64_user.zig");
+
+const w64_user = @import("wozmon64_user.zig");
 const std = @import("std");
 const toolbox = @import("toolbox");
 const amd64 = @import("amd64.zig");
 const bitmaps = @import("bitmaps.zig");
 
-pub const MEMORY_PAGE_SIZE = toolbox.mb(2);
 pub const MMIO_PAGE_SIZE = toolbox.kb(4);
 pub const PAGE_TABLE_PAGE_SIZE = toolbox.kb(4);
 pub const PHYSICAL_ADDRESS_ALIGNMENT = toolbox.kb(4);
@@ -15,48 +17,21 @@ pub const KERNEL_GLOBAL_ARENA_SIZE = toolbox.mb(512);
 pub const KERNEL_FRAME_ARENA_SIZE = toolbox.mb(4);
 pub const KERNEL_SCRATCH_ARENA_SIZE = toolbox.mb(4);
 
-pub const FRAME_BUFFER_VIRTUAL_ADDRESS = 0x20_0000;
-pub const FRAME_BUFFER_PTR: [*]Pixel = @ptrFromInt(FRAME_BUFFER_VIRTUAL_ADDRESS);
-
-//Frame buffer data
-
-const W64_API_ADDRESS_BASE = 0x240_0000;
-pub const SCREEN_PIXEL_WIDTH_ADDRESS = W64_API_ADDRESS_BASE + 0x30;
-pub const SCREEN_PIXEL_HEIGHT_ADDRESS = W64_API_ADDRESS_BASE + 0x38;
-pub const FRAME_BUFFER_SIZE_ADDRESS = W64_API_ADDRESS_BASE + 0x40;
-pub const FRAME_BUFFER_STRIDE_ADDRESS = W64_API_ADDRESS_BASE + 0x48;
-
-pub const DEFAULT_PROGRAM_LOAD_ADDRESS = toolbox.align_up(FRAME_BUFFER_STRIDE_ADDRESS, MEMORY_PAGE_SIZE);
-
-pub const SCREEN_PIXEL_WIDTH_PTR: *const u64 = @ptrFromInt(SCREEN_PIXEL_WIDTH_ADDRESS);
-pub const SCREEN_PIXEL_HEIGHT_PTR: *const u64 = @ptrFromInt(SCREEN_PIXEL_HEIGHT_ADDRESS);
-pub const FRAME_BUFFER_SIZE_PTR: *const u64 = @ptrFromInt(FRAME_BUFFER_SIZE_ADDRESS);
-pub const FRAME_BUFFER_STRIDE_PTR: *const u64 = @ptrFromInt(FRAME_BUFFER_STRIDE_ADDRESS);
-
 pub const PAGE_TABLE_RECURSIVE_OFFSET = 510;
-
-pub const Pixel = packed union {
-    colors: packed struct(u32) {
-        b: u8,
-        g: u8,
-        r: u8,
-        reserved: u8 = 0,
-    },
-    data: u32,
-};
 
 pub const SUPPORTED_RESOLUTIONS = [_]struct {
     width: u32,
     height: u32,
 }{
-    .{ .width = 3840, .height = 2160 },
-    .{ .width = 1920, .height = 1080 },
+    // .{ .width = 3840, .height = 2160 },
+    // .{ .width = 1920, .height = 1080 },
     .{ .width = 1280, .height = 720 },
+    .{ .width = 800, .height = 1280 },
 };
 
 pub const Screen = struct {
-    frame_buffer: []volatile Pixel,
-    back_buffer: []Pixel,
+    frame_buffer: []volatile w64_user.Pixel,
+    back_buffer: []w64_user.Pixel,
     font: bitmaps.Font,
 
     width: usize,
@@ -70,7 +45,7 @@ pub const Screen = struct {
         width: usize,
         height: usize,
         stride: usize,
-        frame_buffer: []volatile Pixel,
+        frame_buffer: []volatile w64_user.Pixel,
         arena: *toolbox.Arena,
     ) Screen {
         const scale: usize = b: {
@@ -80,11 +55,17 @@ pub const Screen = struct {
                 break :b 4;
             } else if (width == 1280 and height == 720) {
                 break :b 2; //4;
+            } else if (width == 800 and height == 1280) {
+                break :b 2; //4;
             } else {
-                toolbox.panic("Unsupported resolution: {}x{}", .{ width, height });
+                //fatal error.  draw red screen
+                for (frame_buffer) |*pixel| {
+                    pixel.colors = .{ .r = 255, .g = 0, .b = 0 };
+                }
+                toolbox.hang();
             }
         };
-        const back_buffer = arena.push_slice_clear(Pixel, frame_buffer.len);
+        const back_buffer = arena.push_slice_clear(w64_user.Pixel, frame_buffer.len);
         const font = bitmaps.Font.init(scale, arena);
         return .{
             .frame_buffer = frame_buffer,
@@ -143,7 +124,7 @@ pub const ConventionalMemoryDescriptor = struct {
     physical_address: u64,
     number_of_pages: usize,
 
-    const PAGE_SIZE = MEMORY_PAGE_SIZE;
+    const PAGE_SIZE = w64_user.MEMORY_PAGE_SIZE;
 };
 pub const MemoryType = enum {
     ConventionalMemory,
@@ -368,233 +349,5 @@ pub const ReentrantTicketLock = struct {
 };
 
 comptime {
-    toolbox.static_assert(@sizeOf(Pixel) == 4, "Incorrect size for Pixel");
-}
-
-//userspace functions
-
-pub const InputState = struct {
-    modifier_key_pressed_events: toolbox.RingQueue(ScanCode),
-    modifier_key_released_events: toolbox.RingQueue(ScanCode),
-    key_pressed_events: toolbox.RingQueue(ScanCode),
-    key_released_events: toolbox.RingQueue(ScanCode),
-
-    pub fn init(arena: *toolbox.Arena) InputState {
-        const keys_pressed = toolbox.RingQueue(ScanCode).init(64, arena);
-        const keys_released = toolbox.RingQueue(ScanCode).init(64, arena);
-        const modifier_keys_pressed = toolbox.RingQueue(ScanCode).init(16, arena);
-        const modifier_keys_released = toolbox.RingQueue(ScanCode).init(16, arena);
-
-        return .{
-            .key_pressed_events = keys_pressed,
-            .key_released_events = keys_released,
-            .modifier_key_pressed_events = modifier_keys_pressed,
-            .modifier_key_released_events = modifier_keys_released,
-        };
-    }
-};
-
-pub const ScanCode = enum {
-    Unknown,
-    A,
-    B,
-    C,
-    D,
-    E,
-    F,
-    G,
-    H,
-    I,
-    J,
-    K,
-    L,
-    M,
-    N,
-    O,
-    P,
-    Q,
-    R,
-    S,
-    T,
-    U,
-    V,
-    W,
-    X,
-    Y,
-    Z,
-
-    Zero,
-    One,
-    Two,
-    Three,
-    Four,
-    Five,
-    Six,
-    Seven,
-    Eight,
-    Nine,
-
-    CapsLock,
-    ScrollLock,
-    NumLock,
-    LeftShift,
-    LeftCtrl,
-    LeftAlt,
-    LeftFlag,
-    RightShift,
-    RightCtrl,
-    RightAlt,
-    RightFlag,
-    Pause,
-    ContextMenu,
-
-    Backspace,
-    Escape,
-    Insert,
-    Home,
-    PageUp,
-    Delete,
-    End,
-    PageDown,
-    UpArrow,
-    LeftArrow,
-    DownArrow,
-    RightArrow,
-
-    Space,
-    Tab,
-    Enter,
-
-    Slash,
-    Backslash,
-    LeftBracket,
-    RightBracket,
-    Equals,
-    Backtick,
-    Hyphen,
-    Semicolon,
-    Quote,
-    Comma,
-    Period,
-
-    NumDivide,
-    NumMultiply,
-    NumSubtract,
-    NumAdd,
-    NumEnter,
-    NumPoint,
-    Num0,
-    Num1,
-    Num2,
-    Num3,
-    Num4,
-    Num5,
-    Num6,
-    Num7,
-    Num8,
-    Num9,
-
-    PrintScreen,
-    PrintScreen1,
-    PrintScreen2,
-
-    F1,
-    F2,
-    F3,
-    F4,
-    F5,
-    F6,
-    F7,
-    F8,
-    F9,
-    F10,
-    F11,
-    F12,
-};
-pub fn scancode_to_ascii_shifted(scancode: ScanCode) u8 {
-    return switch (scancode) {
-        .Zero => ')',
-        .One => '!',
-        .Two => '@',
-        .Three => '#',
-        .Four => '$',
-        .Five => '%',
-        .Six => '^',
-        .Seven => '&',
-        .Eight => '*',
-        .Nine => '(',
-
-        .Slash => '?',
-        .Backslash => '|',
-        .LeftBracket => '{',
-        .RightBracket => '}',
-        .Equals => '+',
-        .Backtick => '~',
-        .Hyphen => '_',
-        .Semicolon => ':',
-        .Quote => '"',
-        .Comma => '<',
-        .Period => '>',
-
-        else => scancode_to_ascii(scancode),
-    };
-}
-
-pub fn scancode_to_ascii(scancode: ScanCode) u8 {
-    return switch (scancode) {
-        .A => 'A',
-        .B => 'B',
-        .C => 'C',
-        .D => 'D',
-        .E => 'E',
-        .F => 'F',
-        .G => 'G',
-        .H => 'H',
-        .I => 'I',
-        .J => 'J',
-        .K => 'K',
-        .L => 'L',
-        .M => 'M',
-        .N => 'N',
-        .O => 'O',
-        .P => 'P',
-        .Q => 'Q',
-        .R => 'R',
-        .S => 'S',
-        .T => 'T',
-        .U => 'U',
-        .V => 'V',
-        .W => 'W',
-        .X => 'X',
-        .Y => 'Y',
-        .Z => 'Z',
-
-        .Zero => '0',
-        .One => '1',
-        .Two => '2',
-        .Three => '3',
-        .Four => '4',
-        .Five => '5',
-        .Six => '6',
-        .Seven => '7',
-        .Eight => '8',
-        .Nine => '9',
-
-        .Space => ' ',
-        .Enter => '\n',
-
-        .Slash => '/',
-        .Backslash => '\\',
-        .LeftBracket => '[',
-        .RightBracket => ']',
-        .Equals => '=',
-        .Backtick => '`',
-        .Hyphen => '-',
-        .Semicolon => ';',
-        .Quote => '\'',
-        .Comma => ',',
-        .Period => '.',
-
-        else => '?',
-    };
+    toolbox.static_assert(@sizeOf(w64_user.Pixel) == 4, "Incorrect size for Pixel");
 }

@@ -1,6 +1,6 @@
 const usb_xhci = @import("usb_xhci.zig");
 const toolbox = @import("toolbox");
-const w64 = @import("../wozmon64.zig");
+const w64 = @import("../wozmon64_kernel.zig");
 const kernel = @import("../kernel.zig");
 const kernel_memory = @import("../kernel_memory.zig");
 
@@ -16,9 +16,24 @@ pub const USBHIDDevice = struct {
     items: []Item,
 
     const Type = union(enum) {
-        Keyboard: USBHIDKeyboard,
-        Mouse: USBHIDMouse,
+        Keyboard: Keyboard,
+        Mouse: Mouse,
     };
+};
+pub const Mouse = struct {
+    x_report: ReportElement,
+    y_report: ReportElement,
+    scroll_report: ReportElement,
+    button_report: ReportElement,
+};
+pub const Keyboard = struct {
+    modifier_report: ReportElement,
+    keys_pressed_report: ReportElement,
+
+    keys_held: [toolbox.enum_size(w64.ScanCode)]bool,
+    modifier_keys_held: u8,
+
+    const NUM_KEYS_IN_REPORT = 6;
 };
 pub const Descriptor = packed struct {
     length: u8,
@@ -146,21 +161,6 @@ const USBHIDMouseScaffold = struct {
     y_report: ?ReportElement,
     scroll_report: ?ReportElement,
     button_report: ?ReportElement,
-};
-const USBHIDMouse = struct {
-    x_report: ReportElement,
-    y_report: ReportElement,
-    scroll_report: ReportElement,
-    button_report: ReportElement,
-};
-const USBHIDKeyboard = struct {
-    modifier_report: ReportElement,
-    keys_pressed_report: ReportElement,
-
-    keys_held: [NUM_KEYS_IN_REPORT]u8,
-    modifier_keys_held: u8,
-
-    const NUM_KEYS_IN_REPORT = 6;
 };
 const USBHIDKeyboardScaffold = struct {
     modifier_report: ?ReportElement,
@@ -449,7 +449,7 @@ pub fn init_hid_interface(
                         }
                         //0x50 is Left Arrow
                         if (within_usage_range(.{ .usage_page = .KeyboardOrKeypad, .usage = 0x50 }, usage_minimums, usage_maximums) and
-                            report_size.? == 8 and report_count.? == USBHIDKeyboard.NUM_KEYS_IN_REPORT) //TODO have a special case for > 48 for n-key rollover
+                            report_size.? == 8 and report_count.? == Keyboard.NUM_KEYS_IN_REPORT) //TODO have a special case for > 48 for n-key rollover
                         {
                             scaffold.keys_pressed_report = .{ .index = bit_index / 8, .size = bits_to_bytes(report_size.? * report_count.?) };
                         }
@@ -458,7 +458,7 @@ pub fn init_hid_interface(
                                 .keys_pressed_report = scaffold.keys_pressed_report.?,
                                 .modifier_report = scaffold.modifier_report.?,
                                 .modifier_keys_held = 0,
-                                .keys_held = [_]u8{0} ** USBHIDKeyboard.NUM_KEYS_IN_REPORT,
+                                .keys_held = [_]bool{false} ** toolbox.enum_size(w64.ScanCode),
                             } });
                             keyboard_to_build = null;
                         }
@@ -680,7 +680,7 @@ fn queue_transfer_trb(hid_device: *USBHIDDevice) void {
 }
 pub fn poll(
     controller: *usb_xhci.Controller,
-    input_state: *w64.InputState,
+    key_events: ?*w64.KeyEvents,
 ) void {
     //TODO have hash map instead of this double loop nonsense
     var device_it = controller.devices.iterator();
@@ -698,7 +698,7 @@ pub fn poll(
                 const input_data = hid_device.packet_buffer[0 .. hid_device.packet_buffer.len - number_of_bytes_not_transferred];
                 // println("Data from USB device: {x}", .{input_data});
                 for (hid_device.device_types) |*device_type| {
-                    handle_input_data(input_data, device_type, input_state);
+                    handle_input_data(input_data, device_type, key_events);
                 }
                 controller.event_response_map.remove(
                     hid_device.last_transfer_request_physical_address,
@@ -839,58 +839,88 @@ fn set_difference(minunend: []const u8, subtrahend: []const u8, result: []u8) vo
         }
     }
 }
+
+//TODO: we might want to make this public?
+fn handle_keyboard_data(
+    data: []const u8,
+    keyboard: *Keyboard,
+    key_events: *w64.KeyEvents,
+) void {
+    {
+        const key_modifiers_held_now = data[keyboard.modifier_report.index];
+        const key_modifiers_held_before = keyboard.modifier_keys_held;
+
+        //Example
+        //key_modifiers_held_now -> 0000_1001 -> Left control and Left Command  are down
+        //key_modifiers_held_before -> 0000_1010 -> Left Shift and Left Command are down
+        //send key pressed event for Left Control. send key released event for Left Shift.
+        //0000_1001 & 1111_0101 ->
+        const key_modifiers_pressed = key_modifiers_held_now & ~key_modifiers_held_before;
+        const key_modifiers_released = ~key_modifiers_held_now & key_modifiers_held_before;
+        const modifier_scancodes = [_]w64.ScanCode{
+            .LeftCtrl,
+            .LeftShift,
+            .LeftAlt,
+            .LeftFlag,
+            .RightCtrl,
+            .RightShift,
+            .RightAlt,
+            .RightFlag,
+        };
+        inline for (modifier_scancodes, 0..) |scancode, i| {
+            if ((key_modifiers_pressed & (1 << i)) != 0) {
+                key_events.modifier_key_pressed_events.force_enqueue(scancode);
+            }
+            if ((key_modifiers_released & (1 << i)) != 0) {
+                key_events.modifier_key_released_events.force_enqueue(scancode);
+            }
+        }
+        keyboard.modifier_keys_held = key_modifiers_held_now;
+    }
+
+    const keys_held_now = data[keyboard.keys_pressed_report.index .. keyboard.keys_pressed_report.index +
+        keyboard.keys_pressed_report.size];
+    var keys_held_before = &keyboard.keys_held;
+
+    //32 key buffer should be more than suffcient
+    var scan_codes_held_now = [_]w64.ScanCode{.Unknown} ** 32;
+    var cursor: usize = 0;
+
+    for (keys_held_now) |key| {
+        if (usb_scancode_to_boksos_scancode(key)) |scancode| {
+            if (!keys_held_before[@intFromEnum(scancode)]) {
+                key_events.key_pressed_events.force_enqueue(scancode);
+            }
+            scan_codes_held_now[cursor] = scancode;
+            cursor += 1;
+        }
+    }
+    for (keys_held_before, 0..) |*was_key_held, key_held_before_int| {
+        const key_held_before: w64.ScanCode = @enumFromInt(key_held_before_int);
+        for (0..cursor) |i| {
+            if (scan_codes_held_now[i] == key_held_before) {
+                was_key_held.* = true;
+                break;
+            }
+        } else {
+            if (was_key_held.*) {
+                key_events.key_released_events.force_enqueue(key_held_before);
+            }
+            was_key_held.* = false;
+        }
+    }
+}
+
 fn handle_input_data(
     data: []const u8,
     device_type: *USBHIDDevice.Type,
-    input_state: *w64.InputState,
+    key_events: ?*w64.KeyEvents,
 ) void {
     switch (device_type.*) {
-        .Keyboard => |_| {
-            var keyboard = &device_type.Keyboard;
-            //process keyboard modifie keys
-            {
-                const key_modifiers_held_now = data[keyboard.modifier_report.index];
-                const key_modifiers_held_before = keyboard.modifier_keys_held;
-
-                //Example
-                //key_modifiers_held_now -> 0000_1001 -> Left control and Left Command  are down
-                //key_modifiers_held_before -> 0000_1010 -> Left Shift and Left Command are down
-                //send key pressed event for Left Control. send key released event for Left Shift.
-                //0000_1001 & 1111_0101 ->
-                const key_modifiers_pressed = key_modifiers_held_now & ~key_modifiers_held_before;
-                const key_modifiers_released = ~key_modifiers_held_now & key_modifiers_held_before;
-                const modifier_scancodes = [_]w64.ScanCode{ .LeftCtrl, .LeftShift, .LeftAlt, .LeftFlag, .RightCtrl, .RightShift, .RightAlt, .RightFlag };
-                inline for (modifier_scancodes, 0..) |scancode, i| {
-                    if ((key_modifiers_pressed & (1 << i)) != 0) {
-                        input_state.modifier_key_pressed_events.enqueue(scancode);
-                    }
-                    if ((key_modifiers_released & (1 << i)) != 0) {
-                        input_state.modifier_key_released_events.enqueue(scancode);
-                    }
-                }
-                keyboard.modifier_keys_held = key_modifiers_held_now;
+        .Keyboard => |*keyboard| {
+            if (key_events) |ke| {
+                handle_keyboard_data(data, keyboard, ke);
             }
-
-            const keys_held_now = data[keyboard.keys_pressed_report.index .. keyboard.keys_pressed_report.index +
-                keyboard.keys_pressed_report.size];
-            var keys_held_before = &keyboard.keys_held;
-            var keys_pressed = [_]u8{0} ** USBHIDKeyboard.NUM_KEYS_IN_REPORT;
-            var keys_released = [_]u8{0} ** USBHIDKeyboard.NUM_KEYS_IN_REPORT;
-            set_difference(keys_held_now, keys_held_before, &keys_pressed);
-            set_difference(keys_held_before, keys_held_now, &keys_released);
-
-            for (keys_pressed) |key| {
-                if (usb_scancode_to_boksos_scancode(key)) |scancode| {
-                    input_state.key_pressed_events.enqueue(scancode);
-                }
-            }
-            for (keys_released) |key| {
-                if (usb_scancode_to_boksos_scancode(key)) |scancode| {
-                    input_state.key_released_events.enqueue(scancode);
-                }
-            }
-
-            for (keys_held_before, 0..) |*dest, i| dest.* = keys_held_now[i];
         },
 
         .Mouse => |_| {

@@ -4,7 +4,7 @@
 const std = @import("std");
 const toolbox = @import("toolbox");
 const mpsp = @import("mp_service_protocol.zig");
-const w64 = @import("wozmon64.zig");
+const w64 = @import("wozmon64_kernel.zig");
 const amd64 = @import("amd64.zig");
 const console = @import("bootloader_console.zig");
 
@@ -130,7 +130,8 @@ pub fn main() noreturn {
                         },
                     );
                     if (gop_mode_info.horizontal_resolution == resolution.width and
-                        gop_mode_info.vertical_resolution == resolution.height)
+                        gop_mode_info.vertical_resolution == resolution.height and
+                        gop_mode_info.pixel_format == .BlueGreenRedReserved8BitPerColor)
                     {
                         found_valid_resolution = true;
                         status = gop.setMode(mode);
@@ -281,20 +282,49 @@ pub fn main() noreturn {
             fatal("Failed to find enough memory for kernel start context.", .{});
         }
     };
+
     var global_arena = toolbox.Arena.init_with_buffer(kernel_start_context_bytes);
 
-    //set up screen
     const frame_buffer = @as(
         [*]w64.Pixel,
         @ptrFromInt(gop_mode.frame_buffer_base),
     )[0 .. gop_mode.frame_buffer_size / @sizeOf(w64.Pixel)];
-    const screen = w64.Screen.init(
-        gop_mode.info.horizontal_resolution,
-        gop_mode.info.vertical_resolution,
-        gop_mode.info.pixels_per_scan_line,
-        frame_buffer,
-        global_arena,
-    );
+    const screen = b: {
+        if (gop_mode.info.horizontal_resolution != 1280 or gop_mode.info.vertical_resolution != 800) {
+            break :b w64.Screen.init(
+                gop_mode.info.horizontal_resolution,
+                gop_mode.info.vertical_resolution,
+                gop_mode.info.pixels_per_scan_line,
+                frame_buffer,
+                global_arena,
+            );
+        } else {
+            //steam deck
+            break :b w64.Screen.init(
+                800,
+                1280,
+                852,
+                frame_buffer,
+                global_arena,
+            );
+        }
+    };
+    //set up screen
+    //TODO put back
+    // const screen = w64.Screen.init(
+    //     gop_mode.info.horizontal_resolution,
+    //     gop_mode.info.vertical_resolution,
+    //     gop_mode.info.pixels_per_scan_line,
+    //     frame_buffer,
+    //     global_arena,
+    // );
+    // //TODO: delete
+    // {
+    //     for (frame_buffer) |*pixel| {
+    //         pixel.colors = .{ .r = 255, .b = 255, .g = 0 };
+    //     }
+    //     toolbox.hang();
+    // }
     console.init_graphics_console(screen);
     if (screen.frame_buffer.len >= w64.DEFAULT_PROGRAM_LOAD_ADDRESS - w64.FRAME_BUFFER_VIRTUAL_ADDRESS) {
         fatal(

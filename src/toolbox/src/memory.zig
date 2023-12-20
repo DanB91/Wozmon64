@@ -107,12 +107,12 @@ pub const Arena = struct {
             .zstd_allocator = undefined,
         };
         const ret = tmp_arena.push(Arena);
+        const zstd_allocator = tmp_arena.create_zstd_allocator();
         ret.* = .{
             .data = data[tmp_arena.pos..],
             .to_free = data,
-            .zstd_allocator = undefined,
+            .zstd_allocator = zstd_allocator,
         };
-        ret.zstd_allocator = ret.create_zstd_allocator();
         return ret;
     }
     pub fn init_with_buffer(buffer: []u8) *Arena {
@@ -125,11 +125,11 @@ pub const Arena = struct {
             .zstd_allocator = undefined,
         };
         const ret = tmp_arena.push(Arena);
+        const zstd_allocator = tmp_arena.create_zstd_allocator();
         ret.* = .{
             .data = buffer[tmp_arena.pos..],
-            .zstd_allocator = undefined,
+            .zstd_allocator = zstd_allocator,
         };
-        ret.zstd_allocator = ret.create_zstd_allocator();
 
         return ret;
     }

@@ -1,5 +1,5 @@
 const toolbox = @import("toolbox");
-const w64 = @import("wozmon64.zig");
+const w64 = @import("wozmon64_kernel.zig");
 const std = @import("std");
 const amd64 = @import("amd64.zig");
 

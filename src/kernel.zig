@@ -1,6 +1,6 @@
 //Copyright Daniel Bokser 2023
 //See LICENSE file for permissible source code usage
-pub const w64 = @import("wozmon64.zig");
+pub const w64 = @import("wozmon64_kernel.zig");
 
 const std = @import("std");
 const toolbox = @import("toolbox");
@@ -37,7 +37,7 @@ const KernelState = struct {
 
     apic_address: u64,
     usb_xhci_controllers: toolbox.RandomRemovalLinkedList(*usb_xhci.Controller),
-    input_state: w64.InputState,
+    key_events: w64.KeyEvents,
     are_characters_shifted: bool,
     debug_symbols: std.dwarf.DwarfInfo,
 
@@ -55,6 +55,9 @@ const KernelState = struct {
     screen_pixel_height: *u64,
     frame_buffer_size: *u64,
     frame_buffer_stride: *u64,
+
+    //user program state
+    user_key_events: ?*w64.KeyEvents,
 
     //profiler state
     show_profiler: bool,
@@ -146,7 +149,7 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
             .application_processor_contexts = undefined,
 
             .apic_address = 0,
-            .input_state = w64.InputState.init(kernel_start_context.global_arena),
+            .key_events = w64.KeyEvents.init(kernel_start_context.global_arena),
             .usb_xhci_controllers = toolbox.RandomRemovalLinkedList(*usb_xhci.Controller).init(kernel_start_context.global_arena),
             .are_characters_shifted = false,
             .debug_symbols = undefined,
@@ -171,6 +174,8 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
             .screen_pixel_width = @ptrFromInt(w64.SCREEN_PIXEL_WIDTH_ADDRESS),
             .frame_buffer_size = @ptrFromInt(w64.FRAME_BUFFER_SIZE_ADDRESS),
             .frame_buffer_stride = @ptrFromInt(w64.FRAME_BUFFER_STRIDE_ADDRESS),
+
+            .user_key_events = null,
         };
         const debug_symbols = parse_dwarf_debug_symbols(
             kernel_start_context.kernel_elf_bytes,
@@ -861,7 +866,23 @@ pub fn print_serial(comptime fmt: []const u8, args: anytype) void {
     );
 }
 
+const wozmon64str = [_]u32{ '*', '*', '*', ' ', 'W', 'O', 'Z', 'M', 'O', 'N', '6', '4', ' ', '*', '*', '*' };
+const resolutionstr = [_]u32{ 'P', 'R', 'O', 'C', 'E', 'S', 'S', 'O', 'R', 'S' };
+var _i: usize = 0;
 fn main_loop() void {
+    defer _i += 1;
+
+    toolbox.assert(
+        std.mem.containsAtLeast(u32, g_state.rune_buffer, 1, &resolutionstr),
+        "Yes!!! {}",
+        .{_i},
+    );
+    toolbox.assert(
+        std.mem.containsAtLeast(u32, g_state.rune_buffer, 1, &wozmon64str),
+        "Noo!!! {}",
+        .{_i},
+    );
+
     while (true) {
         profiler.start_profiler();
 
@@ -879,13 +900,13 @@ fn main_loop() void {
                     profiler.begin("Poll USB HID");
                     usb_hid.poll(
                         controller,
-                        &g_state.input_state,
+                        &g_state.key_events,
                     );
                     profiler.end();
                 }
             }
         }
-        while (g_state.input_state.modifier_key_pressed_events.dequeue()) |scancode| {
+        while (g_state.key_events.modifier_key_pressed_events.dequeue()) |scancode| {
             switch (scancode) {
                 .LeftShift, .RightShift => {
                     g_state.are_characters_shifted = true;
@@ -893,7 +914,7 @@ fn main_loop() void {
                 else => {},
             }
         }
-        while (g_state.input_state.modifier_key_released_events.dequeue()) |scancode| {
+        while (g_state.key_events.modifier_key_released_events.dequeue()) |scancode| {
             switch (scancode) {
                 .LeftShift, .RightShift => {
                     g_state.are_characters_shifted = false;
@@ -902,7 +923,7 @@ fn main_loop() void {
             }
         }
         profiler.begin("Key pressed events");
-        while (g_state.input_state.key_pressed_events.dequeue()) |scancode| {
+        while (g_state.key_events.key_pressed_events.dequeue()) |scancode| {
             switch (scancode) {
                 .F1 => type_program(programs.woz_and_jobs),
                 .F2 => g_state.show_profiler = !g_state.show_profiler,
@@ -912,7 +933,7 @@ fn main_loop() void {
         profiler.end();
 
         profiler.begin("Key released events");
-        while (g_state.input_state.key_released_events.dequeue()) |scancode| {
+        while (g_state.key_events.key_released_events.dequeue()) |scancode| {
             _ = scancode;
         }
         profiler.end();
@@ -962,7 +983,8 @@ fn draw_profiler() void {
 fn draw_runes() void {
     var rune_x: usize = 0;
     var rune_y: usize = 0;
-    for (g_state.rune_buffer) |c| {
+    const rune_buffer = g_state.rune_buffer;
+    for (rune_buffer) |c| {
         draw_rune(c, rune_x, rune_y);
 
         rune_x += 1;
@@ -980,7 +1002,8 @@ fn draw_rune(rune: toolbox.Rune, rune_x: usize, rune_y: usize) void {
     if (r < ' ' or r > '_') {
         return;
     }
-    const index = @as(u8, @intCast(r)) - ' ';
+    const ascii: u8 = @intCast(r);
+    const index = ascii - ' ';
     const font = g_state.screen.font;
     const bitmap = font.character_bitmap(index);
     for (0..font.height) |y| {
@@ -1019,7 +1042,6 @@ fn carriage_return() void {
 
     g_state.cursor_x = 0;
     g_state.cursor_y += 1;
-    // const font = g_state.screen.font;
     const height_in_runes = g_state.screen.height_in_runes;
     if (g_state.cursor_y >= height_in_runes) {
         const width_in_runes = g_state.screen.width_in_runes;
@@ -1193,41 +1215,55 @@ fn handle_command(command: commands.Command) void {
         },
         .Execute => |arguments| {
             const entry_point: *const fn (?*anyopaque) callconv(.C) void = @ptrFromInt(arguments.start);
-            run_on_core(entry_point, null);
+            var system_api = w64.SystemAPI{
+                .register_key_events_queue = &register_key_events_queue,
+            };
+            run_on_core(entry_point, &system_api);
             while (true) {
                 var it = g_state.usb_xhci_controllers.iterator();
                 while (it.next_value()) |controller| {
                     if (usb_xhci.poll_controller(controller)) {
                         usb_hid.poll(
                             controller,
-                            &g_state.input_state,
+                            &g_state.key_events,
                         );
                     }
                 }
-                while (g_state.input_state.modifier_key_pressed_events.dequeue()) |scancode| {
+                while (g_state.key_events.modifier_key_pressed_events.dequeue()) |scancode| {
                     switch (scancode) {
                         .LeftShift, .RightShift => {
                             g_state.are_characters_shifted = true;
                         },
                         else => {},
                     }
+                    if (g_state.user_key_events) |user_key_events| {
+                        user_key_events.modifier_key_pressed_events.force_enqueue(scancode);
+                    }
                 }
-                while (g_state.input_state.modifier_key_released_events.dequeue()) |scancode| {
+                while (g_state.key_events.modifier_key_released_events.dequeue()) |scancode| {
                     switch (scancode) {
                         .LeftShift, .RightShift => {
                             g_state.are_characters_shifted = false;
                         },
                         else => {},
                     }
+                    if (g_state.user_key_events) |user_key_events| {
+                        user_key_events.modifier_key_released_events.force_enqueue(scancode);
+                    }
                 }
-                while (g_state.input_state.key_pressed_events.dequeue()) |scancode| {
+                while (g_state.key_events.key_pressed_events.dequeue()) |scancode| {
                     if (scancode == .Escape) {
                         exit_running_program();
                         return;
                     }
+                    if (g_state.user_key_events) |user_key_events| {
+                        user_key_events.key_pressed_events.force_enqueue(scancode);
+                    }
                 }
-                while (g_state.input_state.key_released_events.dequeue()) |scancode| {
-                    _ = scancode;
+                while (g_state.key_events.key_released_events.dequeue()) |scancode| {
+                    if (g_state.user_key_events) |user_key_events| {
+                        user_key_events.key_released_events.force_enqueue(scancode);
+                    }
                 }
                 std.atomic.spinLoopHint();
             }
@@ -1370,4 +1406,8 @@ pub fn run_on_core(entry_point: *const fn (user_data: ?*anyopaque) callconv(.C) 
         }
     }
     //TODO: return error if all cores busy
+}
+pub fn register_key_events_queue(key_events: *w64.KeyEvents) callconv(.C) void {
+    //TODO atomic store
+    g_state.user_key_events = key_events;
 }

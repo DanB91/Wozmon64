@@ -11,7 +11,7 @@ pub fn build(b: *std.Build) !void {
     });
 
     const w64_module = b.addModule("wozmon64", .{
-        .source_file = .{ .path = "src/wozmon64.zig" },
+        .source_file = .{ .path = "src/wozmon64_user.zig" },
     });
     try w64_module.dependencies.put("toolbox", toolbox_module);
 
@@ -33,6 +33,7 @@ pub fn build(b: *std.Build) !void {
 
         exe.linker_script = .{ .path = "sample_programs/linker.ld" };
         exe.addModule("wozmon64", w64_module);
+        exe.addModule("toolbox", toolbox_module);
         exe.force_pic = true;
         exe.red_zone = false;
 

@@ -1,6 +1,6 @@
 const toolbox = @import("toolbox");
 const std = @import("std");
-const w64 = @import("wozmon64.zig");
+const w64 = @import("wozmon64_kernel.zig");
 const kernel_memory = @import("kernel_memory.zig");
 
 pub const ACPI2RSDP = extern struct {

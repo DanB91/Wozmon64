@@ -1,6 +1,6 @@
 const amd64 = @import("../amd64.zig");
 const toolbox = @import("toolbox");
-const w64 = @import("../wozmon64.zig");
+const w64 = @import("../wozmon64_kernel.zig");
 const kernel_memory = @import("../kernel_memory.zig");
 
 pub const END_POINT_DEVICE_HEADER_TYPE = 0;

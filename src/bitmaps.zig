@@ -1,4 +1,4 @@
-const w64 = @import("wozmon64.zig");
+const w64 = @import("wozmon64_kernel.zig");
 const toolbox = @import("toolbox");
 
 pub const Font = struct {

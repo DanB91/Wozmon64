@@ -1,5 +1,3 @@
-const w64 = @import("wozmon64.zig");
-
 pub const woz_and_jobs = @embedFile("../zig-out/bin/woz_and_jobs.bin");
 pub const draw_flashing_screen = [_]u8{
     0x48,

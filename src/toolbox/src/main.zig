@@ -3,16 +3,15 @@ const toolbox = @import("toolbox.zig");
 const profiler = toolbox.profiler;
 
 pub const THIS_PLATFORM = toolbox.Platform.MacOS;
-pub const ENABLE_PROFILER = true;
+pub const ENABLE_PROFILER = !toolbox.IS_DEBUG;
 pub const panic = toolbox.panic_handler;
 
 pub fn main() anyerror!void {
-    // if (toolbox.IS_DEBUG) {
-    //     run_tests(0);
-    // } else {
-    // run_tests(0);
-    run_benchmarks(0);
-    // }
+    if (toolbox.IS_DEBUG) {
+        try run_tests(0);
+    } else {
+        run_benchmarks(0);
+    }
 }
 
 const TestModule = u32;
@@ -26,7 +25,7 @@ const TestModule = u32;
 //All,
 //};
 
-fn run_tests(which_tests: TestModule) void {
+fn run_tests(which_tests: TestModule) !void {
     _ = which_tests;
 
     //print tests
@@ -76,7 +75,7 @@ fn run_tests(which_tests: TestModule) void {
         //test init arena
         {
             toolbox.asserteq(0, arena.pos, "Arena should have initial postion of 0");
-            toolbox.asserteq(arena_size - @sizeOf(toolbox.Arena), arena.data.len, "Wrong arena capacity");
+            toolbox.asserteq(arena_size - @sizeOf(toolbox.Arena) - @sizeOf(std.mem.Allocator.VTable), arena.data.len, "Wrong arena capacity");
         }
 
         //test push_bytes_unaligned
@@ -411,25 +410,79 @@ fn run_tests(which_tests: TestModule) void {
     {}
     //ring queue
     {
-        //TODO
-        // defer arena.reset();
-        // var ring_queue = toolbox.RingQueue(i64).init(8, arena);
-        // for (0..10) |u| {
-        //     const i = @intCast(i64, u);
-        //     ring_queue.enqueue(i);
-        // }
-        // var it = ring_queue.iterator();
-        // var expected: i64 = 3;
-        // while (it.next()) |got| {
-        //     toolbox.assert(
-        //         expected == got,
-        //         "Unexpected ring queue value.  Expected: {}, Got: {}",
-        //         .{ expected, got },
-        //     );
-        //     expected += 1;
-        // }
+        defer arena.reset();
+        var ring_queue = toolbox.RingQueue(i64).init(8, arena);
+        for (0..10) |u| {
+            const i = @as(i64, @intCast(u));
+            ring_queue.force_enqueue(i);
+        }
+        var it = ring_queue.iterator();
+        var expected: i64 = 3;
+        while (it.next()) |got| {
+            toolbox.assert(
+                expected == got,
+                "Unexpected ring queue value.  Expected: {}, Got: {}",
+                .{ expected, got },
+            );
+            expected += 1;
+        }
+    }
+    //concurrent ring queue single thread test
+    {
+        defer arena.reset();
+        var ring_queue = toolbox.SingleProducerMultiConsumerRingQueue(i64).init(8, arena);
+        for (0..10) |u| {
+            const i = @as(i64, @intCast(u));
+            ring_queue.force_enqueue(i);
+        }
+        var expected: i64 = 3;
+        while (ring_queue.dequeue()) |got| {
+            toolbox.assert(
+                expected == got,
+                "Unexpected ring queue value.  Expected: {}, Got: {}",
+                .{ expected, got },
+            );
+            expected += 1;
+        }
+    }
+    //concurrent ring queue multi thread test
+    {
+        defer arena.reset();
+        var ring_queue = toolbox.SingleProducerMultiConsumerRingQueue(i64).init(8, arena);
+        var running = true;
+        const enqueue_thread = try std.Thread.spawn(.{}, concurrent_queue_enqueue_test_loop, .{ &ring_queue, &running });
+        const dequeue_thread_1 = try std.Thread.spawn(.{}, concurrent_queue_dequeue_test_loop, .{ &ring_queue, &running });
+        const dequeue_thread_2 = try std.Thread.spawn(.{}, concurrent_queue_dequeue_test_loop, .{ &ring_queue, &running });
+
+        enqueue_thread.join();
+        dequeue_thread_1.join();
+        dequeue_thread_2.join();
     }
     toolbox.println("\nAll tests passed!", .{});
+}
+fn concurrent_queue_enqueue_test_loop(ring_queue: *toolbox.SingleProducerMultiConsumerRingQueue(i64), running: *bool) void {
+    for (0..10000) |u| {
+        const i = @as(i64, @intCast(u));
+        while (!ring_queue.enqueue(i)) {
+            std.atomic.spinLoopHint();
+        }
+    }
+    running.* = false;
+}
+fn concurrent_queue_dequeue_test_loop(ring_queue: *toolbox.SingleProducerMultiConsumerRingQueue(i64), running: *bool) void {
+    var last_actual: i64 = -1;
+    while (running.*) {
+        if (ring_queue.dequeue()) |actual| {
+            toolbox.assert(
+                actual > last_actual,
+                "Unexpected ring queue value.  Expected greater than: {}, Was: {}",
+                .{ last_actual, actual },
+            );
+            last_actual = actual;
+        } else {
+            std.atomic.spinLoopHint();
+        }
+    }
 }
 
 fn run_benchmarks(which_tests: TestModule) void {
