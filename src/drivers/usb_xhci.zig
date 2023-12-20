@@ -1980,7 +1980,6 @@ pub fn poll_controller(controller: *Controller) bool {
     if (trb.read_cycle_bit() != event_trb_ring.ring.cs) {
         return false;
     }
-    print_serial("USB event occurred!", .{});
     event_trb_ring.ring.index += 1;
     if (event_trb_ring.ring.index >= event_trb_ring.ring.ring.len) {
         event_trb_ring.ring.cs ^= 1;
