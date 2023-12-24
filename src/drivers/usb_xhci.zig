@@ -741,7 +741,7 @@ pub const TransferRequestBlock = packed struct {
     };
 };
 pub const TransferRequestBlockRing = struct {
-    ring: [RING_SIZE]TransferRequestBlock = [_]TransferRequestBlock{.{}} ** RING_SIZE,
+    ring: [RING_SIZE]TransferRequestBlock align(w64.MMIO_PAGE_SIZE) = [_]TransferRequestBlock{.{}} ** RING_SIZE,
     index: usize = 0,
     cs: u1 = 0, //cycle state. starts at 1
     physical_address_start: u64 = 0,
@@ -1976,18 +1976,21 @@ pub fn poll_controller(controller: *Controller) bool {
     //const max_retries = 50;
     //var i: usize = 0;
     //while (i < max_retries) : (i += 1) {
-    const trb: *volatile TransferRequestBlock = &event_trb_ring.ring.ring[event_trb_ring.ring.index];
+    const trb = event_trb_ring.ring.ring[event_trb_ring.ring.index];
+
     if (trb.read_cycle_bit() != event_trb_ring.ring.cs) {
         return false;
     }
-    event_trb_ring.ring.index += 1;
-    if (event_trb_ring.ring.index >= event_trb_ring.ring.ring.len) {
-        event_trb_ring.ring.cs ^= 1;
-        event_trb_ring.ring.index = 0;
+    defer {
+        event_trb_ring.erdp.* = (event_trb_ring.event_trb_ring_physical_address +
+            (event_trb_ring.ring.index * @sizeOf(TransferRequestBlock)));
+        event_trb_ring.ring.index += 1;
+        if (event_trb_ring.ring.index >= event_trb_ring.ring.ring.len) {
+            event_trb_ring.ring.cs ^= 1;
+            event_trb_ring.ring.index = 0;
+        }
+        @fence(.SeqCst);
     }
-    event_trb_ring.erdp.* = (event_trb_ring.event_trb_ring_physical_address +
-        (event_trb_ring.ring.index * @sizeOf(TransferRequestBlock))) | (1 << 3);
-    @fence(.SeqCst);
 
     switch (trb.read_trb_type()) {
         .CommandCompletionEvent,
@@ -2001,7 +2004,7 @@ pub fn poll_controller(controller: *Controller) bool {
                 }
             }
             const ret = PollEventRingResult{
-                .trb = trb.*,
+                .trb = trb,
                 .number_of_bytes_not_transferred = trb.read_number_of_bytes_not_transferred(),
                 .err = err_opt,
             };
@@ -2020,6 +2023,7 @@ pub fn poll_controller(controller: *Controller) bool {
             print_serial("Unhandled USB event: {} -- {}", .{ trb.read_trb_type(), trb });
         },
     }
+
     return false;
 }
 
@@ -2270,13 +2274,13 @@ pub fn completion_code_to_error(completion_code: u8) anyerror {
 fn AllocationResultObject(comptime T: type, comptime alignment: usize) type {
     return struct {
         data: *align(alignment) T,
-        physical_address_start: usize,
+        physical_address_start: u64,
     };
 }
 fn AllocationResultSlice(comptime T: type, comptime alignment: usize) type {
     return struct {
         data: []align(alignment) T,
-        physical_address_start: usize,
+        physical_address_start: u64,
     };
 }
 inline fn alloc_object(
