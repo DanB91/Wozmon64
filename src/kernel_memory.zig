@@ -199,10 +199,11 @@ pub fn virtual_to_physical(
 pub fn map_mmio_physical_address(
     starting_physical_address: u64,
     number_of_pages: usize,
-    arena: *toolbox.Arena,
 ) u64 {
     g_state.lock.lock();
     defer g_state.lock.release();
+
+    const arena = g_state.arena;
 
     g_state.next_free_virtual_address = toolbox.align_up(g_state.next_free_virtual_address, w64.MMIO_PAGE_SIZE);
 

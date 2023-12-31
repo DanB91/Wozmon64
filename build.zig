@@ -26,7 +26,7 @@ pub fn build(b: *std.Build) !void {
             .root_source_file = .{ .path = "sample_programs/woz_and_jobs.zig" },
             .target = target,
             .optimize = b.standardOptimizeOption(.{
-                .preferred_optimize_mode = .ReleaseFast,
+                .preferred_optimize_mode = .Debug,
             }),
             .main_pkg_path = .{ .path = "sample_programs" },
         });

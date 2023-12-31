@@ -1420,12 +1420,13 @@ export fn core_entry(
     amd64.wrmsr(amd64.IA32_TSC_AUX_MSR, processor_id);
     while (true) {
         if (context.application_processor_kernel_entry_data.get()) |entry_data| {
-            console.serial_println(
-                "starting processor id: {}, rsp {X},entry: {X}",
-                .{
-                    processor_id, entry_data.rsp, @intFromPtr(entry_data.entry),
-                },
-            );
+            //NOTE: commented out since it can make the serial output a bit messy
+            // console.serial_println(
+            //     "starting processor id: {}, rsp {X},entry: {X}",
+            //     .{
+            //         processor_id, entry_data.rsp, @intFromPtr(entry_data.entry),
+            //     },
+            // );
 
             asm volatile (
                 \\movq %[cr3_data], %%cr3

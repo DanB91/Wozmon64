@@ -1,7 +1,7 @@
 ENTRY(entry) 
 PAGE_SIZE = 8;
 SECTIONS {
-    . = 0x2300000;
+    . = 0x2600000;
     .text : {
         KEEP(*(.entry))
         *(.text*)

@@ -1,11 +1,22 @@
+const std = @import("std");
 const w64 = @import("wozmon64");
 const toolbox = @import("toolbox");
 const WOZ_AND_JOBS = @embedFile("woz-and-jobs.rgb");
 const WOZ_AND_JOBS_WIDTH = 465;
 const WOZ_AND_JOBS_HEIGHT = WOZ_AND_JOBS.len / (WOZ_AND_JOBS_WIDTH * 3);
 
-var arena_bytes = [_]u8{0} ** toolbox.mb(4);
+var g_system_api: *const w64.SystemAPI = undefined;
+var arena_bytes = [_]u8{0} ** toolbox.mb(16);
+
+pub fn panic(msg: []const u8, error_return_trace: ?*std.builtin.StackTrace, ret_addr: ?usize) noreturn {
+    _ = ret_addr;
+    _ = error_return_trace;
+    g_system_api.error_and_terminate(msg.ptr, msg.len);
+}
+
 export fn entry(system_api: *const w64.SystemAPI) linksection(".entry") void {
+    g_system_api = system_api;
+
     const screen_width = w64.SCREEN_PIXEL_WIDTH_PTR.*;
     const screen_height = w64.SCREEN_PIXEL_HEIGHT_PTR.*;
     const stride = w64.FRAME_BUFFER_STRIDE_PTR.*;
@@ -18,9 +29,10 @@ export fn entry(system_api: *const w64.SystemAPI) linksection(".entry") void {
     var y_pos: i64 = @intCast(screen_height / 2 - WOZ_AND_JOBS_HEIGHT / 2);
     var vx: i64 = 0;
     var vy: i64 = 0;
-
     system_api.register_key_events_queue(&key_events);
-    const back_buffer = arena.push_slice_clear(w64.Pixel, frame_buffer.len);
+
+    const back_buffer = arena.push_slice(w64.Pixel, frame_buffer.len);
+
     while (true) {
         //process input
         {

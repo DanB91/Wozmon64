@@ -3,10 +3,13 @@
 
 //This file is meant to be the main source file for the wozmon64 module imported by programs
 const toolbox = @import("toolbox");
+const std = @import("std");
 
 pub const MEMORY_PAGE_SIZE = toolbox.mb(2);
 
 pub const SystemAPI = struct {
+    error_and_terminate: *const fn (bytes: [*c]const u8, len: u64) callconv(.C) noreturn,
+    terminate: *const fn () callconv(.C) noreturn,
     register_key_events_queue: *const fn (key_events: *KeyEvents) callconv(.C) void,
 };
 
@@ -271,4 +274,134 @@ pub fn scancode_to_ascii(scancode: ScanCode) u8 {
 
         else => '?',
     };
+}
+
+pub fn Atomic(comptime T: type) type {
+    return struct {
+        value: T,
+        lock: ReentrantTicketLock = .{},
+
+        const Self = @This();
+
+        pub const get = switch (@sizeOf(T)) {
+            1, 2, 4, 8 => get_register,
+            else => get_generic,
+        };
+        pub const set = switch (@sizeOf(T)) {
+            1, 2, 4, 8 => set_register,
+            else => set_generic,
+        };
+
+        fn get_generic(self: *Self) T {
+            self.lock.lock();
+            const value = self.value;
+            self.lock.release();
+            return value;
+        }
+
+        fn set_generic(self: *Self, value: T) void {
+            self.lock.lock();
+            self.value = value;
+            self.lock.release();
+        }
+
+        inline fn get_register(self: *Self) T {
+            const RegisterType = get_register_type();
+            const reg_value: RegisterType = @bitCast(self.value);
+            return @bitCast(@atomicLoad(RegisterType, &reg_value, .SeqCst));
+        }
+
+        inline fn set_register(self: *Self, value: T) void {
+            const RegisterType = get_register_type();
+            const reg_value: RegisterType = @bitCast(value);
+            @atomicStore(RegisterType, &self.value, reg_value, .SeqCst);
+        }
+
+        fn get_register_type() type {
+            return switch (@sizeOf(T)) {
+                1 => u8,
+                2 => u16,
+                4 => u32,
+                8 => u64,
+                else => @compileError("Incorrect usage of get_register_type!"),
+            };
+        }
+    };
+}
+
+pub const ReentrantTicketLock = struct {
+    serving: u64 = 0,
+    taken: u64 = 0,
+
+    recursion_level: u64 = 0,
+    core_id: i64 = -1,
+
+    pub fn lock(self: *ReentrantTicketLock) void {
+        const core_id = @atomicLoad(i64, &self.core_id, .SeqCst);
+        if (core_id == get_core_id()) {
+            self.recursion_level += 1;
+            return;
+        }
+        const ticket = @atomicRmw(u64, &self.taken, .Add, 1, .SeqCst);
+        while (true) {
+            if (@cmpxchgWeak(
+                u64,
+                &self.serving,
+                ticket,
+                ticket,
+                .AcqRel,
+                .Acquire,
+            ) == null) {
+                @atomicStore(i64, &self.core_id, @intCast(get_core_id()), .SeqCst);
+                self.recursion_level = 1;
+                return;
+            } else {
+                std.atomic.spinLoopHint();
+            }
+        }
+    }
+
+    pub fn release(self: *ReentrantTicketLock) void {
+        self.recursion_level -= 1;
+        if (self.recursion_level == 0) {
+            @atomicStore(i64, &self.core_id, @intCast(-1), .SeqCst);
+            _ = @atomicRmw(u64, &self.serving, .Add, 1, .SeqCst);
+        }
+    }
+};
+pub fn get_core_id() u64 {
+    const IA32_TSC_AUX_MSR = 0xC0000103; //Used for storing processor id
+    return rdmsr(IA32_TSC_AUX_MSR);
+}
+inline fn rdmsr(msr: u32) u64 {
+    var eax: u64 = 0;
+    var edx: u64 = 0;
+    asm volatile (
+        \\rdmsr
+        : [eax] "={eax}" (eax),
+          [edx] "={edx}" (edx),
+        : [msr] "{ecx}" (msr),
+    );
+    return (edx << 32) | eax;
+}
+//for debugging purposes on QEMU
+pub fn println_serial(comptime fmt: []const u8, args: anytype) void {
+    const MAX_BYTES = 1024;
+    const StaticVars = struct {
+        var lock: ReentrantTicketLock = .{};
+    };
+    StaticVars.lock.lock();
+    defer StaticVars.lock.release();
+    const COM1_PORT_ADDRESS = 0x3F8;
+    var buf: [MAX_BYTES]u8 = undefined;
+    const bytes = std.fmt.bufPrint(&buf, fmt ++ "\r\n", args) catch buf[0..];
+    for (bytes) |b| {
+        asm volatile (
+            \\outb %%al, %%dx
+            :
+            : [data] "{al}" (b),
+              [port] "{dx}" (COM1_PORT_ADDRESS),
+            : "rax", "rdx"
+        );
+    }
 }

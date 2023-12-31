@@ -75,6 +75,39 @@ fn graphics_println(comptime fmt: []const u8, args: anytype) void {
 
         const font = g_state.screen.font;
         const bitmap = font.character_bitmap(index);
+
+        //TODO: figure out clockwise rotation from https://github.com/torvalds/linux/blob/861deac3b092f37b2c5e6871732f3e11486f7082/drivers/video/fbdev/core/fbcon_cw.c#L51
+        // var dx: i64 = @intCast(g_state.cursor_x * font.kerning);
+        // var dy: i64 = @intCast(g_state.cursor_y * font.height);
+        // var sx: i64 = 0;
+        // var sy: i64 = 0;
+        // var dstride: i64 = @intCast(g_state.screen.stride);
+        // var sstride: i64 = @intCast(font.width);
+        // var width: i64 = @intCast(font.width);
+        // var height: i64 = @intCast(font.height);
+        // {
+        //     sx = sstride - sy;
+        //     sy = sx;
+        //     dx = dstride - dy;
+        //     dx = dy;
+        //     width = height;
+        //     height = width;
+        //     sstride = height;
+        //     dstride = @intCast(g_state.screen.height);
+        // }
+        // blit(
+        //     g_state.screen.back_buffer,
+        //     dx,
+        //     dy,
+        //     dstride,
+        //     bitmap,
+        //     sx,
+        //     sy,
+        //     sstride,
+        //     width,
+        //     height,
+        // );
+
         for (0..font.height) |y| {
             const screen_y = (g_state.cursor_y * font.height) + y;
             for (0..font.width) |x| {
@@ -88,9 +121,41 @@ fn graphics_println(comptime fmt: []const u8, args: anytype) void {
             carriage_return();
         }
     }
-    //TODO:
+
     @memcpy(g_state.screen.frame_buffer, g_state.screen.back_buffer);
-    //@memset(g_state.screen.frame_buffer, .{ .data = 0 });
+}
+fn blit(
+    dest: []w64.Pixel,
+    dx: i64,
+    dy: i64,
+    dstride: i64,
+    src: []w64.Pixel,
+    sx: i64,
+    sy: i64,
+    sstride: i64,
+    width: i64,
+    height: i64,
+) void {
+    var y: i64 = 0;
+
+    while (y < height) : (y += 1) {
+        var x: i64 = 0;
+        while (x < width) : (x += 1) {
+            const dest_signed_index = (dy + y) * dstride + (dx + x);
+            const src_signed_index = (sy + y) * sstride + (sx + x);
+            const dest_index: usize = @intCast(dest_signed_index);
+            const src_index: usize = @intCast(src_signed_index);
+
+            if (dest_signed_index < 0 or dest_index >= dest.len) {
+                continue;
+            }
+            if (src_signed_index < 0 or src_index >= src.len) {
+                dest[dest_index] = .{ .data = 0 };
+                continue;
+            }
+            dest[dest_index] = src[src_index];
+        }
+    }
 }
 
 fn carriage_return() void {

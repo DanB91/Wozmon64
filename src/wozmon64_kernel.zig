@@ -86,7 +86,7 @@ pub const BootloaderProcessorContext = struct {
     is_booted: bool,
     pml4_table_address: u64,
     processor_id: u64,
-    application_processor_kernel_entry_data: Atomic(?struct {
+    application_processor_kernel_entry_data: w64_user.Atomic(?struct {
         entry: *const fn (
             context: *ApplicationProcessorKernelContext,
         ) callconv(.C) noreturn,
@@ -102,7 +102,7 @@ pub const ApplicationProcessorKernelContext = struct {
     cr3: u64, //page table address
     fsbase: u64, //fs base address
     gsbase: u64, //gs base address
-    job: Atomic(?struct {
+    job: w64_user.Atomic(?struct {
         entry: *const fn (user_data: ?*anyopaque) callconv(.C) void,
         user_data: ?*anyopaque,
     }),
@@ -249,104 +249,6 @@ pub fn delay_milliseconds(n: i64) void {
         std.atomic.spinLoopHint();
     }
 }
-
-pub fn get_core_id() u64 {
-    return amd64.rdmsr(amd64.IA32_TSC_AUX_MSR);
-}
-
-pub fn Atomic(comptime T: type) type {
-    return struct {
-        value: T,
-        lock: ReentrantTicketLock = .{},
-
-        const Self = @This();
-
-        pub const get = switch (@sizeOf(T)) {
-            1, 2, 4, 8 => get_register,
-            else => get_generic,
-        };
-        pub const set = switch (@sizeOf(T)) {
-            1, 2, 4, 8 => set_register,
-            else => set_generic,
-        };
-
-        fn get_generic(self: *Self) T {
-            self.lock.lock();
-            const value = self.value;
-            self.lock.release();
-            return value;
-        }
-
-        fn set_generic(self: *Self, value: T) void {
-            self.lock.lock();
-            self.value = value;
-            self.lock.release();
-        }
-
-        inline fn get_register(self: *Self) T {
-            const RegisterType = get_register_type();
-            const reg_value: RegisterType = @bitCast(self.value);
-            return @bitCast(@atomicLoad(RegisterType, &reg_value, .SeqCst));
-        }
-
-        inline fn set_register(self: *Self, value: T) void {
-            const RegisterType = get_register_type();
-            const reg_value: RegisterType = @bitCast(value);
-            @atomicStore(RegisterType, &self.value, reg_value, .SeqCst);
-        }
-
-        fn get_register_type() type {
-            return switch (@sizeOf(T)) {
-                1 => u8,
-                2 => u16,
-                4 => u32,
-                8 => u64,
-                else => @compileError("Incorrect usage of get_register_type!"),
-            };
-        }
-    };
-}
-
-pub const ReentrantTicketLock = struct {
-    serving: u64 = 0,
-    taken: u64 = 0,
-
-    recursion_level: u64 = 0,
-    core_id: i64 = -1,
-
-    pub fn lock(self: *ReentrantTicketLock) void {
-        const core_id = @atomicLoad(i64, &self.core_id, .SeqCst);
-        if (core_id == get_core_id()) {
-            self.recursion_level += 1;
-            return;
-        }
-        const ticket = @atomicRmw(u64, &self.taken, .Add, 1, .SeqCst);
-        while (true) {
-            if (@cmpxchgWeak(
-                u64,
-                &self.serving,
-                ticket,
-                ticket,
-                .AcqRel,
-                .Acquire,
-            ) == null) {
-                @atomicStore(i64, &self.core_id, @intCast(get_core_id()), .SeqCst);
-                self.recursion_level = 1;
-                return;
-            } else {
-                std.atomic.spinLoopHint();
-            }
-        }
-    }
-
-    pub fn release(self: *ReentrantTicketLock) void {
-        self.recursion_level -= 1;
-        if (self.recursion_level == 0) {
-            @atomicStore(i64, &self.core_id, @intCast(-1), .SeqCst);
-            _ = @atomicRmw(u64, &self.serving, .Add, 1, .SeqCst);
-        }
-    }
-};
 
 comptime {
     toolbox.static_assert(@sizeOf(w64_user.Pixel) == 4, "Incorrect size for Pixel");

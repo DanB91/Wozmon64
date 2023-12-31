@@ -19,12 +19,6 @@ pub const ENABLE_PROFILER = true;
 const CURSOR_BLINK_TIME_MS = 500;
 const ENABLE_SERIAL = toolbox.IS_DEBUG;
 
-//userspace functions
-pub fn echo(bytes: [*c]u8, len: u64) callconv(.C) void {
-    const str = toolbox.str8(bytes[0..len]);
-    echo_fmt("{}", .{str});
-}
-
 const KernelState = struct {
     cursor_x: usize,
     cursor_y: usize,
@@ -58,6 +52,7 @@ const KernelState = struct {
 
     //user program state
     user_key_events: ?*w64.KeyEvents,
+    is_user_program_running: bool,
 
     //profiler state
     show_profiler: bool,
@@ -107,7 +102,7 @@ pub fn panic(msg: []const u8, error_return_trace: ?*std.builtin.StackTrace, ret_
             compile_unit.*,
             address - 1,
         ) catch |e| {
-            echo_line("At {X} Line info Error: {}", .{ address, e });
+            echo_line("At {X} Line Info Error: {}", .{ address, e });
             continue;
         };
         echo_line("At {s}:{}:{} -- {?s}: 0x{X}", .{
@@ -176,6 +171,7 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
             .frame_buffer_stride = @ptrFromInt(w64.FRAME_BUFFER_STRIDE_ADDRESS),
 
             .user_key_events = null,
+            .is_user_program_running = false,
         };
         const debug_symbols = parse_dwarf_debug_symbols(
             kernel_start_context.kernel_elf_bytes,
@@ -215,7 +211,6 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
             amd64.rdmsr(amd64.IA32_APIC_BASE_MSR) &
                 toolbox.mask_for_bit_range(12, 63, u64),
             1,
-            g_state.global_arena,
         );
     }
     //bring processors in to kernel space
@@ -283,7 +278,6 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
                             break :b kernel_memory.map_mmio_physical_address(
                                 physical_bar0,
                                 1,
-                                g_state.global_arena,
                             );
                         };
 
@@ -312,19 +306,8 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
                                 //usb_ehci.init(virtual_bar0);
                             },
                             pcie.XHCI_PROGRAMING_INTERFACE => {
-                                const physical_bar0 = end_point_device_header.effective_bar0();
-                                print_serial("XCHI physical bar0: {X}", .{physical_bar0});
-                                const virtual_bar0 = kernel_memory.physical_to_virtual(physical_bar0) catch b: {
-                                    break :b kernel_memory.map_mmio_physical_address(
-                                        physical_bar0,
-                                        3,
-                                        g_state.global_arena,
-                                    );
-                                };
-                                print_serial("Found USB xHCI controller! Virtual BAR0: {X}, Physical BAR0: {X}", .{ virtual_bar0, physical_bar0 });
                                 var usb_controller = usb_xhci.init(
                                     dev,
-                                    virtual_bar0,
                                     g_state.scratch_arena,
                                 ) catch |e| {
                                     toolbox.panic("Could not init xHCI adapter: {}", .{e});
@@ -362,6 +345,21 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
                                 print_serial("USB controller: {}", .{end_point_device_header});
                             },
                         }
+                    } else if (end_point_device_header.class_code == pcie.NETWORK_CONTROLLER_CLASS_CODE and
+                        end_point_device_header.subclass_code == pcie.ETHERNET_CONTROLLER_SUBCLASS_CODE)
+                    {
+                        //TODO: ethernet
+                        print_serial("Ethernet found with vendor id: {X}, device id: {X}, subsys id: {X}: BAR0: {X}", .{
+                            end_point_device_header.vendor_id,
+                            end_point_device_header.device_id,
+                            end_point_device_header.subsystem_id,
+                            end_point_device_header.effective_bar0(),
+                        });
+                    } else {
+                        print_serial("Unsupported PCIe device.  Class: {X}, SubClass: {X}", .{
+                            end_point_device_header.class_code,
+                            end_point_device_header.subclass_code,
+                        });
                     }
                 },
                 .BridgeDevice => |_| {
@@ -421,7 +419,7 @@ fn core_entry(context: *w64.ApplicationProcessorKernelContext) callconv(.C) nore
     );
     //print_serial("APIC register {X}", .{amd64.rdmsr(amd64.IA32_APIC_BASE_MSR)});
     fbase_tls = context.fsbase;
-    print_apic_id_and_core_id();
+    //print_apic_id_and_core_id();
 
     while (true) {
         if (context.job.get()) |job| {
@@ -865,24 +863,7 @@ pub fn print_serial(comptime fmt: []const u8, args: anytype) void {
         : "rax", "rdx"
     );
 }
-
-const wozmon64str = [_]u32{ '*', '*', '*', ' ', 'W', 'O', 'Z', 'M', 'O', 'N', '6', '4', ' ', '*', '*', '*' };
-const resolutionstr = [_]u32{ 'P', 'R', 'O', 'C', 'E', 'S', 'S', 'O', 'R', 'S' };
-var _i: usize = 0;
 fn main_loop() void {
-    defer _i += 1;
-
-    toolbox.assert(
-        std.mem.containsAtLeast(u32, g_state.rune_buffer, 1, &resolutionstr),
-        "Yes!!! {}",
-        .{_i},
-    );
-    toolbox.assert(
-        std.mem.containsAtLeast(u32, g_state.rune_buffer, 1, &wozmon64str),
-        "Noo!!! {}",
-        .{_i},
-    );
-
     while (true) {
         profiler.start_profiler();
 
@@ -1216,10 +1197,17 @@ fn handle_command(command: commands.Command) void {
         .Execute => |arguments| {
             const entry_point: *const fn (?*anyopaque) callconv(.C) void = @ptrFromInt(arguments.start);
             var system_api = w64.SystemAPI{
+                .error_and_terminate = &user_program_error_and_terminate,
+                .terminate = &user_program_terminate,
                 .register_key_events_queue = &register_key_events_queue,
             };
+            g_state.is_user_program_running = true;
             run_on_core(entry_point, &system_api);
             while (true) {
+                if (!@atomicLoad(bool, &g_state.is_user_program_running, .SeqCst)) {
+                    exit_running_program();
+                    return;
+                }
                 var it = g_state.usb_xhci_controllers.iterator();
                 while (it.next_value()) |controller| {
                     if (usb_xhci.poll_controller(controller)) {
@@ -1407,7 +1395,18 @@ pub fn run_on_core(entry_point: *const fn (user_data: ?*anyopaque) callconv(.C) 
     }
     //TODO: return error if all cores busy
 }
+
 pub fn register_key_events_queue(key_events: *w64.KeyEvents) callconv(.C) void {
     //TODO atomic store
     g_state.user_key_events = key_events;
+}
+
+pub fn user_program_terminate() callconv(.C) noreturn {
+    @atomicStore(bool, &g_state.is_user_program_running, false, .SeqCst);
+    toolbox.hang();
+}
+
+pub fn user_program_error_and_terminate(bytes: [*c]const u8, len: u64) callconv(.C) noreturn {
+    echo_line("Program terminated with error: {s}", .{bytes[0..len]});
+    user_program_terminate();
 }

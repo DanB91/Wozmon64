@@ -741,12 +741,12 @@ pub const TransferRequestBlock = packed struct {
     };
 };
 pub const TransferRequestBlockRing = struct {
-    ring: [RING_SIZE]TransferRequestBlock align(w64.MMIO_PAGE_SIZE) = [_]TransferRequestBlock{.{}} ** RING_SIZE,
+    ring: [RING_SIZE]TransferRequestBlock = [_]TransferRequestBlock{.{}} ** RING_SIZE,
     index: usize = 0,
     cs: u1 = 0, //cycle state. starts at 1
     physical_address_start: u64 = 0,
 
-    pub const RING_SIZE = 256;
+    pub const RING_SIZE = 64;
 
     pub fn physical_address_of_current_index(self: TransferRequestBlockRing) usize {
         return self.physical_address_start + self.index * @sizeOf(TransferRequestBlock);
@@ -759,18 +759,18 @@ const PollEventRingResult = struct {
     err: ?anyerror,
 };
 pub const EventRing = struct {
-    ring: TransferRequestBlockRing,
+    ring: TransferRequestBlockRing align(w64.MMIO_PAGE_SIZE),
     //must be aligned by 64 bytes
     event_ring_segment_entry: TransferRequestBlock align(64),
     erdp: *align(1) volatile u64,
     event_trb_ring_physical_address: u64,
 };
 pub const CommandRing = struct {
-    ring: TransferRequestBlockRing,
+    ring: TransferRequestBlockRing align(w64.MMIO_PAGE_SIZE),
     doorbell: *volatile u32,
 };
 pub const TransferRing = struct {
-    trb_ring: TransferRequestBlockRing,
+    trb_ring: TransferRequestBlockRing align(w64.MMIO_PAGE_SIZE),
     doorbell: *volatile u32,
 };
 
@@ -816,12 +816,11 @@ comptime {
 
 pub fn init(
     pcie_device: *const pcie.Device,
-    bar0: u64,
     scratch_arena: *toolbox.Arena,
 ) !*Controller {
     var controller_arena = toolbox.Arena.init(toolbox.mb(2));
     errdefer controller_arena.free_all();
-    {
+    const physical_bar0 = b: {
         var pcie_device_header = pcie_device.header.EndPointDevice;
         var command = pcie_device_header.command;
         command.io_mapped = false;
@@ -829,7 +828,28 @@ pub fn init(
         command.bus_master_dma_enabled = true;
         command.interrupt_disabled = true;
         pcie_device_header.command = command;
-    }
+
+        //TODO: find size of MMIO space per https://wiki.osdev.org/PCI#Address_and_size_of_the_BAR
+        // {
+        //     //TODO: turn off command.memory_mapped
+
+        //     const bar_ptr: *volatile u64 = @ptrCast(&pcie_device_header.bar0);
+        //     const bar_data = bar_ptr.*;
+        //     bar_ptr.* = ~@as(u64, 0);
+        //     print_serial("Before bar0 value: {X}, After bar0 value: {X}", .{ bar_data, bar_ptr.* });
+        //     bar_ptr.* = bar_data;
+        // }
+
+        break :b pcie_device_header.effective_bar0();
+    };
+    print_serial("XCHI physical bar0: {X}", .{physical_bar0});
+    const bar0 = kernel_memory.physical_to_virtual(physical_bar0) catch b: {
+        break :b kernel_memory.map_mmio_physical_address(
+            physical_bar0,
+            3,
+        );
+    };
+    print_serial("Found USB xHCI controller! Virtual BAR0: {X}, Physical BAR0: {X}", .{ bar0, physical_bar0 });
 
     const capability_registers = @as(*volatile CapabilityRegisters, @ptrFromInt(bar0));
     const interrupter_registers = @as(*volatile InterrupterRegisters, @ptrFromInt(bar0 + capability_registers.runtime_registers_space_offset + 0x20));
