@@ -203,6 +203,12 @@ pub fn map_mmio_physical_address(
     g_state.lock.lock();
     defer g_state.lock.release();
 
+    toolbox.assert(
+        toolbox.is_aligned_to(starting_physical_address, w64.MMIO_PAGE_SIZE),
+        "Memory-mapped IO address space should be 4kb page aligned. Tried to map: {X}",
+        .{starting_physical_address},
+    );
+
     const arena = g_state.arena;
 
     g_state.next_free_virtual_address = toolbox.align_up(g_state.next_free_virtual_address, w64.MMIO_PAGE_SIZE);

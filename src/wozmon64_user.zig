@@ -385,7 +385,11 @@ inline fn rdmsr(msr: u32) u64 {
     return (edx << 32) | eax;
 }
 //for debugging purposes on QEMU
+
 pub fn println_serial(comptime fmt: []const u8, args: anytype) void {
+    if (comptime !toolbox.IS_DEBUG) {
+        return;
+    }
     const MAX_BYTES = 1024;
     const StaticVars = struct {
         var lock: ReentrantTicketLock = .{};

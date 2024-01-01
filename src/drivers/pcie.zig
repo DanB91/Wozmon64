@@ -123,11 +123,52 @@ pub const EndPointDeviceHeader = extern struct {
     max_latency: u8 align(1),
 
     pub fn effective_bar0(self: EndPointDeviceHeader) u64 {
-        if ((self.bar0 & 0x4) != 0) {
+        if (self.is_64_bit_bar0()) {
             //64 bit address
             return (@as(u64, self.bar0) & 0xFFFF_FFF0) + (@as(u64, self.bar1) << 32);
         } else {
             return @as(u64, self.bar0) & 0xFFFF_FFF0;
+        }
+    }
+
+    pub inline fn is_64_bit_bar0(self: EndPointDeviceHeader) bool {
+        return self.bar0 & 4 != 0;
+    }
+
+    pub fn mmio_size(self: *volatile EndPointDeviceHeader) align(4096) usize {
+        const command_to_restore = self.command;
+        var command = command_to_restore;
+        command.io_mapped = false;
+        command.memory_mapped = false;
+        command.interrupt_disabled = true;
+        self.command = command;
+
+        defer self.command = command_to_restore;
+
+        //Find size of MMIO space per https://wiki.osdev.org/PCI#Address_and_size_of_the_BAR
+        if (self.is_64_bit_bar0()) {
+            const bar_ptr: *align(1) volatile u64 = @ptrCast(&self.bar0);
+
+            const bar_data = bar_ptr.*;
+            defer bar_ptr.* = bar_data;
+
+            //writing all 1s to the bar register will give the 2s compliment of the size
+            bar_ptr.* = ~@as(u64, 0);
+
+            //we need to mask off the bottom 3 bits for a 64-bit bar
+            const ret = ~((bar_ptr.* & ~@as(u64, 7))) + 1;
+
+            return ret;
+        } else {
+            //32 bit bar0
+            const bar_ptr: *align(1) volatile u32 = &self.bar0;
+            const bar_data = bar_ptr.*;
+            defer bar_ptr.* = bar_data;
+
+            //writing all 1s to the bar register will give the 2s compliment of the size
+            bar_ptr.* = ~@as(u32, 0);
+            const ret = (~bar_ptr.*) + 1;
+            return ret;
         }
     }
 };
@@ -213,7 +254,7 @@ pub fn enumerate_devices(
                     }
                     const header_type = pcie_device_header[HEADER_TYPE_BYTE_OFFSET] & 0x7F;
                     if (header_type == BRIDGE_DEVICE_HEADER_TYPE) {
-                        const pcie_bridge_device = @as(*align(4096) volatile BridgeDeviceHeader, @ptrCast(pcie_device_header));
+                        const pcie_bridge_device: *align(4096) volatile BridgeDeviceHeader = @ptrCast(pcie_device_header);
                         if (max_bus_opt) |max_bus| {
                             if (pcie_bridge_device.subordinate_bus_number + 1 > max_bus) {
                                 max_bus_opt = pcie_bridge_device.subordinate_bus_number + 1;
@@ -229,11 +270,17 @@ pub fn enumerate_devices(
                             .config_data = @as([*]volatile u8, @ptrFromInt(pci_request_vaddr))[0..4096],
                         });
                     } else {
+                        const pcie_endpoint_device_header: *align(4096) EndPointDeviceHeader =
+                            @ptrCast(pcie_device_header);
+                        if (pcie_endpoint_device_header.bar0 & 1 != 0) {
+                            //This is an IO Space pcie deviece. We don't support this right now
+                            continue :function_loop;
+                        }
                         ret.append(.{
                             .device = device,
                             .bus = bus,
                             .function = function,
-                            .header = .{ .EndPointDevice = @as(*align(4096) volatile EndPointDeviceHeader, @ptrCast(pcie_device_header)) },
+                            .header = .{ .EndPointDevice = pcie_endpoint_device_header },
                             .config_data = @as([*]volatile u8, @ptrFromInt(pci_request_vaddr))[0..4096],
                         });
                     }

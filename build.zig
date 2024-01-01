@@ -139,6 +139,8 @@ pub fn build(b: *std.Build) !void {
             "usb-kbd,bus=xhci.0",
             "-device",
             "usb-mouse,bus=xhci.0",
+            "-nic",
+            "mac=12:34:56:AB:CD:EF",
         };
         const run_step = b.step("run", "Run Wozmon64 in qemu");
         const qemu_command = b.addSystemCommand(&args_array);

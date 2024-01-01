@@ -10,8 +10,11 @@ const amd64 = @import("amd64.zig");
 const pcie = @import("drivers/pcie.zig");
 const usb_xhci = @import("drivers/usb_xhci.zig");
 const usb_hid = @import("drivers/usb_hid.zig");
+const eth_intel = @import("drivers/ethernet_intel_82574L.zig");
 const commands = @import("commands.zig");
 const programs = @import("programs.zig");
+
+const println_serial = w64.println_serial;
 
 pub const THIS_PLATFORM = toolbox.Platform.Wozmon64;
 pub const ENABLE_PROFILER = true;
@@ -177,7 +180,7 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
             kernel_start_context.kernel_elf_bytes,
             kernel_start_context.global_arena,
         ) catch |e| {
-            print_serial("failed to parse debug symbols: {}", .{e});
+            println_serial("failed to parse debug symbols: {}", .{e});
             toolbox.hang();
         };
         g_state.debug_symbols = debug_symbols;
@@ -273,7 +276,7 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
                         end_point_device_header.subclass_code == pcie.NVME_SUBCLASS_CODE)
                     {
                         const physical_bar0 = end_point_device_header.effective_bar0();
-                        print_serial("physical address: {X}", .{physical_bar0});
+                        println_serial("physical address: {X}", .{physical_bar0});
                         const nvme_bar0 = kernel_memory.physical_to_virtual(physical_bar0) catch b: {
                             break :b kernel_memory.map_mmio_physical_address(
                                 physical_bar0,
@@ -281,7 +284,7 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
                             );
                         };
 
-                        print_serial("Found NVMe drive! Virtual BAR0: {X}, Physical BAR0: {X}", .{ nvme_bar0, physical_bar0 });
+                        println_serial("Found NVMe drive! Virtual BAR0: {X}, Physical BAR0: {X}", .{ nvme_bar0, physical_bar0 });
 
                         //TODO:
                         // const nvme_device = nvme.init(dev, nvme_bar0) catch |e| {
@@ -342,21 +345,17 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
                                 }
                             },
                             else => {
-                                print_serial("USB controller: {}", .{end_point_device_header});
+                                println_serial("USB controller: {}", .{end_point_device_header});
                             },
                         }
                     } else if (end_point_device_header.class_code == pcie.NETWORK_CONTROLLER_CLASS_CODE and
                         end_point_device_header.subclass_code == pcie.ETHERNET_CONTROLLER_SUBCLASS_CODE)
                     {
-                        //TODO: ethernet
-                        print_serial("Ethernet found with vendor id: {X}, device id: {X}, subsys id: {X}: BAR0: {X}", .{
-                            end_point_device_header.vendor_id,
-                            end_point_device_header.device_id,
-                            end_point_device_header.subsystem_id,
-                            end_point_device_header.effective_bar0(),
-                        });
+                        if (end_point_device_header.vendor_id == eth_intel.VENDOR_ID and end_point_device_header.device_id == eth_intel.DEVICE_ID) {
+                            eth_intel.init(dev);
+                        }
                     } else {
-                        print_serial("Unsupported PCIe device.  Class: {X}, SubClass: {X}", .{
+                        println_serial("Unsupported PCIe device.  Class: {X}, SubClass: {X}", .{
                             end_point_device_header.class_code,
                             end_point_device_header.subclass_code,
                         });
@@ -371,7 +370,7 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
             }
         }
 
-        print_serial("PCIE devices len: {}", .{pcie_devices.len});
+        println_serial("PCIE devices len: {}", .{pcie_devices.len});
     }
 
     //populate runtime constants
@@ -417,7 +416,7 @@ fn core_entry(context: *w64.ApplicationProcessorKernelContext) callconv(.C) nore
         : [fsbase] "r" (context.fsbase),
           [gsbase] "r" (context.gsbase),
     );
-    //print_serial("APIC register {X}", .{amd64.rdmsr(amd64.IA32_APIC_BASE_MSR)});
+    //println_serial("APIC register {X}", .{amd64.rdmsr(amd64.IA32_APIC_BASE_MSR)});
     fbase_tls = context.fsbase;
     //print_apic_id_and_core_id();
 
@@ -804,18 +803,18 @@ export fn page_fault_handler_inner(error_code: u64, unmapped_address: u64) callc
     if (to_map == 0) {
         toolbox.panic("Allocating memory at null page! Address: {X}", .{unmapped_address});
     }
-    print_serial("Allocating page for address: {X}, Error code: {}", .{
+    println_serial("Allocating page for address: {X}, Error code: {}", .{
         to_map,
         error_code,
     });
     var it = StackUnwinder.init();
     while (it.next()) |address| {
-        print_serial("At {X}", .{address});
+        println_serial("At {X}", .{address});
     }
 
     //TODO: remove
     const page = kernel_memory.allocate_at_address(to_map, 1);
-    // print_serial("Page virtual address: {X}", .{@intFromPtr(page.ptr)});
+    // println_serial("Page virtual address: {X}", .{@intFromPtr(page.ptr)});
     for (page) |*b| {
         b.* = 0xAA;
     }
@@ -830,39 +829,6 @@ export fn page_fault_handler_inner(error_code: u64, unmapped_address: u64) callc
     // );
 }
 
-//for debugging within print routines
-pub fn print_serial(comptime fmt: []const u8, args: anytype) void {
-    if (comptime !ENABLE_SERIAL) {
-        return;
-    }
-
-    const StaticVars = struct {
-        var print_lock: w64.ReentrantTicketLock = .{};
-    };
-    StaticVars.print_lock.lock();
-    defer StaticVars.print_lock.release();
-
-    const to_print = toolbox.str8fmtbuf(fmt, args, 2048);
-
-    for (to_print.bytes) |byte| {
-        asm volatile (
-            \\mov $0x3F8, %%dx
-            \\mov %[char], %%al
-            \\outb %%al, %%dx
-            :
-            : [char] "r" (byte),
-            : "rax", "rdx"
-        );
-    }
-    asm volatile (
-        \\mov $0x3F8, %%dx
-        \\mov %[char], %%al
-        \\outb %%al, %%dx
-        :
-        : [char] "r" (@as(u8, '\n')),
-        : "rax", "rdx"
-    );
-}
 fn main_loop() void {
     while (true) {
         profiler.start_profiler();
@@ -1263,7 +1229,7 @@ fn handle_command(command: commands.Command) void {
 fn print_apic_id_and_core_id() void {
     const core_id = w64.get_core_id();
     const apic_id = @as(*u32, @ptrFromInt(g_state.apic_address + 0x20)).*;
-    print_serial(
+    println_serial(
         "Core id {}, APIC ID {X}: fbase tls: {x} context: {x},",
         .{
             core_id,
@@ -1280,10 +1246,10 @@ fn get_processor_context() *w64.ApplicationProcessorKernelContext {
     );
 }
 fn exit_running_program() void {
-    print_serial("Escape hit", .{});
+    println_serial("Escape hit", .{});
     for (g_state.application_processor_contexts) |context| {
         if (context.job.get()) |_| {
-            print_serial("Sending NMI to {}", .{context.processor_id});
+            println_serial("Sending NMI to {}", .{context.processor_id});
             const interrupt_command_register_low = amd64.InterruptControlRegisterLow{
                 .vector = 0,
                 .message_type = .NonMaskableInterrupt,
@@ -1296,7 +1262,7 @@ fn exit_running_program() void {
             const interrupt_command_register_high = amd64.InterruptControlRegisterHigh{
                 .destination = @intCast(context.processor_id),
             };
-            print_serial("Low command {X}, High command {X}, ", .{
+            println_serial("Low command {X}, High command {X}, ", .{
                 @as(u32, @bitCast(interrupt_command_register_low)),
                 @as(u32, @bitCast(interrupt_command_register_high)),
             });
