@@ -1,4 +1,3 @@
-ENTRY(entry) 
 PAGE_SIZE = 8;
 SECTIONS {
     . = 0x2600000;

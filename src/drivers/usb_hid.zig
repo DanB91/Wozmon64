@@ -4,7 +4,7 @@ const w64 = @import("../wozmon64_kernel.zig");
 const kernel = @import("../kernel.zig");
 const kernel_memory = @import("../kernel_memory.zig");
 
-const println_serial = w64.println_serial;
+const boot_log_println = kernel.boot_log_println;
 
 pub const USBHIDDevice = struct {
     device_types: []Type,
@@ -276,7 +276,7 @@ pub fn init_hid_interface(
         device.endpoint_0_transfer_ring,
         controller,
     );
-    println_serial("Device {?s} Interface: {} Number of endpoints: {}", .{
+    boot_log_println("Device {?s} Interface: {} Number of endpoints: {}", .{
         device.product,
         hid_interface.interface_number,
         hid_interface.endpoints.len,
@@ -691,10 +691,10 @@ pub fn poll(
                 hid_device.last_transfer_request_physical_address,
             )) |event_response| {
                 if (event_response.err) |e| {
-                    println_serial("Error polling device: {}", .{e});
+                    boot_log_println("Error polling device: {}", .{e});
                     continue;
                 }
-                var number_of_bytes_not_transferred = event_response.number_of_bytes_not_transferred;
+                const number_of_bytes_not_transferred = event_response.number_of_bytes_not_transferred;
                 const input_data = hid_device.packet_buffer[0 .. hid_device.packet_buffer.len - number_of_bytes_not_transferred];
                 // println("Data from USB device: {x}", .{input_data});
                 for (hid_device.device_types) |*device_type| {
@@ -880,7 +880,7 @@ fn handle_keyboard_data(
 
     const keys_held_now = data[keyboard.keys_pressed_report.index .. keyboard.keys_pressed_report.index +
         keyboard.keys_pressed_report.size];
-    var keys_held_before = &keyboard.keys_held;
+    const keys_held_before = &keyboard.keys_held;
 
     //32 key buffer should be more than suffcient
     var scan_codes_held_now = [_]w64.ScanCode{.Unknown} ** 32;

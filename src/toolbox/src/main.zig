@@ -60,7 +60,7 @@ fn run_tests(which_tests: TestModule) !void {
         //test system allocator
         {
             const num_bytes = toolbox.mb(1);
-            var data = toolbox.os_allocate_memory(num_bytes);
+            const data = toolbox.os_allocate_memory(num_bytes);
             toolbox.asserteq(num_bytes, data.len, "Wrong number of bytes allocated");
             toolbox.assert(toolbox.is_aligned_to(@intFromPtr(data.ptr), toolbox.PAGE_SIZE), "System allocated memory should be page aligned", .{});
             //os allocator should returned zero'ed memory
@@ -145,13 +145,13 @@ fn run_tests(which_tests: TestModule) !void {
     {
         defer arena.reset();
         var list = toolbox.LinkedListQueue(i64).init(arena);
-        var first_element = list.push(42);
+        const first_element = list.push(42);
         toolbox.assert(list.len == 1, "List should be length 1", .{});
         toolbox.assert(first_element.* == 42, "Node should have a value of 42", .{});
         toolbox.assert(&list.head.?.value == first_element, "List head should be the same as the first node", .{});
         toolbox.assert(&list.tail.?.value == first_element, "List tail should be the same as its only node", .{});
 
-        var second_element = list.push(42 * 2);
+        const second_element = list.push(42 * 2);
         _ = list.push(42 * 3);
 
         toolbox.assert(list.len == 3, "List should be length 3", .{});
@@ -203,14 +203,14 @@ fn run_tests(which_tests: TestModule) !void {
     {
         defer arena.reset();
         var list = toolbox.RandomRemovalLinkedList(i64).init(arena);
-        var first_element = list.append(42);
+        const first_element = list.append(42);
         toolbox.assert(list.len == 1, "List should be length 1", .{});
         toolbox.assert(first_element.* == 42, "Node should have a value of 42", .{});
         toolbox.assert(&list.head.?.value == first_element, "List head should be the same as the first node", .{});
         toolbox.assert(&list.tail.?.value == first_element, "List tail should be the same as its only node", .{});
 
-        var second_element = list.append(42 * 2);
-        var third_element = list.append(42 * 3);
+        const second_element = list.append(42 * 2);
+        const third_element = list.append(42 * 3);
 
         toolbox.assert(list.len == 3, "List should be length 3", .{});
         toolbox.assert(second_element.* == 42 * 2, "Second element is wrong value", .{});
@@ -245,7 +245,7 @@ fn run_tests(which_tests: TestModule) !void {
             }
         }
 
-        var zeroth_element = list.prepend(42 * 0);
+        const zeroth_element = list.prepend(42 * 0);
         toolbox.assert(list.len == 3, "List should be length 3", .{});
         toolbox.assert(zeroth_element.* == 42 * 0, "0th element is wrong value", .{});
         {
@@ -492,7 +492,7 @@ fn run_benchmarks(which_tests: TestModule) void {
     profiler.start_profiler();
     defer {
         profiler.end_profiler();
-        var it = profiler.line_iterator(arena);
+        var it = profiler.line_iterator();
         while (it.next()) |to_print| {
             toolbox.println_str8(to_print);
         }

@@ -1,8 +1,8 @@
 const toolbox = @import("toolbox.zig");
 pub fn Stack(comptime T: type) type {
     return struct {
-        data: []T,
-        back: usize,
+        data: []T = @as([*]T, undefined)[0..0],
+        back: usize = 0,
 
         const Self = @This();
 
@@ -32,6 +32,13 @@ pub fn Stack(comptime T: type) type {
         }
         pub inline fn clear(self: *Self) void {
             self.back = 0;
+        }
+
+        pub fn clone(self: *Self, arena: *toolbox.Arena) Self {
+            const ret = init(arena, self.data.len);
+            @memcpy(ret.data, self.data);
+            ret.back = self.back;
+            return ret;
         }
     };
 }

@@ -9,6 +9,7 @@ const BootloaderStage = enum {
     UEFI,
     AfterExitButBeforeScreenIsSetup,
     GraphicsConsole,
+    Disabled,
 };
 const State = struct {
     screen: w64.Screen,
@@ -29,6 +30,7 @@ pub fn println(comptime fmt: []const u8, args: anytype) void {
         .UEFI => uefi_println(fmt, args),
         .AfterExitButBeforeScreenIsSetup => serial_println(fmt, args),
         .GraphicsConsole => graphics_println(fmt, args),
+        .Disabled => {},
     }
 }
 
@@ -44,6 +46,11 @@ pub fn init_graphics_console(screen: w64.Screen) void {
         .cursor_y = 0,
     };
 }
+
+pub fn disable() void {
+    g_state.stage = .Disabled;
+}
+
 fn graphics_println(comptime fmt: []const u8, args: anytype) void {
     if (comptime !ENABLE_CONSOLE) {
         return;

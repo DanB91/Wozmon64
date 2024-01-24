@@ -395,7 +395,7 @@ pub inline fn cpuid(input_eax: u32) CPUIDResult {
         .edx = edx,
     };
 }
-pub const IA32_APIC_BASE_MSR = 0x1B;
+pub const IA32_APIC_BASE_MSR = 0x1B; //physical address of APIC
 pub const PAT_MSR = 0x277; //Page attribute table MSR;
 pub const IA32_TSC_AUX_MSR = 0xC0000103; //Used for storing processor id
 
@@ -412,8 +412,8 @@ pub inline fn rdmsr(msr: u32) u64 {
 }
 
 pub inline fn wrmsr(msr: u32, value: u64) void {
-    var eax: u32 = @intCast(value & 0xFFFF_FFFF);
-    var edx: u32 = @intCast(value >> 32);
+    const eax: u32 = @intCast(value & 0xFFFF_FFFF);
+    const edx: u32 = @intCast(value >> 32);
     asm volatile (
         \\wrmsr
         :
@@ -646,9 +646,68 @@ pub fn register_exception_handler(
         .zeroB = 0,
     };
 }
+pub fn register_interrupt_handler(
+    comptime handler: anytype,
+    vector: usize,
+    idt: []volatile IDTDescriptor,
+) void {
+    const handler_addr = @intFromPtr(handler);
+    toolbox.assert(
+        vector >= 32,
+        "Interrupt vector should be >=32 as to not interfere with exception handlers. Vector was {}",
+        .{vector},
+    );
+    idt[vector] = .{
+        .offset_bits_0_to_15 = @as(u16, @truncate(handler_addr)),
+        .selector = asm volatile ("mov %%cs, %[ret]"
+            : [ret] "=r" (-> u16),
+            :
+            : "cs"
+        ),
+        .ist = 0,
+        .type_attr = .InterruptGate64Bit,
+        .zeroA = 0,
+        .privilege_bits = 0,
+        .is_present = true,
+        .offset_bits_16_to_31 = @as(u16, @truncate(handler_addr >> 16)),
+        .offset_bits_32_to_63 = @as(u32, @truncate(handler_addr >> 32)),
+        .zeroB = 0,
+    };
+}
+//APIC and register definitions
+pub const APIC = struct {
+    data: []volatile u32,
 
-//interprocessor interrupts (IPI)
-pub const InterruptControlRegisterLow = packed struct(u32) {
+    pub const APIC_ADDRESS_SPACE_LEN = w64.MMIO_PAGE_SIZE;
+
+    const REGISTER_SIZE = @sizeOf(u32);
+    const NUMBER_OF_REGISTERS = APIC_ADDRESS_SPACE_LEN / REGISTER_SIZE;
+
+    comptime {
+        toolbox.static_assert(APIC_ADDRESS_SPACE_LEN == toolbox.kb(4), "APIC size should be 4kb");
+    }
+
+    pub fn init(apic_base_address: u64) APIC {
+        const data =
+            @as([*]volatile u32, @ptrFromInt(apic_base_address))[0..NUMBER_OF_REGISTERS];
+        return .{ .data = data };
+    }
+
+    pub fn read_register(self: APIC, comptime T: type) T {
+        toolbox.static_assert(@sizeOf(T) == REGISTER_SIZE, "APIC register size must be 4 bytes");
+        const dword_offset = T.BYTE_OFFSET / @sizeOf(u32);
+        const register_data = self.data[dword_offset];
+        return @bitCast(register_data);
+    }
+    pub fn write_register(self: APIC, value: anytype) void {
+        const T = @TypeOf(value);
+        toolbox.static_assert(@sizeOf(T) == REGISTER_SIZE, "APIC register size must be 4 bytes");
+        const dword_offset = T.BYTE_OFFSET / @sizeOf(u32);
+        self.data[dword_offset] = @bitCast(value);
+    }
+};
+
+pub const APICInterruptControlRegisterLow = packed struct(u32) {
     vector: u8, //VEC
     message_type: enum(u3) {
         Fixed = 0b000,
@@ -679,39 +738,50 @@ pub const InterruptControlRegisterLow = packed struct(u32) {
         AllExcludingSelf,
     },
     reserved2: u12 = 0,
+
+    pub const BYTE_OFFSET = 0x300;
 };
-pub const InterruptControlRegisterHigh = packed struct(u32) {
+pub const APICInterruptControlRegisterHigh = packed struct(u32) {
     reserved: u24 = 0,
     destination: u8,
+
+    pub const BYTE_OFFSET = 0x310;
 };
 pub fn send_interprocessor_interrupt(
-    apic_base_address: u64,
-    interrupt_command_register_low: InterruptControlRegisterLow,
-    interrupt_command_register_high: InterruptControlRegisterHigh,
+    apic: APIC,
+    interrupt_command_register_low: APICInterruptControlRegisterLow,
+    interrupt_command_register_high: APICInterruptControlRegisterHigh,
 ) void {
-    const icr = @as([*]u32, @ptrFromInt(
-        apic_base_address + 0x300,
-    ))[0..5];
-    icr[4] = @bitCast(interrupt_command_register_high);
+    apic.write_register(interrupt_command_register_high);
     @fence(.SeqCst);
-    icr[0] = @bitCast(interrupt_command_register_low);
+    apic.write_register(interrupt_command_register_low);
+}
+pub fn send_end_of_interrupt(apic: APIC) void {
+    const EOI = packed struct(u32) {
+        value: u32 = 0,
+        pub const BYTE_OFFSET = 0xB0;
+    };
+    apic.write_register(EOI{});
+}
 
-    // const apic_base_address = rdmsr(IA32_APIC_BASE_MSR) &
-    //     toolbox.mask_for_bit_range(12, 63, u64);
-    // const interrupt_command_register_low_ptr = @as(
-    //     *volatile InterruptControlRegisterLow,
-    //     @ptrFromInt(
-    //         apic_base_address + 0x300,
-    //     ),
-    // );
-    // const interrupt_command_register_high_ptr = @as(
-    //     *volatile InterruptControlRegisterHigh,
-    //     @ptrFromInt(
-    //         apic_base_address + 0x300 + @sizeOf(InterruptControlRegisterLow),
-    //     ),
-    // );
-
-    // interrupt_command_register_high_ptr.* = interrupt_command_register_high;
-    // @fence(.SeqCst);
-    // interrupt_command_register_low_ptr.* = interrupt_command_register_low;
+//return 0 if no interrupt is in service
+pub fn get_in_service_interrupt_vector(apic: APIC) usize {
+    const start = 0x110 / @sizeOf(u32);
+    const end = 0x170 / @sizeOf(u32);
+    var starting_irq: usize = 0;
+    var cursor: usize = start;
+    while (cursor <= end) : (cursor += 4) {
+        const register = apic.data[cursor];
+        if (register != 0) {
+            for (0..31) |i| {
+                if (register & (@as(usize, 1) << @intCast(i)) != 0) {
+                    const irq = starting_irq + i;
+                    toolbox.assert(irq < 256, "IRQ vector must be less than 256, but was: {}", .{irq});
+                    return irq;
+                }
+            }
+        }
+        starting_irq += 32;
+    }
+    return 0;
 }

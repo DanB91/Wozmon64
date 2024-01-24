@@ -23,7 +23,7 @@ pub fn PoolAllocator(comptime T: type) type {
         };
 
         pub fn init(number_of_elements: usize, arena: *Arena) PoolAllocator(T) {
-            var ret = PoolAllocator(T){
+            const ret = PoolAllocator(T){
                 .elements = arena.push_slice_clear(Element, number_of_elements),
             };
             return ret;
@@ -183,7 +183,7 @@ pub const Arena = struct {
     }
     pub fn push_bytes_unaligned(arena: *Arena, n: usize) []u8 {
         if (arena.data.len - arena.pos >= n) {
-            var ret = arena.data[arena.pos .. arena.pos + n];
+            const ret = arena.data[arena.pos .. arena.pos + n];
             arena.pos += n;
             toolbox.assert(arena.pos <= arena.data.len, "Arena position is bad!", .{});
             return ret;
@@ -197,7 +197,7 @@ pub const Arena = struct {
         const aligned_pos = aligned_address - data_address;
         const total_size = (aligned_pos - arena.pos) + n;
         if (arena.data.len - aligned_pos >= total_size) {
-            var ret: []align(alignment) u8 = @alignCast(arena.data[aligned_pos .. aligned_pos + n]);
+            const ret: []align(alignment) u8 = @alignCast(arena.data[aligned_pos .. aligned_pos + n]);
             arena.pos += total_size;
             toolbox.assert(toolbox.is_aligned_to(@intFromPtr(ret.ptr), alignment), "Alignment of return value is wrong!", .{});
             toolbox.assert(arena.pos <= arena.data.len, "Arena position is bad!", .{});
@@ -212,7 +212,7 @@ pub const Arena = struct {
         const aligned_pos = aligned_address - data_address;
         const total_size = (aligned_pos - arena.pos) + n;
         if (arena.data.len - aligned_pos >= total_size) {
-            var ret: []u8 = arena.data[aligned_pos .. aligned_pos + n];
+            const ret: []u8 = arena.data[aligned_pos .. aligned_pos + n];
             arena.pos += total_size;
             toolbox.assert(arena.pos <= arena.data.len, "Arena position is bad!", .{});
             return ret;
@@ -347,7 +347,7 @@ pub const Arena = struct {
 };
 
 pub fn os_allocate_object(comptime T: type) *T {
-    var memory = platform_allocate_memory(@sizeOf(T));
+    const memory = platform_allocate_memory(@sizeOf(T));
     return @as(*T, @ptrCast(@alignCast(memory.ptr)));
 }
 pub fn os_free_object(to_free: anytype) void {
@@ -355,7 +355,7 @@ pub fn os_free_object(to_free: anytype) void {
     platform_free_memory(@as([*]u8, @ptrCast(to_free))[0..object_size]);
 }
 pub fn os_allocate_objects(comptime T: type, n: usize) []T {
-    var memory = platform_allocate_memory(n * @sizeOf(T));
+    const memory = platform_allocate_memory(n * @sizeOf(T));
     return @as([*]T, @alignCast(memory.ptr))[0..n];
 }
 pub fn os_free_objects(to_free: anytype) void {

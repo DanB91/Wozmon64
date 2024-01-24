@@ -5,7 +5,7 @@ pub fn DynamicArray(comptime T: type) type {
         store: []T = @as([*]T, undefined)[0..0],
         _len: usize = 0,
 
-        arena: *toolbox.Arena,
+        arena: ?*toolbox.Arena = null,
 
         pub const Child = T;
 
@@ -82,10 +82,14 @@ pub fn DynamicArray(comptime T: type) type {
             if (capacity <= self.store.len) {
                 return;
             }
-            const src = self.store;
-            const dest = self.arena.push_slice(T, capacity);
-            for (src, 0..) |s, i| dest[i] = s;
-            self.store = dest;
+            if (self.arena) |arena| {
+                const src = self.store;
+                const dest = arena.push_slice(T, capacity);
+                for (src, 0..) |s, i| dest[i] = s;
+                self.store = dest;
+            } else {
+                toolbox.panic("Dynamic array was not initialized", .{});
+            }
         }
     };
 }

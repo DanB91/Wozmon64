@@ -52,7 +52,7 @@ pub fn RingQueue(comptime T: type) type {
         }
 
         pub fn clone(self: *const Self, arena: *toolbox.Arena) Self {
-            var data_copy = arena.push_slice(T, self.data.len);
+            const data_copy = arena.push_slice(T, self.data.len);
             for (data_copy, self.data) |*d, s| d.* = s;
             return .{
                 .data = data_copy,

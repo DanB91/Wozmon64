@@ -8,11 +8,11 @@ pub fn PointerStableHashMap(comptime Key: type, comptime Value: type) type {
 }
 fn BaseHashMap(comptime Key: type, comptime Value: type, comptime is_pointer_stable: bool) type {
     return struct {
-        indices: toolbox.RandomRemovalLinkedList(usize),
-        buckets: []?KeyValue,
+        indices: toolbox.RandomRemovalLinkedList(usize) = .{},
+        buckets: []?KeyValue = @as([*]?KeyValue, undefined)[0..0],
 
         //to keep things consistent with len(), cap() will also be a function
-        _cap: usize,
+        _cap: usize = 0,
 
         //debugging fields
         hash_collisions: usize = 0,
@@ -20,7 +20,7 @@ fn BaseHashMap(comptime Key: type, comptime Value: type, comptime is_pointer_sta
         reprobe_collisions: usize = 0,
         bad_reprobe_collisions: usize = 0,
 
-        arena: *toolbox.Arena,
+        arena: ?*toolbox.Arena = null,
 
         const KeyValue = struct {
             k: Key,
@@ -29,12 +29,12 @@ fn BaseHashMap(comptime Key: type, comptime Value: type, comptime is_pointer_sta
         };
         const Self = @This();
         pub const Iterator = struct {
-            it: toolbox.RandomRemovalLinkedList(usize).Iterator,
-            hash_map: *const Self,
+            it: toolbox.RandomRemovalLinkedList(usize).Iterator = .{},
+            hash_map: ?*const Self = null,
 
             pub fn next(self: *Iterator) ?*KeyValue {
                 if (self.it.next()) |index| {
-                    return &self.hash_map.buckets[index.*].?;
+                    return &self.hash_map.?.buckets[index.*].?;
                 }
                 return null;
             }
@@ -80,13 +80,17 @@ fn BaseHashMap(comptime Key: type, comptime Value: type, comptime is_pointer_sta
             if (comptime is_pointer_stable) {
                 @panic("Cannot expand a pointer stable hashmap");
             }
-            var ret = init(self.cap() * 2, self.arena);
-            for (self.buckets) |bucket_opt| {
-                if (bucket_opt) |bucket| {
-                    ret.put(bucket.k, bucket.v);
+            if (self.arena) |arena| {
+                var ret = init(self.cap() * 2, arena);
+                for (self.buckets) |bucket_opt| {
+                    if (bucket_opt) |bucket| {
+                        ret.put(bucket.k, bucket.v);
+                    }
                 }
+                return ret;
+            } else {
+                toolbox.panic("Cannot expand hash map with arena!", .{});
             }
-            return ret;
         }
 
         pub fn put(self: *Self, key: Key, value: Value) void {
@@ -128,7 +132,7 @@ fn BaseHashMap(comptime Key: type, comptime Value: type, comptime is_pointer_sta
             if (kvptr) |kv| {
                 return kv.v;
             } else if (self.len() == self.cap()) {
-                self.* = self.expand(self.arena);
+                self.* = self.expand();
                 return self.get_or_put(key, initial_value, self.arena);
             } else {
                 const index_node = self.indices.append(index, self.arena);
@@ -192,7 +196,7 @@ fn BaseHashMap(comptime Key: type, comptime Value: type, comptime is_pointer_sta
                 return;
             }
 
-            var dest = kvptr;
+            const dest = kvptr;
             //re-probe
             {
                 const index_bit_size: u6 = @intCast(@ctz(self.buckets.len));

@@ -7,20 +7,20 @@ pub fn build(b: *std.Build) !void {
     const optimize = b.standardOptimizeOption(.{});
 
     const toolbox_module = b.addModule("toolbox", .{
-        .source_file = .{ .path = "src/toolbox/src/toolbox.zig" },
+        .root_source_file = .{ .path = "src/toolbox/src/toolbox.zig" },
     });
 
     const w64_module = b.addModule("wozmon64", .{
-        .source_file = .{ .path = "src/wozmon64_user.zig" },
+        .root_source_file = .{ .path = "src/wozmon64_user.zig" },
     });
-    try w64_module.dependencies.put("toolbox", toolbox_module);
+    w64_module.addImport("toolbox", toolbox_module);
 
     var woz_and_jobs_step: *std.Build.Step.Compile = undefined;
     var woz_and_jobs_install_step: *std.Build.Step.InstallFile = undefined;
     {
-        const target = try std.zig.CrossTarget.parse(.{
+        const target = b.resolveTargetQuery(try std.zig.CrossTarget.parse(.{
             .arch_os_abi = "x86_64-freestanding-gnu",
-        });
+        }));
         const exe = b.addExecutable(.{
             .name = "woz_and_jobs",
             .root_source_file = .{ .path = "sample_programs/woz_and_jobs.zig" },
@@ -28,14 +28,14 @@ pub fn build(b: *std.Build) !void {
             .optimize = b.standardOptimizeOption(.{
                 .preferred_optimize_mode = .Debug,
             }),
-            .main_pkg_path = .{ .path = "sample_programs" },
+            .pic = true,
         });
 
+        exe.entry = .{ .symbol_name = "entry" };
         exe.linker_script = .{ .path = "sample_programs/linker.ld" };
-        exe.addModule("wozmon64", w64_module);
-        exe.addModule("toolbox", toolbox_module);
-        exe.force_pic = true;
-        exe.red_zone = false;
+        exe.root_module.addImport("wozmon64", w64_module);
+        exe.root_module.addImport("toolbox", toolbox_module);
+        exe.root_module.red_zone = false;
 
         woz_and_jobs_step = exe;
         const install_elf =
@@ -53,26 +53,30 @@ pub fn build(b: *std.Build) !void {
         objcopy.step.dependOn(&install_elf.step);
         woz_and_jobs_install_step.step.dependOn(&objcopy.step);
     }
+    const woz_and_jobs_module = b.addModule("woz_and_job_program", .{
+        .root_source_file = woz_and_jobs_install_step.source,
+    });
 
     var kernel_step: *std.Build.Step.Compile = undefined;
     var kernel_install_step: *std.Build.Step.InstallArtifact = undefined;
     {
-        const kernel_target = try std.zig.CrossTarget.parse(.{
+        const kernel_target = b.resolveTargetQuery(try std.zig.CrossTarget.parse(.{
             .arch_os_abi = "x86_64-freestanding-gnu",
-        });
+        }));
         const exe = b.addExecutable(.{
             .name = "kernel.elf",
             .root_source_file = .{ .path = "src/kernel.zig" },
             .target = kernel_target,
             .optimize = optimize,
-            .main_pkg_path = .{ .path = "." },
+            .pic = true,
         });
         exe.linker_script = .{ .path = "src/linker.ld" };
-        exe.code_model = .kernel;
+        exe.root_module.code_model = .kernel;
+        exe.root_module.red_zone = false;
+        exe.entry = .{ .symbol_name = "kernel_entry" };
 
-        exe.addModule("toolbox", toolbox_module);
-        exe.force_pic = true;
-        exe.red_zone = false;
+        exe.root_module.addImport("toolbox", toolbox_module);
+        exe.root_module.addImport("woz_and_jobs_program", woz_and_jobs_module);
 
         exe.step.dependOn(&woz_and_jobs_step.step);
 
@@ -81,22 +85,26 @@ pub fn build(b: *std.Build) !void {
 
         kernel_install_step.step.dependOn(&woz_and_jobs_install_step.step);
     }
+    const kernel_elf_module = b.addModule("kernel_image", .{
+        .root_source_file = kernel_step.getEmittedBin(),
+    });
 
     //compile bootloader
     const bootloader_install_step = b: {
-        const uefi_target = try std.zig.CrossTarget.parse(.{
+        const uefi_target = b.resolveTargetQuery(try std.zig.CrossTarget.parse(.{
             .arch_os_abi = "x86_64-uefi-gnu",
-        });
+        }));
         const exe = b.addExecutable(.{
             .name = "bootx64",
             .root_source_file = .{ .path = "src/bootloader.zig" },
             .target = uefi_target,
             .optimize = optimize,
-            .main_pkg_path = .{ .path = "." },
+            .pic = true,
+            // .main_pkg_path = .{ .path = "." },
         });
-        exe.addModule("toolbox", toolbox_module);
-        exe.force_pic = true;
-        exe.red_zone = false;
+        exe.root_module.addImport("toolbox", toolbox_module);
+        exe.root_module.addImport("kernel.elf", kernel_elf_module);
+        exe.root_module.red_zone = false;
 
         exe.step.dependOn(&kernel_step.step);
 
@@ -111,6 +119,7 @@ pub fn build(b: *std.Build) !void {
     //run bootloader in qemu
     {
         const args_array = [_][]const u8{
+            // "/Users/danielbokser/Downloads/qemu-8.2.0/build/qemu-system-x86_64",
             "qemu-system-x86_64",
             "-smp",
             "cores=16",
@@ -120,7 +129,7 @@ pub fn build(b: *std.Build) !void {
             "-cpu",
             "Skylake-Client-v3",
             "-d",
-            "int,cpu_reset,trace:pic_interrupt,trace:pci_nvme_err_*,trace:usb_*,trace:apic_*",
+            "int,cpu_reset,trace:pic_interrupt,trace:pci_*,trace:usb_*,trace:apic_*,trace:msix_*",
             "-D",
             "zig-out/qemu.log",
             "-serial",
@@ -174,7 +183,7 @@ pub fn build(b: *std.Build) !void {
             .target = target,
             .optimize = optimize,
         });
-        unit_tests.addModule("toolbox", toolbox_module);
+        unit_tests.root_module.addImport("toolbox", toolbox_module);
 
         const run_unit_tests = b.addRunArtifact(unit_tests);
 

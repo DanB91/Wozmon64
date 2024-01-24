@@ -2,7 +2,6 @@
     Copyright Daniel Bokser 2023
     See LICENSE file for permissible source code usage
 */
-ENTRY(kernel_entry) 
 PAGE_SIZE = 2097152;
 SECTIONS {
     . = 0xFFFFFFFF80000000;
@@ -23,5 +22,4 @@ SECTIONS {
     .bss : ALIGN(PAGE_SIZE) { 
         *(.bss*) 
     }
-
 }

@@ -15,7 +15,7 @@ fn LinkedListDeque(comptime T: type, comptime stack_or_queue: enum { Stack, Queu
         len: usize = 0,
         free_list: ?*Node = null,
 
-        arena: *toolbox.Arena,
+        arena: ?*toolbox.Arena = null,
 
         pub const Iterator = struct {
             cursor: ?*Node,
@@ -129,7 +129,11 @@ fn LinkedListDeque(comptime T: type, comptime stack_or_queue: enum { Stack, Queu
                 self.free_list = node.next;
                 return node;
             }
-            return self.arena.push(Node);
+            if (self.arena) |arena| {
+                return arena.push(Node);
+            }
+
+            toolbox.panic("Pushing to linked list without arena", .{});
         }
         fn free_node(self: *Self, node: *Node) void {
             node.next = self.free_list;
@@ -145,18 +149,17 @@ pub fn RandomRemovalLinkedList(comptime T: type) type {
         len: usize = 0,
         free_list: ?*Node = null,
 
-        arena: *toolbox.Arena,
+        arena: ?*toolbox.Arena = null,
 
         const Self = @This();
         pub const Node = struct {
-            next: ?*Node,
-            prev: ?*Node,
-            value: T,
+            next: ?*Node = null,
+            prev: ?*Node = null,
+            value: T = undefined,
         };
         pub const Iterator = struct {
-            cursor: ?*Node,
-            i: usize,
-            list: *const Self,
+            cursor: ?*Node = null,
+            i: usize = 0,
             pub fn next(self: *Iterator) ?*T {
                 if (self.cursor) |cursor| {
                     const ret = &cursor.value;
@@ -166,12 +169,6 @@ pub fn RandomRemovalLinkedList(comptime T: type) type {
                     }
                     return ret;
                 } else {
-                    //NOTE: this assert is wrong if we remove nodes during iteration
-                    // toolbox.assert(
-                    //     self.i == self.list.len,
-                    //     "Linked List length is wrong! Was {} but should be {}",
-                    //     .{ self.list.len, self.i },
-                    // );
                     return null;
                 }
             }
@@ -216,7 +213,7 @@ pub fn RandomRemovalLinkedList(comptime T: type) type {
         }
 
         pub fn remove(self: *Self, to_remove: *T) void {
-            var node = @fieldParentPtr(Node, "value", to_remove);
+            const node = @fieldParentPtr(Node, "value", to_remove);
             defer {
                 self.len -= 1;
                 self.free_node(node);
@@ -266,7 +263,6 @@ pub fn RandomRemovalLinkedList(comptime T: type) type {
             return .{
                 .cursor = self.head,
                 .i = 0,
-                .list = self,
             };
         }
 
@@ -275,7 +271,11 @@ pub fn RandomRemovalLinkedList(comptime T: type) type {
                 self.free_list = node.next;
                 return node;
             }
-            return self.arena.push(Node);
+            if (self.arena) |arena| {
+                return arena.push_clear(Node);
+            } else {
+                toolbox.panic("Cannot push new linked list node without arena!", .{});
+            }
         }
         fn free_node(self: *Self, node: *Node) void {
             node.next = self.free_list;

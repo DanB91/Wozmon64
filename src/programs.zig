@@ -1,4 +1,4 @@
-pub const woz_and_jobs = @embedFile("../zig-out/bin/woz_and_jobs.bin");
+pub const woz_and_jobs = @embedFile("woz_and_jobs_program");
 pub const draw_flashing_screen = [_]u8{
     0x48,
     0x8B,

@@ -8,7 +8,13 @@ const usb_hid = @import("usb_hid.zig");
 const w64 = @import("../wozmon64_kernel.zig");
 const kernel_memory = @import("../kernel_memory.zig");
 const static_assert = toolbox.static_assert;
-const println_serial = w64.println_serial;
+const boot_log_println = kernel.boot_log_println;
+
+//TODO: for debugging on desktop
+// pub fn boot_log_println(comptime fmt: []const u8, args: anytype) void {
+//     _ = args;
+//     _ = fmt;
+// }
 
 pub const Controller = struct {
     arena: *toolbox.Arena,
@@ -23,6 +29,8 @@ pub const Controller = struct {
 
     event_response_map: EventResponseMap,
     event_response_map_arena: *toolbox.Arena,
+
+    interrupt_vector: usize,
 
     devices: toolbox.RandomRemovalLinkedList(*Device),
 };
@@ -259,13 +267,13 @@ const CapabilityRegisters = packed struct {
         }
     }
 
-    const StructuralParameters1 = packed struct { //HCSPARAMS1
+    const StructuralParameters1 = packed struct(u32) { //HCSPARAMS1
         //all read-only
         max_device_slots: u8, //MaxSlots
-        number_of_interruptors: u16, //MaxIntrs really is only 11 bits
+        number_of_interrupters: u16, //MaxIntrs really is only 11 bits
         max_ports: u8, //MaxPorts
     };
-    const StructuralParameters2 = packed struct { //HCSPARAMS2
+    const StructuralParameters2 = packed struct(u32) { //HCSPARAMS2
         //all read-only
         isochronous_scheduling_threshold: u4, //IST
         event_ring_segment_table_max: u17, // (only 4 bits) ERST Max
@@ -290,7 +298,6 @@ const CapabilityRegisters = packed struct {
         xecp: u16, //xHCI Extended Capabilities Pointer
     };
 };
-
 const OperationalRegisters = extern struct {
     command: u32 align(4), //USBCMD 0
     status: u32 align(4), //USBSTS 4
@@ -405,12 +412,22 @@ const OperationalRegisters = extern struct {
 };
 
 const InterrupterRegisters = packed struct {
-    iman: u32, //Interrupter Management
-    imod: u32, //Interrupter Moderation
-    erstsz: u32, //Event Ring Segment Table Size
-    reserved: u32,
-    erstba: u64, //Event Ring Segment Table Base Address
-    erdp: u64, //Event Ring Dequeue Pointer
+    iman: packed struct(u32) {
+        ip: bool = false, //Interrupt Pending
+        ie: bool, //Interrupt enable
+        reserved: u30 = 0,
+    }, //Interrupter Management -- Runtime register 0x20
+    imod: packed struct(u32) {
+        imodi: u16, //interval
+        imodc: u16, //counter
+    }, //Interrupter Moderation 0x24
+    erstsz: u32, //Event Ring Segment Table Size -- Runtime register 0x28
+    reserved: u32 = 0, //Runtime register 0x2C
+    erstba: packed struct(u64) {
+        reserved: u6 = 0,
+        base_address: u58,
+    }, //Event Ring Segment Table Base Address -- Runtime Register 0x30
+    erdp: EventRingDequeuePointer, //Event Ring Dequeue Pointer -- Runtime Register 0x38
 };
 
 const PortRegisters = packed struct {
@@ -753,16 +770,11 @@ pub const TransferRequestBlockRing = struct {
     }
 };
 
-const PollEventRingResult = struct {
-    trb: TransferRequestBlock,
-    number_of_bytes_not_transferred: u32,
-    err: ?anyerror,
-};
 pub const EventRing = struct {
     ring: TransferRequestBlockRing align(w64.MMIO_PAGE_SIZE),
     //must be aligned by 64 bytes
     event_ring_segment_entry: TransferRequestBlock align(64),
-    erdp: *align(1) volatile u64,
+    erdp: *volatile EventRingDequeuePointer,
     event_trb_ring_physical_address: u64,
 };
 pub const CommandRing = struct {
@@ -774,6 +786,14 @@ pub const TransferRing = struct {
     doorbell: *volatile u32,
 };
 
+const EventRingDequeuePointer = packed struct(u64) {
+    // Dequeue ERST Segment Index.
+    //We will default to zero since we only support one segment right now
+    desi: u3 = 0,
+    ehb: u1, // Event handler busy
+    erdp: u60, //Event Ring Dequeue Pointer
+};
+
 const DeviceSlotDataStructures = struct {
     input_context: InputContext,
     output_device_context: DeviceContext,
@@ -782,6 +802,13 @@ const DeviceSlotDataStructures = struct {
     endpoint_0_transfer_ring: *TransferRing,
     endpoint_0_transfer_ring_physical_address: u64,
 };
+
+const PollEventRingResult = struct {
+    trb: TransferRequestBlock,
+    number_of_bytes_not_transferred: u32,
+    err: ?anyerror,
+};
+
 comptime {
     static_assert(@offsetOf(OperationalRegisters, "status") == 4, "Static assert failed");
     static_assert(@sizeOf(CapabilityRegisters) == 32, "Static assert failed");
@@ -815,50 +842,49 @@ comptime {
 }
 
 pub fn init(
-    pcie_device: *const pcie.Device,
+    pcie_device: pcie.Device,
     scratch_arena: *toolbox.Arena,
 ) !*Controller {
     var controller_arena = toolbox.Arena.init(toolbox.mb(2));
     errdefer controller_arena.free_all();
 
-    var pcie_device_header = pcie_device.header.EndPointDevice;
+    var pcie_device_header = pcie_device.end_point_device_header();
     {
         var command = pcie_device_header.command;
         command.io_mapped = false;
         command.memory_mapped = true;
         command.bus_master_dma_enabled = true;
-        command.interrupt_disabled = true;
+        command.interrupt_disabled = false;
         pcie_device_header.command = command;
     }
-    const physical_bar0 = pcie_device_header.effective_bar0();
-    const mmio_size = pcie_device_header.mmio_size();
-    const number_of_mmio_pages_to_map = mmio_size / w64.MMIO_PAGE_SIZE;
-    println_serial("XCHI physical bar0: {X}, MMIO size: {} bytes, pages: {}", .{
-        physical_bar0,
-        mmio_size,
-        number_of_mmio_pages_to_map,
-    });
 
-    const bar0 = kernel_memory.physical_to_virtual(physical_bar0) catch b: {
-        break :b kernel_memory.map_mmio_physical_address(
-            physical_bar0,
-            number_of_mmio_pages_to_map,
-        );
-    };
-    println_serial("Found USB xHCI controller! Virtual BAR0: {X}, Physical BAR0: {X}", .{ bar0, physical_bar0 });
+    const bar0 = pcie_device.base_address_registers[0].?;
+    boot_log_println("Found USB xHCI controller! ", .{});
 
-    const capability_registers = @as(*volatile CapabilityRegisters, @ptrFromInt(bar0));
-    const interrupter_registers = @as(*volatile InterrupterRegisters, @ptrFromInt(bar0 + capability_registers.runtime_registers_space_offset + 0x20));
+    const capability_registers = bar_to_register(
+        CapabilityRegisters,
+        bar0,
+        0,
+    );
+    const interrupter_registers = bar_to_register(
+        InterrupterRegisters,
+        bar0,
+        capability_registers.runtime_registers_space_offset + 0x20,
+    );
 
-    println_serial("BAR0: {X}, CR Len: {}", .{ bar0, capability_registers.length });
-    const operational_registers = @as(*volatile OperationalRegisters, @ptrFromInt(bar0 + capability_registers.length));
+    boot_log_println("CR Len: {}", .{capability_registers.length});
+    const operational_registers = bar_to_register(
+        OperationalRegisters,
+        bar0,
+        capability_registers.length,
+    );
 
     const hcsparams1 = capability_registers.read_register(CapabilityRegisters.StructuralParameters1);
     const hccparams1 = capability_registers.read_register(CapabilityRegisters.HCCPARAMS1);
 
-    println_serial(
-        "Detected xHCI device at address {X} with {} ports and {} slots.",
-        .{ bar0, hcsparams1.max_ports, hcsparams1.max_device_slots },
+    boot_log_println(
+        "Detected xHCI device at with {} ports and {} slots.",
+        .{ hcsparams1.max_ports, hcsparams1.max_device_slots },
     );
     {
         var i: usize = 0;
@@ -893,7 +919,7 @@ pub fn init(
             return error.TimeOutWaitingForControllerToBeReset;
         }
 
-        println_serial("xHCI controller reset!", .{});
+        boot_log_println("xHCI controller reset!", .{});
     }
 
     //After Chip Hardware Reset wait until the Controller Not Ready (CNR) flag in the USBSTS is ‘0’
@@ -920,8 +946,6 @@ pub fn init(
     //Program the Device Context Base Address Array Pointer (DCBAAP) register (5.4.6) with a 64-bit address pointing to where the Device Context Base Address Array is located.
     //TODO
 
-    //TODO interrupts
-
     //set all all slots as enabled
     {
         var config = operational_registers.read_register(OperationalRegisters.Config);
@@ -929,12 +953,18 @@ pub fn init(
         operational_registers.write_register(config);
     }
 
-    const doorbells = @as([*]volatile u32, @ptrFromInt(bar0 + capability_registers.doorbell_offset))[0..hcsparams1.max_device_slots];
+    const doorbells: []volatile u32 =
+        bar_to_slice(
+        u32,
+        bar0,
+        capability_registers.doorbell_offset,
+        hcsparams1.max_device_slots,
+    );
 
     //inititalize Command Transfer Request Block Ring
     var command_trb_ring: *volatile CommandRing = undefined;
     {
-        var command_trb_ring_allocation_result = alloc_object_aligned(
+        const command_trb_ring_allocation_result = alloc_object_aligned(
             CommandRing,
             w64.MMIO_PAGE_SIZE,
             controller_arena,
@@ -952,12 +982,10 @@ pub fn init(
         );
     }
 
-    //TODO interrupter registers:
-    //TODO Event Ring Dequeue Pointer Register (ERDP) -- xhci->evts
-    //TODO Event Ring Segment Table Base Address Register (ERSTDBA) -- xhci->eseg
     var event_trb_ring: *volatile EventRing = undefined;
+    var interrupt_vector: usize = 0;
     {
-        var event_trb_ring_allocation_result = alloc_object_aligned(
+        const event_trb_ring_allocation_result = alloc_object_aligned(
             EventRing,
             w64.MMIO_PAGE_SIZE,
             controller_arena,
@@ -981,10 +1009,34 @@ pub fn init(
             .event_trb_ring_physical_address = event_trb_ring_allocation_result.physical_address_start,
         };
 
-        interrupter_registers.iman = 0; //disable interrupts
-        interrupter_registers.erstsz = 1; //Only 1 Event Ring Segment Table Entry
-        interrupter_registers.erdp = event_trb_ring_allocation_result.physical_address_start;
-        interrupter_registers.erstba = event_trb_ring_allocation_result.physical_address_start + @offsetOf(EventRing, "event_ring_segment_entry");
+        const install_result = pcie.install_interrupt_hander(pcie_device, kernel.xhci_interrupt_handler);
+        if (!install_result.success) {
+            boot_log_println("Failed to install interrupt!!!", .{});
+            //TODO log error
+        }
+        interrupt_vector = install_result.vector;
+
+        interrupter_registers.* = .{
+            .iman = .{ .ie = true }, //enable interrupts
+            .imod = .{
+                .imodi = 4000,
+                .imodc = 4000,
+            },
+            .erstsz = 1, //Only 1 Event Ring Segment Table Entry
+            .erdp = .{
+                .erdp = @intCast(event_trb_ring_allocation_result.physical_address_start >> 4),
+                .ehb = 0,
+            },
+            .erstba = .{
+                .base_address = @intCast(
+                    (event_trb_ring_allocation_result.physical_address_start +
+                        @offsetOf(
+                        EventRing,
+                        "event_ring_segment_entry",
+                    )) >> 6,
+                ),
+            },
+        };
 
         //TODO: xhci does not start up on old desktop.  but will start if erstdba is not set
         //@fence(.SeqCst);
@@ -997,7 +1049,7 @@ pub fn init(
     //set up device slots (but don't enable them, yet)
     var device_slots: []DeviceContextPointer = undefined;
     {
-        var device_slots_allocation_result = alloc_slice_aligned(
+        const device_slots_allocation_result = alloc_slice_aligned(
             DeviceContextPointer,
             hcsparams1.max_device_slots + 1,
             w64.MMIO_PAGE_SIZE,
@@ -1010,28 +1062,28 @@ pub fn init(
             @as(u64, hcsparams2.max_scratchpad_buffers_lo);
 
         if (number_of_scratch_pad_buffers > 0) {
-            println_serial("Creating {} scratch pad buffers for xHCI controller...", .{number_of_scratch_pad_buffers});
-            var scratch_pad_buffer_pointer_array_allocation_result = alloc_slice_aligned(
+            boot_log_println("Creating {} scratch pad buffers for xHCI controller...", .{number_of_scratch_pad_buffers});
+            const scratch_pad_buffer_pointer_array_allocation_result = alloc_slice_aligned(
                 ScratchPadBufferPointer,
                 number_of_scratch_pad_buffers,
                 w64.MMIO_PAGE_SIZE,
                 controller_arena,
             );
-            var scratch_pad_buffers_allocation_result = alloc_slice_aligned(
+            const scratch_pad_buffers_allocation_result = alloc_slice_aligned(
                 u8,
                 w64.MMIO_PAGE_SIZE * number_of_scratch_pad_buffers,
                 w64.MMIO_PAGE_SIZE,
                 controller_arena,
             );
-            var scratch_pad_buffer_pointer_array = scratch_pad_buffer_pointer_array_allocation_result.data;
+            const scratch_pad_buffer_pointer_array = scratch_pad_buffer_pointer_array_allocation_result.data;
             for (scratch_pad_buffer_pointer_array, 0..) |*spbp, i| {
                 spbp.* = scratch_pad_buffers_allocation_result.physical_address_start + i * w64.MMIO_PAGE_SIZE; //@ptrToInt(&scratch_pad_buffers[i * kernel.PHYSICAL_PAGE_SIZE]);
             }
 
             device_slots[0] = scratch_pad_buffer_pointer_array_allocation_result.physical_address_start;
-            println_serial("Done!", .{});
+            boot_log_println("Done!", .{});
         } else {
-            println_serial("No scratch pad buffers for xHCI controller!", .{});
+            boot_log_println("No scratch pad buffers for xHCI controller!", .{});
         }
         operational_registers.write_device_context_base_address_array_pointer(
             device_slots_allocation_result.physical_address_start,
@@ -1058,14 +1110,14 @@ pub fn init(
 
         //wait 20ms
         w64.delay_milliseconds(20);
-        println_serial("xHCI controller started!", .{});
+        boot_log_println("xHCI controller started!", .{});
     }
 
     //check if there was an error starting it up
     {
         const status = operational_registers.read_register(OperationalRegisters.USBStatus);
         if (status.host_controller_error) {
-            println_serial("Status: {}", .{status});
+            boot_log_println("Status: {}", .{status});
             return error.ErrorStartingXHCIController;
         }
     }
@@ -1074,7 +1126,12 @@ pub fn init(
     //A usb hub contains ports and other information including the global reset lock
 
     const hash_map_arena = controller_arena.create_arena_from_arena(toolbox.kb(32));
-    var root_hub_usb_ports = @as([*]volatile PortRegisters, @ptrFromInt(bar0 + capability_registers.length + 0x400))[0..hcsparams1.max_ports];
+    const root_hub_usb_ports = bar_to_slice(
+        PortRegisters,
+        bar0,
+        @as(usize, capability_registers.length) + 0x400,
+        hcsparams1.max_ports,
+    );
     var controller = controller_arena.push(Controller);
     controller.* = .{
         .arena = controller_arena,
@@ -1087,6 +1144,8 @@ pub fn init(
         .doorbells = doorbells,
         .command_ring = command_trb_ring,
         .event_ring = event_trb_ring,
+
+        .interrupt_vector = interrupt_vector,
 
         .devices = toolbox.RandomRemovalLinkedList(*Device).init(controller_arena),
     };
@@ -1105,7 +1164,7 @@ pub fn init(
             scratch_arena,
             controller,
         ) catch |e| {
-            println_serial("Error initializing device! {}", .{e});
+            boot_log_println("Error initializing device! {}", .{e});
             continue;
         };
         if (device_opt) |device| {
@@ -1114,6 +1173,28 @@ pub fn init(
     } //end port loop
 
     return controller;
+}
+pub fn send_end_of_interrupt(controller: *Controller) void {
+    controller.interrupter_registers.iman = .{ .ie = true };
+    var status =
+        controller.operational_registers.read_register(OperationalRegisters.USBStatus);
+    status.event_interrupt = true;
+    controller.operational_registers.write_register(status);
+}
+fn bar_to_register(comptime Register: type, bar: pcie.BaseAddressRegisterData, offset: usize) *volatile Register {
+    return @ptrCast(@alignCast(bar[offset .. offset + @sizeOf(Register)].ptr));
+}
+fn bar_to_slice(
+    comptime ChildType: type,
+    bar: pcie.BaseAddressRegisterData,
+    offset: usize,
+    len: usize,
+) []volatile ChildType {
+    const slice = @as(
+        [*]volatile ChildType,
+        @ptrCast(@alignCast(bar[offset .. offset + @sizeOf(ChildType) * len].ptr)),
+    )[0..len];
+    return slice;
 }
 fn init_device(
     port_registers: *volatile PortRegisters,
@@ -1144,7 +1225,7 @@ fn init_device(
             portsc = port_registers.read_register(PortRegisters.StatusAndControlRegister);
         }
         if (!portsc.current_connect_status) {
-            println_serial("No device on port {}", .{port_number});
+            boot_log_println("No device on port {}", .{port_number});
             return null;
         }
     }
@@ -1169,7 +1250,7 @@ fn init_device(
             port_registers.write_register(portsc);
         },
         else => {
-            println_serial("Unexpected state for USB device!", .{});
+            boot_log_println("Unexpected state for USB device!", .{});
 
             //TODO report error and give up on port
             return error.UnexpectedStateForUSBDevice;
@@ -1183,7 +1264,7 @@ fn init_device(
         while (i < 20) : (i += 1) {
             if (portsc.port_enabled_disabled) {
                 //reset done!
-                println_serial("USB device deteced on port {}! Port Speed: {}", .{ port_number, portsc.port_speed });
+                boot_log_println("USB device deteced on port {}! Port Speed: {}", .{ port_number, portsc.port_speed });
 
                 reset_success = true;
                 break;
@@ -1198,7 +1279,7 @@ fn init_device(
         }
 
         if (!reset_success) {
-            println_serial("Failed to reset USB port", .{});
+            boot_log_println("Failed to reset USB port", .{});
             //TODO report error and give up on port
             return error.TimedOutWaitingUSBPortToReset;
         }
@@ -1217,11 +1298,11 @@ fn init_device(
             //TODO get slot type and OR into control
             .control = @as(u32, @intFromEnum(TransferRequestBlock.Type.EnableSlotCommand)) << 10,
         }, controller) catch |e| {
-            println_serial("Error enabling slot: {}", .{e});
+            boot_log_println("Error enabling slot: {}", .{e});
             return e;
         };
         if (command_response.number_of_bytes_not_transferred != 0) {
-            println_serial("Error enabling slot, due to short packet", .{});
+            boot_log_println("Error enabling slot, due to short packet", .{});
             return error.ShortPacketError;
         }
 
@@ -1264,7 +1345,7 @@ fn init_device(
         };
         //TODO verify no error from submit command.  verify output context is addressed
         _ = submit_command(command, controller) catch |e| {
-            println_serial("Error setting input context: {}", .{e});
+            boot_log_println("Error setting input context: {}", .{e});
             return e;
         };
     }
@@ -1296,7 +1377,7 @@ fn init_device(
             device_slot_data_structures.endpoint_0_transfer_ring,
             controller,
         ) catch |e| {
-            println_serial("Error getting device descriptor: {}", .{e});
+            boot_log_println("Error getting device descriptor: {}", .{e});
             return e;
         };
 
@@ -1323,14 +1404,14 @@ fn init_device(
                     .control = @as(u32, slot_id) << 24 | @as(u32, @intFromEnum(TransferRequestBlock.Type.EvaluateContextCommand)) << 10,
                 };
                 _ = submit_command(command, controller) catch |e| {
-                    println_serial("Error setting max packet on input context: {}", .{e});
+                    boot_log_println("Error setting max packet on input context: {}", .{e});
                     return e;
                 };
 
                 const output_device_context = device_slot_data_structures.output_device_context;
                 const output_control_endpoint_context = get_endpoint_context_from_output_device_context(1, output_device_context);
 
-                println_serial("old packet size: {}, new packet size: {}", .{ old_max_packet, output_control_endpoint_context.max_packet_size });
+                boot_log_println("old packet size: {}, new packet size: {}", .{ old_max_packet, output_control_endpoint_context.max_packet_size });
             }
         }
     }
@@ -1344,7 +1425,7 @@ fn init_device(
         device_slot_data_structures.endpoint_0_transfer_ring,
         controller,
     ) catch |e| {
-        println_serial("Error getting device descriptor: {}", .{e});
+        boot_log_println("Error getting device descriptor: {}", .{e});
         return e;
     };
 
@@ -1405,7 +1486,7 @@ fn init_device(
             device_slot_data_structures.endpoint_0_transfer_ring,
             controller,
         ) catch |e| {
-            println_serial("Error getting config descriptor: {}", .{e});
+            boot_log_println("Error getting config descriptor: {}", .{e});
             return e;
         };
         const configuration_and_interface_descriptor_result = alloc_slice(
@@ -1426,12 +1507,12 @@ fn init_device(
             device_slot_data_structures.endpoint_0_transfer_ring,
             controller,
         ) catch |e| {
-            println_serial("Error getting full config descriptor: {}", .{e});
+            boot_log_println("Error getting full config descriptor: {}", .{e});
             return e;
         };
         //TODO set configuration for endpoint
 
-        println_serial("Device {?s} (Serial Number: {?s}) by {?s} has {} interfaces and {} configs", .{ product_string, serial_number_string, manufacturer_string, configuration_descriptor.num_interfaces, device_descriptor.num_configurations });
+        boot_log_println("Device {?s} (Serial Number: {?s}) by {?s} has {} interfaces and {} configs", .{ product_string, serial_number_string, manufacturer_string, configuration_descriptor.num_interfaces, device_descriptor.num_configurations });
 
         //TODO store configuration descriptors in a list and retrieve them with a generic function that takes in a descriptor struct type?
         if (configuration_descriptor.num_interfaces <= 0) {
@@ -1446,12 +1527,12 @@ fn init_device(
         var current_interface: *Interface = undefined;
         var endpoints: []Endpoint = undefined;
         var current_endpoint: *Endpoint = undefined;
-        var after_first_interface = false;
+        const after_first_interface = false;
         while (i < configuration_and_interface_descriptor.len) {
             const length = configuration_and_interface_descriptor[i];
             const descriptor_type = configuration_and_interface_descriptor[i + 1];
             if (length == 0) {
-                println_serial("Zero length descriptor, aborting enumerating this device...", .{});
+                boot_log_println("Zero length descriptor, aborting enumerating this device...", .{});
                 break;
             }
             defer i += length;
@@ -1465,7 +1546,7 @@ fn init_device(
                         *USBInterfaceDescriptor,
                         @ptrCast(configuration_and_interface_descriptor.ptr + i),
                     );
-                    println_serial("    {} interface {}, setting {} with {} endpoints", .{ interface_descriptor.interface_class, interface_descriptor.interface_number, interface_descriptor.alternate_setting, interface_descriptor.num_endpoints });
+                    boot_log_println("    {} interface {}, setting {} with {} endpoints", .{ interface_descriptor.interface_class, interface_descriptor.interface_number, interface_descriptor.alternate_setting, interface_descriptor.num_endpoints });
 
                     //TODO
                     const class_data: Interface.ClassData = switch (interface_descriptor.interface_class) {
@@ -1567,7 +1648,7 @@ fn init_device(
                         var endpoint_transfer_ring: *TransferRing = undefined;
                         var endpoint_transfer_ring_physical_address: u64 = 0;
                         {
-                            var transfer_trb_ring_allocation_result = alloc_object_aligned(
+                            const transfer_trb_ring_allocation_result = alloc_object_aligned(
                                 TransferRing,
                                 w64.MMIO_PAGE_SIZE,
                                 device_arena,
@@ -1647,20 +1728,20 @@ fn init_device(
             command,
             controller,
         ) catch |e| {
-            println_serial("Error running Configure Endpoint Command: {}", .{e});
+            boot_log_println("Error running Configure Endpoint Command: {}", .{e});
             return e;
         };
-        println_serial("Successfully ran Configure Endpoint Command!", .{});
+        boot_log_println("Successfully ran Configure Endpoint Command!", .{});
 
         set_configuration_on_endpoint0(
             configuration_descriptor.configuration_value,
             device_slot_data_structures.endpoint_0_transfer_ring,
             controller,
         ) catch |e| {
-            println_serial("Error running SET_CONFIGURATION: {}", .{e});
+            boot_log_println("Error running SET_CONFIGURATION: {}", .{e});
             return e;
         };
-        println_serial("Successfully ran SET_CONFIGURATION!", .{});
+        boot_log_println("Successfully ran SET_CONFIGURATION!", .{});
 
         //TODO send SET_FEATURE for remote wake up and others if supported
 
@@ -1706,7 +1787,7 @@ fn get_string_descriptor(
         endpoint_0_transfer_ring,
         controller,
     ) catch |e| {
-        println_serial("Failed to get string descriptor header: {}", .{e});
+        boot_log_println("Failed to get string descriptor header: {}", .{e});
     };
     const string_descriptor_result = alloc_slice(
         u8,
@@ -1727,7 +1808,7 @@ fn get_string_descriptor(
         endpoint_0_transfer_ring,
         controller,
     ) catch |e| {
-        println_serial("Failed to get string descriptor: {}", .{e});
+        boot_log_println("Failed to get string descriptor: {}", .{e});
     };
     return string_descriptor[@sizeOf(USBDescriptorHeader)..];
 }
@@ -1924,7 +2005,7 @@ pub fn send_setup_command_endpoint0(
         .reserved4 = 0,
     };
     //TODO factor into function called queue trb
-    var transfer_trb_phyiscal_address: u64 = endpoint_0_transfer_ring.trb_ring.physical_address_of_current_index();
+    const transfer_trb_phyiscal_address: u64 = endpoint_0_transfer_ring.trb_ring.physical_address_of_current_index();
     {
         const trb_to_store = @as(TransferRequestBlock, @bitCast(status_stage_trb));
         var trb = &endpoint_0_transfer_ring.trb_ring.ring[endpoint_0_transfer_ring.trb_ring.index];
@@ -1992,55 +2073,59 @@ pub fn poll_controller(controller: *Controller) bool {
     //const max_retries = 50;
     //var i: usize = 0;
     //while (i < max_retries) : (i += 1) {
-    const trb = event_trb_ring.ring.ring[event_trb_ring.ring.index];
 
-    if (trb.read_cycle_bit() != event_trb_ring.ring.cs) {
-        return false;
-    }
-    defer {
-        event_trb_ring.erdp.* = (event_trb_ring.event_trb_ring_physical_address +
-            (event_trb_ring.ring.index * @sizeOf(TransferRequestBlock)));
+    var did_transfer_event_occur = false;
+    while (true) {
+        const trb = event_trb_ring.ring.ring[event_trb_ring.ring.index];
+        if (trb.read_cycle_bit() != event_trb_ring.ring.cs) {
+            break;
+        }
+        switch (trb.read_trb_type()) {
+            .CommandCompletionEvent,
+            .TransferEvent,
+            => {
+                var err_opt: ?anyerror = null;
+                if (trb.read_completion_code() != 1) {
+                    const err = completion_code_to_error(trb.read_completion_code());
+                    if (err != error.ShortPacketError) {
+                        err_opt = err;
+                    }
+                }
+                const ret = PollEventRingResult{
+                    .trb = trb,
+                    .number_of_bytes_not_transferred = trb.read_number_of_bytes_not_transferred(),
+                    .err = err_opt,
+                };
+                toolbox.assert(
+                    event_response_map.get(trb.data_pointer) == null,
+                    "Event ring response should not be full",
+                    .{},
+                );
+                event_response_map.put(trb.data_pointer, ret);
+                did_transfer_event_occur = true;
+            },
+            .PortStatusChangeEvent => {
+                //TODO
+            },
+            else => {
+                boot_log_println("Unhandled USB event: {} -- {}", .{ trb.read_trb_type(), trb });
+            },
+        }
+
         event_trb_ring.ring.index += 1;
         if (event_trb_ring.ring.index >= event_trb_ring.ring.ring.len) {
             event_trb_ring.ring.cs ^= 1;
             event_trb_ring.ring.index = 0;
         }
-        @fence(.SeqCst);
     }
-
-    switch (trb.read_trb_type()) {
-        .CommandCompletionEvent,
-        .TransferEvent,
-        => {
-            var err_opt: ?anyerror = null;
-            if (trb.read_completion_code() != 1) {
-                const err = completion_code_to_error(trb.read_completion_code());
-                if (err != error.ShortPacketError) {
-                    err_opt = err;
-                }
-            }
-            const ret = PollEventRingResult{
-                .trb = trb,
-                .number_of_bytes_not_transferred = trb.read_number_of_bytes_not_transferred(),
-                .err = err_opt,
-            };
-            toolbox.assert(
-                event_response_map.get(trb.data_pointer) == null,
-                "Event ring response should not be full",
-                .{},
-            );
-            event_response_map.put(trb.data_pointer, ret);
-            return true;
-        },
-        .PortStatusChangeEvent => {
-            //TODO
-        },
-        else => {
-            println_serial("Unhandled USB event: {} -- {}", .{ trb.read_trb_type(), trb });
-        },
-    }
-
-    return false;
+    const new_erdp = EventRingDequeuePointer{
+        .erdp = @intCast((event_trb_ring.event_trb_ring_physical_address +
+            (event_trb_ring.ring.index * @sizeOf(TransferRequestBlock))) >> 4),
+        .ehb = 1,
+    };
+    event_trb_ring.erdp.* = new_erdp;
+    @fence(.SeqCst);
+    return did_transfer_event_occur;
 }
 
 fn initialize_device_slot_data_structures(
@@ -2095,7 +2180,7 @@ fn initialize_device_slot_data_structures(
     var endpoint_0_transfer_ring: *TransferRing = undefined;
     var endpoint_0_transfer_ring_physical_address: u64 = 0;
     {
-        var transfer_trb_ring_allocation_result = alloc_object_aligned(
+        const transfer_trb_ring_allocation_result = alloc_object_aligned(
             TransferRing,
             w64.MMIO_PAGE_SIZE,
             device_arena,
@@ -2148,7 +2233,7 @@ fn initialize_device_slot_data_structures(
     control_endpoint_context.max_esit_payload_lo = 0;
     //6. Allocate the Output Device Context data structure (6.2.1) and initialize it to ‘0’.
 
-    var output_device_context_allocation_result = alloc_slice_aligned(
+    const output_device_context_allocation_result = alloc_slice_aligned(
         u32,
         context_size_in_words * 32,
         w64.MMIO_PAGE_SIZE,
@@ -2179,7 +2264,7 @@ fn submit_command(
 ) !PollEventRingResult {
     const command_trb_ring = controller.command_ring;
     //write command block to the command ring
-    var transfer_trb_phyiscal_address: u64 = command_trb_ring.ring.physical_address_of_current_index();
+    const transfer_trb_phyiscal_address: u64 = command_trb_ring.ring.physical_address_of_current_index();
     {
         var trb = &command_trb_ring.ring.ring[command_trb_ring.ring.index];
         trb.* = command;

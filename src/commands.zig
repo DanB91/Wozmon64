@@ -88,7 +88,7 @@ pub fn parse_command(command_buffer: []const u8, arena: *toolbox.Arena) ParseRes
     //tokenize
     {
         while (i < command_buffer.len) {
-            var char = command_buffer[i];
+            const char = command_buffer[i];
 
             if (is_hex_digit(char)) {
                 var number: u64 = 0;
@@ -160,7 +160,7 @@ pub fn parse_command(command_buffer: []const u8, arena: *toolbox.Arena) ParseRes
 
     //parse
     {
-        var it = tokens.iterator();
+        const it = tokens.iterator();
         var parser = ParseState{ .iterator = it };
         if (parser.accept(.Start) == null) {
             unreachable;

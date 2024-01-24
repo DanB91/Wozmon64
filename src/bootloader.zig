@@ -8,7 +8,9 @@ const w64 = @import("wozmon64_kernel.zig");
 const amd64 = @import("amd64.zig");
 const console = @import("bootloader_console.zig");
 
-const KERNEL_ELF = @embedFile("../zig-out/bin/kernel.elf");
+pub const THIS_PLATFORM = toolbox.Platform.UEFI;
+
+const KERNEL_ELF = @embedFile("kernel.elf");
 const UEFI_PAGE_SIZE = toolbox.kb(4);
 
 const KERNEL_STACK_BOTTOM_ADDRESS = 0x1_0000_0000_0000_0000 - w64.MEMORY_PAGE_SIZE;
@@ -87,7 +89,7 @@ pub fn main() noreturn {
     //get image load address
     {
         var loaded_image_protocol: *ZSLoadedImageProtocol = undefined;
-        var status = bs.handleProtocol(std.os.uefi.handle, &ZSLoadedImageProtocol.guid, @ptrCast(&loaded_image_protocol));
+        const status = bs.handleProtocol(std.os.uefi.handle, &ZSLoadedImageProtocol.guid, @ptrCast(&loaded_image_protocol));
         if (status != ZSUEFIStatus.Success) {
             fatal("Cannot init timing system! Error locating Loaded Image Protocol: {}", .{status});
         }
@@ -98,7 +100,7 @@ pub fn main() noreturn {
 
     var gop: *ZSGraphicsOutputProtocol = undefined;
     var found_valid_resolution = false;
-    var gop_mode: ZSGraphicsOutputProtocolMode = b: {
+    const gop_mode: ZSGraphicsOutputProtocolMode = b: {
         var status = bs.locateProtocol(&ZSGraphicsOutputProtocol.guid, null, @ptrCast(&gop));
         if (status != ZSUEFIStatus.Success) {
             fatal("Cannot init graphics system! Error locating GOP protocol: {}", .{status});
@@ -153,7 +155,7 @@ pub fn main() noreturn {
         break :b gop.mode.*;
     };
 
-    var rsdp = b: {
+    const rsdp = b: {
         for (0..system_table.number_of_table_entries) |i| {
             if (system_table.configuration_table[i].vendor_guid.eql(std.os.uefi.tables.ConfigurationTable.acpi_20_table_guid)) {
                 const tmp_rsdp: *amd64.ACPI2RSDP = @ptrCast(@alignCast(
@@ -199,7 +201,7 @@ pub fn main() noreturn {
         var mmap_size: usize = @sizeOf(@TypeOf(mmap_store));
         var descriptor_size: usize = 0;
         var descriptor_version: u32 = 0;
-        var status = bs.getMemoryMap(&mmap_size, @ptrCast(&mmap_store), &map_key, &descriptor_size, &descriptor_version);
+        const status = bs.getMemoryMap(&mmap_size, @ptrCast(&mmap_store), &map_key, &descriptor_size, &descriptor_version);
         if (status != ZSUEFIStatus.Success) {
             fatal("Failed to get memory map! Error: {}", .{status});
         }
@@ -548,6 +550,7 @@ pub fn main() noreturn {
         .bootloader_processor_contexts = physical_to_virtual_pointer(bootloader_processor_contexts, mapped_memory.items()),
         .tsc_mhz = tsc_mhz,
         .kernel_elf_bytes = physical_to_virtual_pointer(kernel_elf_bytes, mapped_memory.items()),
+        .stack_bottom_address = KERNEL_STACK_BOTTOM_ADDRESS,
     };
     kernel_start_context.screen.back_buffer = physical_to_virtual_pointer(
         kernel_start_context.screen.back_buffer,
@@ -580,7 +583,7 @@ pub fn main() noreturn {
     );
     {
         //Set up PAT for write combining
-        var pat: amd64.PageAttributeTable = .{
+        const pat: amd64.PageAttributeTable = .{
             .{ .cache_policy = .Writeback }, //0b000
             .{ .cache_policy = .WriteThrough }, //0b001
             .{ .cache_policy = .UncachableMinus }, //0b010
@@ -607,6 +610,11 @@ fn start_kernel(
     entry_point: u64,
 ) noreturn {
     asm volatile (
+        \\mov %%cr4, %%rax 
+        \\# wrfsbase and wrfsbase instructions were only enabled on
+        \\# other cores
+        \\bts $16, %rax #enable FSGSBASE
+        \\mov %%rax, %%cr4 
         \\movq %[cr3_data], %%cr3
         \\movq %[stack_virtual_address], %%rsp
         \\movq %[ksc_addr], %%rdi
@@ -620,7 +628,7 @@ fn start_kernel(
             mapped_memory,
           ))),
           [entry_point] "r" (entry_point),
-        : "rdi", "rsp", "cr3"
+        : "rdi", "rsp", "cr3", "rax"
     );
     toolbox.hang();
 }
@@ -663,7 +671,7 @@ fn bootstrap_application_processors(arena: *toolbox.Arena, number_of_processors:
             const stacks =
                 arena.push_bytes_aligned(w64.MEMORY_PAGE_SIZE * (number_of_processors - 1), w64.MEMORY_PAGE_SIZE);
             for (0..number_of_aps) |proc| {
-                var context = arena.push_clear(w64.BootloaderProcessorContext);
+                const context = arena.push_clear(w64.BootloaderProcessorContext);
                 context.* = .{
                     .is_booted = false,
                     .processor_id = 0,
@@ -686,8 +694,9 @@ fn bootstrap_application_processors(arena: *toolbox.Arena, number_of_processors:
 
         const apic_base_address = amd64.rdmsr(amd64.IA32_APIC_BASE_MSR) &
             toolbox.mask_for_bit_range(12, 63, u64);
+        const apic = amd64.APIC.init(apic_base_address);
         amd64.send_interprocessor_interrupt(
-            apic_base_address,
+            apic,
             .{
                 .vector = 0,
                 .message_type = .Initialize,
@@ -705,7 +714,7 @@ fn bootstrap_application_processors(arena: *toolbox.Arena, number_of_processors:
         toolbox.busy_wait(1000);
 
         amd64.send_interprocessor_interrupt(
-            apic_base_address,
+            apic,
             .{
                 .vector = PROCESSOR_BOOTSTRAP_PROGRAM_ADDRESS >> 12,
                 .message_type = .Startup,
@@ -857,7 +866,7 @@ fn map_virtual_memory(
         const paddr = aligned_physical_address + page_number * page_size;
         const pml4t_index = (vaddr >> 39) & 0b1_1111_1111;
 
-        var pml4e = &pml4_table.entries[pml4t_index];
+        const pml4e = &pml4_table.entries[pml4t_index];
         if (!pml4e.present) {
             const pdp = arena.push_clear(amd64.PageDirectoryPointer);
             const pdp_address = @intFromPtr(pdp);
@@ -884,7 +893,7 @@ fn map_virtual_memory(
             @as(u64, pml4e.pdp_base_address) << 12,
         );
         const pdp_index = (vaddr >> 30) & 0b1_1111_1111;
-        var pdpe = &pdp.entries[pdp_index];
+        const pdpe = &pdp.entries[pdp_index];
         if (!pdpe.present) {
             //NOTE: it doesn't matter if it's PageDirectory2MB or PageDirectory4KB
             //      since they are the same size and we are not accessing them here
@@ -917,7 +926,7 @@ fn map_virtual_memory(
                         @as(u64, pdpe.pd_base_address) << 12,
                     ),
                 );
-                var pde = &pd.entries[pd_index];
+                const pde = &pd.entries[pd_index];
                 if (!pde.present) {
                     pde.* = .{
                         .present = true,
@@ -957,7 +966,7 @@ fn map_virtual_memory(
                         @as(u64, pdpe.pd_base_address) << 12,
                     ),
                 );
-                var pde = &pd.entries[pd_index];
+                const pde = &pd.entries[pd_index];
                 if (!pde.present) {
                     pde.* = .{
                         .present = true,
@@ -997,7 +1006,7 @@ fn map_virtual_memory(
                         @as(u64, pdpe.pd_base_address) << 12,
                     ),
                 );
-                var pde = &pd.entries[pd_index];
+                const pde = &pd.entries[pd_index];
                 if (!pde.present) {
                     const pt = arena.push_clear(amd64.PageTable);
 
@@ -1033,7 +1042,7 @@ fn map_virtual_memory(
                     ),
                 );
                 const pt_index = (vaddr >> 12) & 0b1_1111_1111;
-                var pte = &pt.entries[pt_index];
+                const pte = &pt.entries[pt_index];
                 if (!pte.present) {
                     pte.* = .{
                         .present = true,
@@ -1080,7 +1089,7 @@ fn parse_kernel_elf(arena: *toolbox.Arena) !KernelParseResult {
                 const is_executable = program_header.p_flags & std.elf.PF_X != 0;
                 const is_writable = program_header.p_flags & std.elf.PF_W != 0;
                 const data_to_copy = KERNEL_ELF[program_header.p_offset .. program_header.p_offset + program_header.p_filesz];
-                var data = arena.push_bytes_aligned(data_to_copy.len, w64.MEMORY_PAGE_SIZE);
+                const data = arena.push_bytes_aligned(data_to_copy.len, w64.MEMORY_PAGE_SIZE);
                 @memcpy(data, data_to_copy);
                 const page_table_setup_data = PageTableData{
                     .destination_virtual_address = program_header.p_vaddr,
@@ -1436,7 +1445,7 @@ export fn core_entry(
                 \\ud2 #this instruction is for searchability in the disassembly
                 :
                 : [cr3_data] "r" (entry_data.cr3),
-                  [stack_virtual_address] "r" (entry_data.rsp),
+                  [stack_virtual_address] "r" (entry_data.stack_bottom_address),
                   [ksc_addr] "r" (@intFromPtr(entry_data.start_context_data)),
                   [entry_point] "r" (@intFromPtr(entry_data.entry)),
                 : "rdi", "rsp", "cr3"

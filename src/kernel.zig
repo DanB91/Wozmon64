@@ -13,8 +13,9 @@ const usb_hid = @import("drivers/usb_hid.zig");
 const eth_intel = @import("drivers/ethernet_intel_82574L.zig");
 const commands = @import("commands.zig");
 const programs = @import("programs.zig");
+const boot_log = @import("bootloader_console.zig");
 
-const println_serial = w64.println_serial;
+pub const boot_log_println = boot_log.println;
 
 pub const THIS_PLATFORM = toolbox.Platform.Wozmon64;
 pub const ENABLE_PROFILER = true;
@@ -32,7 +33,6 @@ const KernelState = struct {
     root_xsdt: *const amd64.XSDT,
     application_processor_contexts: []*w64.ApplicationProcessorKernelContext,
 
-    apic_address: u64,
     usb_xhci_controllers: toolbox.RandomRemovalLinkedList(*usb_xhci.Controller),
     key_events: w64.KeyEvents,
     are_characters_shifted: bool,
@@ -87,6 +87,7 @@ const StackUnwinder = struct {
 };
 
 pub fn panic(msg: []const u8, error_return_trace: ?*std.builtin.StackTrace, ret_addr: ?usize) noreturn {
+    asm volatile ("cli");
     //not set
     _ = ret_addr;
     _ = error_return_trace;
@@ -95,7 +96,9 @@ pub fn panic(msg: []const u8, error_return_trace: ?*std.builtin.StackTrace, ret_
     var it = StackUnwinder.init();
     const debug_symbols = &g_state.debug_symbols;
     const global_allocator = g_state.global_arena.zstd_allocator;
-    while (it.next()) |address| {
+    while (it.next()) |return_address| {
+        const CALL_INSTRUCTION_SIZE = 5;
+        const address = return_address - CALL_INSTRUCTION_SIZE;
         const compile_unit = debug_symbols.findCompileUnit(address) catch |e| {
             echo_line("At {X} CompileUnit error: {}", .{ address, e });
             continue;
@@ -103,7 +106,7 @@ pub fn panic(msg: []const u8, error_return_trace: ?*std.builtin.StackTrace, ret_
         const line_info = debug_symbols.getLineNumberInfo(
             global_allocator,
             compile_unit.*,
-            address - 1,
+            address,
         ) catch |e| {
             echo_line("At {X} Line Info Error: {}", .{ address, e });
             continue;
@@ -124,10 +127,20 @@ var g_state: KernelState = undefined;
 
 export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.C) noreturn {
     @setAlignStack(256);
+    //disable interrupts
+    asm volatile ("cli");
+    toolbox.amd64_ticks_to_microseconds = @intCast(kernel_start_context.tsc_mhz);
     {
         const vtable: *std.mem.Allocator.VTable =
             @ptrFromInt(@intFromPtr(kernel_start_context.global_arena.zstd_allocator.vtable));
         vtable.* = toolbox.Arena.ZSTD_VTABLE;
+    }
+    {
+        //set up boot log
+
+        @memset(kernel_start_context.screen.back_buffer, .{ .data = 0 });
+        boot_log.init_graphics_console(kernel_start_context.screen);
+        boot_log.println("Booting Wozmon64 kernel...", .{});
     }
     {
         const frame_arena =
@@ -146,7 +159,6 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
             .root_xsdt = kernel_start_context.root_xsdt,
             .application_processor_contexts = undefined,
 
-            .apic_address = 0,
             .key_events = w64.KeyEvents.init(kernel_start_context.global_arena),
             .usb_xhci_controllers = toolbox.RandomRemovalLinkedList(*usb_xhci.Controller).init(kernel_start_context.global_arena),
             .are_characters_shifted = false,
@@ -159,7 +171,7 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
                 kernel_start_context.screen.width_in_runes * kernel_start_context.screen.height_in_runes,
             ),
             .opened_address = 0,
-            .rune_buffer = kernel_start_context.global_arena.push_slice(
+            .rune_buffer = kernel_start_context.global_arena.push_slice_clear(
                 toolbox.Rune,
                 kernel_start_context.screen.height_in_runes * kernel_start_context.screen.width,
             ),
@@ -180,7 +192,7 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
             kernel_start_context.kernel_elf_bytes,
             kernel_start_context.global_arena,
         ) catch |e| {
-            println_serial("failed to parse debug symbols: {}", .{e});
+            boot_log_println("failed to parse debug symbols: {}", .{e});
             toolbox.hang();
         };
         g_state.debug_symbols = debug_symbols;
@@ -197,9 +209,6 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
             kernel_start_context.free_conventional_memory,
             mapped_memory,
         );
-        //TODO: remove
-        g_state.frame_arena = toolbox.Arena.init(w64.KERNEL_FRAME_ARENA_SIZE);
-        g_state.scratch_arena = toolbox.Arena.init(w64.KERNEL_SCRATCH_ARENA_SIZE);
     }
     profiler.init(g_state.global_arena);
     //set up GDT
@@ -208,12 +217,41 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
     //set up IDT
     set_up_idt(g_state.global_arena);
 
-    //map APIC
+    //map APIC and set up main core context
+    const apic_base_address = kernel_memory.map_mmio_physical_address(
+        amd64.rdmsr(amd64.IA32_APIC_BASE_MSR) &
+            toolbox.mask_for_bit_range(12, 63, u64),
+        1,
+    );
+    const apic = amd64.APIC.init(apic_base_address);
+
+    //set up main core processor context and thread local storage
     {
-        g_state.apic_address = kernel_memory.map_mmio_physical_address(
-            amd64.rdmsr(amd64.IA32_APIC_BASE_MSR) &
-                toolbox.mask_for_bit_range(12, 63, u64),
-            1,
+        const context = g_state.global_arena.push(w64.ApplicationProcessorKernelContext);
+        const thread_local_storage = g_state.global_arena.push_slice_clear_aligned(
+            u8,
+            w64.MEMORY_PAGE_SIZE,
+            w64.MEMORY_PAGE_SIZE,
+        );
+        context.* = .{
+            .processor_id = amd64.rdmsr(amd64.IA32_TSC_AUX_MSR),
+            .apic = apic,
+            .fsbase = @intFromPtr(thread_local_storage.ptr),
+            .gsbase = @intFromPtr(context),
+
+            //the following fields are not currently used by the main processor
+            .stack_bottom_address = kernel_start_context.stack_bottom_address,
+            .cr3 = asm volatile ("mov %%cr3, %[cr3]"
+                : [cr3] "=r" (-> u64),
+            ),
+        };
+        asm volatile (
+            \\wrfsbase %[fsbase]
+            \\wrgsbase %[gsbase]
+            :
+            : [fsbase] "r" (context.fsbase),
+              [gsbase] "r" (context.gsbase),
+            : "rax"
         );
     }
     //bring processors in to kernel space
@@ -234,9 +272,9 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
                 w64.MEMORY_PAGE_SIZE,
                 w64.MEMORY_PAGE_SIZE,
             );
-            const ap_kernel_context = g_state.global_arena.push_clear_aligned(
+            //TODO: should this be page aligned?
+            const ap_kernel_context = g_state.global_arena.push_clear(
                 w64.ApplicationProcessorKernelContext,
-                w64.MEMORY_PAGE_SIZE,
             );
             const rsp = @intFromPtr(stack.ptr) + stack.len;
             const cr3: u64 =
@@ -245,7 +283,11 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
             );
             ap_kernel_context.* = .{
                 .cr3 = cr3,
-                .rsp = rsp,
+                .stack_bottom_address = rsp,
+                //All cores _should_ have the same physical address for their LAPIC.
+                //Since they all share the same CR3, they should have the same virtual address
+                //(I am hoping this doesn't bite me later...)
+                .apic = apic,
                 .fsbase = @intFromPtr(thread_local_storage.ptr),
                 .gsbase = @intFromPtr(ap_kernel_context),
                 .processor_id = context.processor_id,
@@ -258,7 +300,7 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
                 .start_context_data = context,
                 .entry = core_entry,
                 .cr3 = context.cr3,
-                .rsp = context.rsp,
+                .stack_bottom_address = context.stack_bottom_address,
             });
         }
     }
@@ -269,22 +311,14 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
             kernel_start_context.root_xsdt,
             g_state.global_arena,
         );
-        for (pcie_devices) |*dev| {
-            switch (dev.header) {
-                .EndPointDevice => |end_point_device_header| {
+        for (pcie_devices) |dev| {
+            switch (dev.header_type) {
+                .EndPointDevice => {
+                    const end_point_device_header = dev.end_point_device_header();
                     if (end_point_device_header.class_code == pcie.MASS_STORAGE_CLASS_CODE and
                         end_point_device_header.subclass_code == pcie.NVME_SUBCLASS_CODE)
                     {
-                        const physical_bar0 = end_point_device_header.effective_bar0();
-                        println_serial("physical address: {X}", .{physical_bar0});
-                        const nvme_bar0 = kernel_memory.physical_to_virtual(physical_bar0) catch b: {
-                            break :b kernel_memory.map_mmio_physical_address(
-                                physical_bar0,
-                                1,
-                            );
-                        };
-
-                        println_serial("Found NVMe drive! Virtual BAR0: {X}, Physical BAR0: {X}", .{ nvme_bar0, physical_bar0 });
+                        boot_log_println("Found NVMe drive! ", .{});
 
                         //TODO:
                         // const nvme_device = nvme.init(dev, nvme_bar0) catch |e| {
@@ -331,6 +365,7 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
                                                     g_state.scratch_arena,
                                                 ) catch |e| {
                                                     //TODO: remove
+                                                    // Required for my desktop keyboard
                                                     switch (e) {
                                                         error.HIDDeviceDoesNotHaveAnInterruptEndpoint, error.ReportIDsNotYetSupported => {},
                                                         else => {
@@ -345,7 +380,7 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
                                 }
                             },
                             else => {
-                                println_serial("USB controller: {}", .{end_point_device_header});
+                                boot_log_println("USB controller: {}", .{end_point_device_header});
                             },
                         }
                     } else if (end_point_device_header.class_code == pcie.NETWORK_CONTROLLER_CLASS_CODE and
@@ -355,22 +390,19 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
                             eth_intel.init(dev);
                         }
                     } else {
-                        println_serial("Unsupported PCIe device.  Class: {X}, SubClass: {X}", .{
+                        boot_log_println("Unsupported PCIe device.  Class: {X}, SubClass: {X}", .{
                             end_point_device_header.class_code,
                             end_point_device_header.subclass_code,
                         });
                     }
                 },
-                .BridgeDevice => |_| {
+                .BridgeDevice => {
                     //TODO
-                },
-                else => {
-                    //TODO error handle
                 },
             }
         }
 
-        println_serial("PCIE devices len: {}", .{pcie_devices.len});
+        boot_log_println("PCIE devices len: {}", .{pcie_devices.len});
     }
 
     //populate runtime constants
@@ -379,6 +411,11 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
         g_state.screen_pixel_height.* = g_state.screen.height;
         g_state.frame_buffer_size.* = g_state.screen.frame_buffer.len;
         g_state.frame_buffer_stride.* = g_state.screen.stride;
+    }
+
+    //disable boot log console
+    {
+        boot_log.disable();
     }
 
     {
@@ -392,6 +429,10 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
     }
 
     echo_line("\\", .{});
+
+    //enable interrupts
+    asm volatile ("sti");
+
     main_loop();
 
     toolbox.hang();
@@ -656,9 +697,10 @@ noinline fn set_up_gdt(arena: *toolbox.Arena) void {
 }
 
 fn set_up_idt(arena: *toolbox.Arena) void {
-    var idt = arena.push_slice_clear(amd64.IDTDescriptor, 256);
+    const IDT_LEN = 256;
+    const idt = arena.push_slice_clear(amd64.IDTDescriptor, IDT_LEN);
     const idt_register = amd64.IDTRegister{
-        .limit = @intCast(idt.len - 1),
+        .limit = @intCast(idt.len * @sizeOf(amd64.IDTDescriptor) - 1),
         .idt = idt.ptr,
     };
     amd64.register_exception_handler(&page_fault_handler, .PageFault, idt);
@@ -671,7 +713,7 @@ fn set_up_idt(arena: *toolbox.Arena) void {
     );
 }
 fn nmi_handler() callconv(.Interrupt) void {
-    const processor_context = get_processor_context();
+    const processor_context = w64.get_processor_context();
 
     processor_context.job.set(null);
     asm volatile (
@@ -687,7 +729,7 @@ fn nmi_handler() callconv(.Interrupt) void {
         :
         :
         //TODO no idea why i have to subtract 8 here.  If I don't I get SSE alignment errors
-          [stack_virtual_address] "r" (processor_context.rsp - 8),
+          [stack_virtual_address] "r" (processor_context.stack_bottom_address - 8),
           [ksc_addr] "r" (@intFromPtr(processor_context)),
           [entry_point] "r" (@intFromPtr(&core_entry)),
         : "rdi"
@@ -799,17 +841,19 @@ comptime {
 extern fn page_fault_handler() void;
 
 export fn page_fault_handler_inner(error_code: u64, unmapped_address: u64) callconv(.C) void {
+    const apic = w64.get_processor_context().apic;
+    boot_log_println("Page fault: ISR {}", .{amd64.get_in_service_interrupt_vector(apic)});
     const to_map = toolbox.align_down(unmapped_address, w64.MEMORY_PAGE_SIZE);
     if (to_map == 0) {
         toolbox.panic("Allocating memory at null page! Address: {X}", .{unmapped_address});
     }
-    println_serial("Allocating page for address: {X}, Error code: {}", .{
+    boot_log_println("Allocating page for address: {X}, Error code: {}", .{
         to_map,
         error_code,
     });
     var it = StackUnwinder.init();
     while (it.next()) |address| {
-        println_serial("At {X}", .{address});
+        boot_log_println("At {X}", .{address});
     }
 
     //TODO: remove
@@ -833,26 +877,26 @@ fn main_loop() void {
     while (true) {
         profiler.start_profiler();
 
-        {
-            profiler.begin("Poll USB controllers");
-            defer profiler.end();
+        // {
+        //     profiler.begin("Poll USB controllers");
+        //     defer profiler.end();
 
-            var it = g_state.usb_xhci_controllers.iterator();
-            while (it.next_value()) |controller| {
-                profiler.begin("Poll XHCI controller");
-                const should_poll_hid = usb_xhci.poll_controller(controller);
-                profiler.end();
+        //     var it = g_state.usb_xhci_controllers.iterator();
+        //     while (it.next_value()) |controller| {
+        //         profiler.begin("Poll XHCI controller");
+        //         const should_poll_hid = usb_xhci.poll_controller(controller);
+        //         profiler.end();
 
-                if (should_poll_hid) {
-                    profiler.begin("Poll USB HID");
-                    usb_hid.poll(
-                        controller,
-                        &g_state.key_events,
-                    );
-                    profiler.end();
-                }
-            }
-        }
+        //         if (should_poll_hid) {
+        //             profiler.begin("Poll USB HID");
+        //             usb_hid.poll(
+        //                 controller,
+        //                 &g_state.key_events,
+        //             );
+        //             profiler.end();
+        //         }
+        //     }
+        // }
         while (g_state.key_events.modifier_key_pressed_events.dequeue()) |scancode| {
             switch (scancode) {
                 .LeftShift, .RightShift => {
@@ -911,9 +955,7 @@ fn draw_profiler() void {
         return;
     }
 
-    const save_point = g_state.scratch_arena.create_save_point();
-    defer g_state.scratch_arena.restore_save_point(save_point);
-    var profiler_it = profiler.line_iterator(g_state.scratch_arena);
+    var profiler_it = profiler.line_iterator();
 
     var rune_y: usize = 0;
     while (profiler_it.next()) |line| {
@@ -953,12 +995,48 @@ fn draw_rune(rune: toolbox.Rune, rune_x: usize, rune_y: usize) void {
     const index = ascii - ' ';
     const font = g_state.screen.font;
     const bitmap = font.character_bitmap(index);
-    for (0..font.height) |y| {
-        const screen_y = (rune_y * font.height) + y;
-        for (0..font.width) |x| {
-            const screen_x = (rune_x * font.kerning) + x;
-            g_state.screen.back_buffer[screen_y * g_state.screen.stride + screen_x] =
-                bitmap[y * font.width + x];
+
+    draw_bitmap(
+        bitmap,
+        0,
+        0,
+        rune_x * font.kerning,
+        rune_y * font.height,
+        font.width,
+        font.height,
+    );
+}
+
+//TODO: support signed coordinates
+fn draw_bitmap(
+    bitmap: []w64.Pixel,
+    sx: usize,
+    sy: usize,
+    dx: usize,
+    dy: usize,
+    width: usize,
+    height: usize,
+) void {
+    var src_cursor_y: usize = sy;
+    var dest_cursor_y: usize = dy;
+    const src_end_y = sy + height;
+    const dest_end_y = dy + height;
+
+    while (src_cursor_y < src_end_y and dest_cursor_y < dest_end_y) : ({
+        src_cursor_y += 1;
+        dest_cursor_y += 1;
+    }) {
+        var src_cursor_x: usize = sx;
+        var dest_cursor_x: usize = dx;
+        const src_end_x = sx + width;
+        const dest_end_x = dx + width;
+        while (src_cursor_x < src_end_x and dest_cursor_x < dest_end_x) : ({
+            src_cursor_x += 1;
+            dest_cursor_x += 1;
+        }) {
+            const src_index = src_cursor_y * width + src_cursor_x;
+            const dest_index = dest_cursor_y * g_state.screen.stride + dest_cursor_x;
+            g_state.screen.back_buffer[dest_index] = bitmap[src_index];
         }
     }
 }
@@ -1174,15 +1252,15 @@ fn handle_command(command: commands.Command) void {
                     exit_running_program();
                     return;
                 }
-                var it = g_state.usb_xhci_controllers.iterator();
-                while (it.next_value()) |controller| {
-                    if (usb_xhci.poll_controller(controller)) {
-                        usb_hid.poll(
-                            controller,
-                            &g_state.key_events,
-                        );
-                    }
-                }
+                // var it = g_state.usb_xhci_controllers.iterator();
+                // while (it.next_value()) |controller| {
+                //     if (usb_xhci.poll_controller(controller)) {
+                //         usb_hid.poll(
+                //             controller,
+                //             &g_state.key_events,
+                //         );
+                //     }
+                // }
                 while (g_state.key_events.modifier_key_pressed_events.dequeue()) |scancode| {
                     switch (scancode) {
                         .LeftShift, .RightShift => {
@@ -1229,28 +1307,22 @@ fn handle_command(command: commands.Command) void {
 fn print_apic_id_and_core_id() void {
     const core_id = w64.get_core_id();
     const apic_id = @as(*u32, @ptrFromInt(g_state.apic_address + 0x20)).*;
-    println_serial(
+    boot_log_println(
         "Core id {}, APIC ID {X}: fbase tls: {x} context: {x},",
         .{
             core_id,
             apic_id,
             fbase_tls,
-            @as(u64, @intFromPtr(get_processor_context())),
+            @as(u64, @intFromPtr(w64.get_processor_context())),
         },
     );
 }
-fn get_processor_context() *w64.ApplicationProcessorKernelContext {
-    return asm volatile (
-        \\rdgsbase %[ret]
-        : [ret] "=r" (-> *w64.ApplicationProcessorKernelContext),
-    );
-}
 fn exit_running_program() void {
-    println_serial("Escape hit", .{});
+    boot_log_println("Escape hit", .{});
     for (g_state.application_processor_contexts) |context| {
         if (context.job.get()) |_| {
-            println_serial("Sending NMI to {}", .{context.processor_id});
-            const interrupt_command_register_low = amd64.InterruptControlRegisterLow{
+            boot_log_println("Sending NMI to {}", .{context.processor_id});
+            const interrupt_command_register_low = amd64.APICInterruptControlRegisterLow{
                 .vector = 0,
                 .message_type = .NonMaskableInterrupt,
                 .destination_mode = .PhysicalAPICID,
@@ -1259,15 +1331,15 @@ fn exit_running_program() void {
                 .trigger_mode = .EdgeTriggered,
                 .destination_shorthand = .Destination,
             };
-            const interrupt_command_register_high = amd64.InterruptControlRegisterHigh{
+            const interrupt_command_register_high = amd64.APICInterruptControlRegisterHigh{
                 .destination = @intCast(context.processor_id),
             };
-            println_serial("Low command {X}, High command {X}, ", .{
+            boot_log_println("Low command {X}, High command {X}, ", .{
                 @as(u32, @bitCast(interrupt_command_register_low)),
                 @as(u32, @bitCast(interrupt_command_register_high)),
             });
             amd64.send_interprocessor_interrupt(
-                g_state.apic_address,
+                w64.get_processor_context().apic,
                 interrupt_command_register_low,
                 interrupt_command_register_high,
             );
@@ -1340,6 +1412,33 @@ fn handle_parse_result(parse_result: commands.ParseResult, command_buffer: []con
         },
     }
     echo_line("\n\\", .{});
+}
+
+pub fn xhci_interrupt_handler() callconv(.Interrupt) void {
+    // debug_clear_screen_and_hang(123, 12, 23);
+    const apic = w64.get_processor_context().apic;
+    const vector = amd64.get_in_service_interrupt_vector(apic);
+    toolbox.assert(vector != 0, "Interrupt handler called with no interrupt in service", .{});
+    boot_log_println("Vector fired: {}", .{vector});
+
+    var it = g_state.usb_xhci_controllers.iterator();
+    while (it.next()) |controller_ptr| {
+        const controller = controller_ptr.*;
+        if (controller.interrupt_vector != vector) {
+            continue;
+        }
+
+        const should_poll_hid = usb_xhci.poll_controller(controller);
+
+        if (should_poll_hid) {
+            usb_hid.poll(
+                controller,
+                &g_state.key_events,
+            );
+        }
+        usb_xhci.send_end_of_interrupt(controller);
+    }
+    amd64.send_end_of_interrupt(apic);
 }
 
 //good for finding where in the code an issue is happening

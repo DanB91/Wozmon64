@@ -56,7 +56,7 @@ pub const Screen = struct {
             } else if (width == 1280 and height == 720) {
                 break :b 2; //4;
             } else if (width == 800 and height == 1280) {
-                break :b 2; //4;
+                break :b 1; //2;
             } else {
                 //fatal error.  draw red screen
                 for (frame_buffer) |*pixel| {
@@ -91,21 +91,22 @@ pub const BootloaderProcessorContext = struct {
             context: *ApplicationProcessorKernelContext,
         ) callconv(.C) noreturn,
         cr3: u64, //page table address
-        rsp: u64, //initial stack pointer
+        stack_bottom_address: u64, //initial stack pointer
         start_context_data: *ApplicationProcessorKernelContext,
     }),
 };
 
 pub const ApplicationProcessorKernelContext = struct {
     processor_id: u64,
-    rsp: u64, //initial stack pointer
+    stack_bottom_address: u64, //initial stack pointer
     cr3: u64, //page table address
     fsbase: u64, //fs base address
     gsbase: u64, //gs base address
+    apic: amd64.APIC,
     job: w64_user.Atomic(?struct {
         entry: *const fn (user_data: ?*anyopaque) callconv(.C) void,
         user_data: ?*anyopaque,
-    }),
+    }) = .{ .value = null },
 };
 
 pub const KernelStartContext = struct {
@@ -117,6 +118,7 @@ pub const KernelStartContext = struct {
     next_free_virtual_address: u64,
     bootloader_processor_contexts: []*BootloaderProcessorContext,
     tsc_mhz: u64,
+    stack_bottom_address: u64, //initial stack pointer
     kernel_elf_bytes: []const u8,
 };
 
@@ -248,6 +250,12 @@ pub fn delay_milliseconds(n: i64) void {
     while (now().sub(start).milliseconds() < n) {
         std.atomic.spinLoopHint();
     }
+}
+pub fn get_processor_context() *ApplicationProcessorKernelContext {
+    return asm volatile (
+        \\rdgsbase %[ret]
+        : [ret] "=r" (-> *ApplicationProcessorKernelContext),
+    );
 }
 
 comptime {

@@ -8,6 +8,8 @@ const WOZ_AND_JOBS_HEIGHT = WOZ_AND_JOBS.len / (WOZ_AND_JOBS_WIDTH * 3);
 var g_system_api: *const w64.SystemAPI = undefined;
 var arena_bytes = [_]u8{0} ** toolbox.mb(16);
 
+pub const THIS_PLATFORM = toolbox.Platform.Wozmon64;
+
 pub fn panic(msg: []const u8, error_return_trace: ?*std.builtin.StackTrace, ret_addr: ?usize) noreturn {
     _ = ret_addr;
     _ = error_return_trace;
@@ -37,6 +39,7 @@ export fn entry(system_api: *const w64.SystemAPI) linksection(".entry") void {
         //process input
         {
             while (key_events.key_pressed_events.dequeue()) |scancode| {
+                w64.println_serial("Key pressed: {}", .{scancode});
                 switch (scancode) {
                     .UpArrow => vy = -1,
                     .DownArrow => vy = 1,
@@ -46,6 +49,7 @@ export fn entry(system_api: *const w64.SystemAPI) linksection(".entry") void {
                 }
             }
             while (key_events.key_released_events.dequeue()) |scancode| {
+                w64.println_serial("Key released: {}", .{scancode});
                 switch (scancode) {
                     .UpArrow, .DownArrow => vy = 0,
                     .LeftArrow, .RightArrow => vx = 0,

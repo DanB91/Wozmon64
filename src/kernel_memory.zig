@@ -211,7 +211,10 @@ pub fn map_mmio_physical_address(
 
     const arena = g_state.arena;
 
-    g_state.next_free_virtual_address = toolbox.align_up(g_state.next_free_virtual_address, w64.MMIO_PAGE_SIZE);
+    g_state.next_free_virtual_address = toolbox.align_up(
+        g_state.next_free_virtual_address,
+        w64.MMIO_PAGE_SIZE,
+    );
 
     const starting_virtual_address = g_state.next_free_virtual_address;
     for (0..number_of_pages) |i| {
