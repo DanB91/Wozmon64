@@ -23,6 +23,8 @@ pub const ENABLE_PROFILER = true;
 const CURSOR_BLINK_TIME_MS = 500;
 const ENABLE_SERIAL = toolbox.IS_DEBUG;
 
+pub const InterruptHandler = *const fn (vector_number: u64, error_code: u64) callconv(.C) void;
+
 const KernelState = struct {
     cursor_x: usize,
     cursor_y: usize,
@@ -41,6 +43,8 @@ const KernelState = struct {
     global_arena: *toolbox.Arena,
     frame_arena: *toolbox.Arena,
     scratch_arena: *toolbox.Arena,
+
+    interrupt_handler_table: [amd64.IDT_LEN]?InterruptHandler,
 
     //monitor state
     rune_buffer: []toolbox.Rune,
@@ -175,6 +179,8 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
                 toolbox.Rune,
                 kernel_start_context.screen.height_in_runes * kernel_start_context.screen.width,
             ),
+
+            .interrupt_handler_table = [_]?InterruptHandler{null} ** amd64.IDT_LEN,
 
             .global_arena = kernel_start_context.global_arena,
             .frame_arena = frame_arena,
@@ -617,6 +623,13 @@ pub fn echo_fmt(comptime fmt: []const u8, args: anytype) void {
     }
 }
 
+pub fn register_interrupt_handler(interrupt_handler: InterruptHandler, vector: usize) void {
+    g_state.interrupt_handler_table[vector] = interrupt_handler;
+}
+pub fn register_exception_handler(exception_handler: InterruptHandler, exception_code: amd64.ExceptionCode) void {
+    g_state.interrupt_handler_table[@intFromEnum(exception_code)] = exception_handler;
+}
+
 noinline fn set_up_gdt(arena: *toolbox.Arena) void {
     //TODO
     const gdt_array = [3]amd64.GDTDescriptor{
@@ -650,20 +663,6 @@ noinline fn set_up_gdt(arena: *toolbox.Arena) void {
             .is_granular = true,
             .base_addr_bits_24_to_31 = 0,
         },
-        // //FS segment
-        // .{
-        //     .segment_limit_bits_0_to_15 = 0xFFFF,
-        //     .base_addr_bits_0_to_23 = 0,
-        //     .type_bits = @intFromEnum(amd64.GDTDescriptorType.ReadWrite),
-        //     .is_not_system_segment = true,
-        //     .privilege_bits = 0,
-        //     .is_present = true,
-        //     .segment_limit_bits_16_to_19 = 0xF,
-        //     .is_for_long_mode_code = false,
-        //     .is_big = true,
-        //     .is_granular = true,
-        //     .base_addr_bits_24_to_31 = 0,
-        // },
     };
     const gdt = arena.push_slice(amd64.GDTDescriptor, gdt_array.len);
     @memcpy(gdt, gdt_array[0..]);
@@ -697,22 +696,56 @@ noinline fn set_up_gdt(arena: *toolbox.Arena) void {
 }
 
 fn set_up_idt(arena: *toolbox.Arena) void {
-    const IDT_LEN = 256;
-    const idt = arena.push_slice_clear(amd64.IDTDescriptor, IDT_LEN);
+    const idt = arena.push_slice_clear(amd64.IDTDescriptor, amd64.IDT_LEN);
     const idt_register = amd64.IDTRegister{
         .limit = @intCast(idt.len * @sizeOf(amd64.IDTDescriptor) - 1),
         .idt = idt.ptr,
     };
-    amd64.register_exception_handler(&page_fault_handler, .PageFault, idt);
-    amd64.register_exception_handler(&invalid_opcode_handler, .InvalidOpcode, idt);
-    amd64.register_exception_handler(&nmi_handler, .NMI, idt);
+
+    inline for (0..amd64.IDT_LEN) |i| {
+        const handler = make_interrupt_handler(i);
+        const handler_addr = @intFromPtr(handler);
+        idt[i] =
+            .{
+            .offset_bits_0_to_15 = @as(u16, @truncate(handler_addr)),
+            .selector = asm volatile ("mov %%cs, %[ret]"
+                : [ret] "=r" (-> u16),
+                :
+                : "cs"
+            ),
+            .ist = 0,
+            .type_attr = .InterruptGate64Bit,
+            .zeroA = 0,
+            .privilege_bits = 0,
+            .is_present = true,
+            .offset_bits_16_to_31 = @as(u16, @truncate(handler_addr >> 16)),
+            .offset_bits_32_to_63 = @as(u32, @truncate(handler_addr >> 32)),
+            .zeroB = 0,
+        };
+    }
+    register_exception_handler(&page_fault_handler, .PageFault);
+    register_exception_handler(&invalid_opcode_handler, .InvalidOpcode);
+    register_exception_handler(&nmi_handler, .NMI);
+    register_exception_handler(&double_fault_handler, .DoubleFault);
+    register_exception_handler(&general_protection_fault_handler, .GeneralProtectionFault);
+
     asm volatile (
         \\lidt (%[idtr])
         :
         : [idtr] "r" (&idt_register),
     );
 }
-fn nmi_handler() callconv(.Interrupt) void {
+fn double_fault_handler(vector_number: u64, error_code: u64) callconv(.C) void {
+    _ = vector_number;
+    toolbox.panic("Double fault occurred! Error code: {}", .{error_code});
+}
+fn general_protection_fault_handler(vector_number: u64, error_code: u64) callconv(.C) void {
+    _ = vector_number;
+    toolbox.panic("General protection fault occurred! Error code: {}", .{error_code});
+}
+fn nmi_handler(vector_number: u64, error_code: u64) callconv(.C) void {
+    _ = error_code;
+    _ = vector_number;
     const processor_context = w64.get_processor_context();
 
     processor_context.job.set(null);
@@ -735,23 +768,80 @@ fn nmi_handler() callconv(.Interrupt) void {
         : "rdi"
     );
 }
+fn page_fault_handler(vector_number: u64, error_code: u64) callconv(.C) void {
+    _ = vector_number;
+    const unmapped_address = asm volatile ("mov %%cr2, %[unmapped_address]"
+        : [unmapped_address] "=r" (-> u64),
+    );
+    const to_map = toolbox.align_down(unmapped_address, w64.MEMORY_PAGE_SIZE);
+    if (to_map == 0) {
+        toolbox.panic("Allocating memory at null page! Address: {X}", .{unmapped_address});
+    }
+    boot_log_println("Allocating page for address: {X}, Error code: {}", .{
+        to_map,
+        error_code,
+    });
+    var it = StackUnwinder.init();
+    while (it.next()) |address| {
+        boot_log_println("At {X}", .{address});
+    }
 
-fn invalid_opcode_handler() callconv(.Interrupt) void {
+    //TODO: remove
+    const page = kernel_memory.allocate_at_address(to_map, 1);
+    for (page) |*b| {
+        b.* = 0xAA;
+    }
+}
+
+fn invalid_opcode_handler(vector_number: u64, error_code: u64) callconv(.C) void {
+    _ = error_code;
+    _ = vector_number;
     toolbox.panic("Invalid opcode!", .{});
 }
-const ExceptionRegisters = packed struct {
-    error_code: u64,
-    return_rip: u64,
-    return_cs: u64,
-    return_rflags: u64,
-    return_rsp: u64,
-    return_ss: u64,
-};
+export fn interrupt_handler_common_inner(vector_number: u64, error_code: u64) callconv(.C) void {
+    boot_log_println("Vector number: {}, error code: {}", .{ vector_number, error_code });
+    if (g_state.interrupt_handler_table[vector_number]) |interrupt_handler| {
+        interrupt_handler(vector_number, error_code);
+    } else {
+        toolbox.panic("No interrupt handler for vector number {}.  Error code: {}", .{
+            vector_number, error_code,
+        });
+    }
+}
+
+//heavily inspired by https://github.com/FlorenceOS/Florence/blob/aaa5a9e568197ad24780ec9adb421217530d4466/subprojects/flork/src/platform/x86_64/interrupts.zig#L167
+fn make_interrupt_handler(comptime vector_number: comptime_int) *const fn () callconv(.Naked) void {
+    const has_error_code = switch (comptime vector_number) {
+        0x00...0x07 => false,
+        0x08 => true,
+        0x09 => false,
+        0x0A...0x0E => true,
+        0x0F...0x10 => false,
+        0x11 => true,
+        0x12...0x14 => false,
+        0x1E => true,
+        else => false,
+    };
+    const push_fake_error_code_instruction = if (has_error_code)
+        ""
+    else
+        "pushq $0\n";
+    return &struct {
+        fn handler() callconv(.Naked) void {
+            asm volatile (push_fake_error_code_instruction ++
+                    \\pushq %[vector_number]
+                    \\jmp interrupt_handler_common
+                :
+                : [vector_number] "i" (vector_number),
+            );
+        }
+    }.handler;
+}
 
 comptime {
     const SAVE_FRAME_POINTER = if (toolbox.IS_DEBUG)
         \\
-        \\lea 8(%rsp), %rbp
+        \\lea 16(%rsp), %rbp
         \\
     else
         \\
@@ -759,15 +849,16 @@ comptime {
         ;
 
     asm (
-        \\.global page_fault_handler
-        \\.extern page_fault_handler_inner
-        \\page_fault_handler:
+        \\.global interrupt_handler_common
+        \\.extern interrupt_handler_common_inner
+        \\interrupt_handler_common:
         \\
-        \\xchg %rbp, (%rsp) #save previous frame pointer and pop error code
-        \\push %rdi
-        \\mov %rbp, %rdi #rdi now has the error code
+        \\xchg %rbp, 8(%rsp) #save previous frame pointer. rbp now has error code 
+        \\xchg %rdi, (%rsp) #rdi has the vector number
+        \\
+        \\push %rsi
+        \\mov %rbp, %rsi #rsi now has the error code
         ++ SAVE_FRAME_POINTER ++
-            \\push %rsi
             \\push %rax
             \\push %rbx
             \\push %rcx
@@ -798,26 +889,24 @@ comptime {
             \\movdqu %xmm1, 0x10(%rsp)
             \\movdqu %xmm0, 0x0(%rsp)
             \\
-            \\mov %cr2, %rsi
+            \\call interrupt_handler_common_inner
             \\
-            \\call page_fault_handler_inner
-            \\
-            \\movdqu 0(%rsp), %xmm15 
-            \\movdqu 0x10(%rsp), %xmm14
-            \\movdqu 0x20(%rsp), %xmm13
-            \\movdqu 0x30(%rsp), %xmm12
-            \\movdqu 0x40(%rsp), %xmm11
-            \\movdqu 0x50(%rsp), %xmm10
-            \\movdqu 0x60(%rsp), %xmm9 
-            \\movdqu 0x70(%rsp), %xmm8 
-            \\movdqu 0x80(%rsp), %xmm7 
-            \\movdqu 0x90(%rsp), %xmm6 
-            \\movdqu 0xA0(%rsp), %xmm5 
-            \\movdqu 0xB0(%rsp), %xmm4 
-            \\movdqu 0xC0(%rsp), %xmm3 
-            \\movdqu 0xD0(%rsp), %xmm2 
-            \\movdqu 0xE0(%rsp), %xmm1 
-            \\movdqu 0xF0(%rsp), %xmm0 
+            \\movdqu 0(%rsp), %xmm0 
+            \\movdqu 0x10(%rsp), %xmm1
+            \\movdqu 0x20(%rsp), %xmm2
+            \\movdqu 0x30(%rsp), %xmm3
+            \\movdqu 0x40(%rsp), %xmm4
+            \\movdqu 0x50(%rsp), %xmm5
+            \\movdqu 0x60(%rsp), %xmm6 
+            \\movdqu 0x70(%rsp), %xmm7 
+            \\movdqu 0x80(%rsp), %xmm8 
+            \\movdqu 0x90(%rsp), %xmm9 
+            \\movdqu 0xA0(%rsp), %xmm10 
+            \\movdqu 0xB0(%rsp), %xmm11
+            \\movdqu 0xC0(%rsp), %xmm12
+            \\movdqu 0xD0(%rsp), %xmm13
+            \\movdqu 0xE0(%rsp), %xmm14
+            \\movdqu 0xF0(%rsp), %xmm15
             \\add $0x100, %rsp
             \\pop %r15
             \\pop %r14
@@ -836,41 +925,6 @@ comptime {
             \\pop %rbp
             \\iretq
     );
-}
-
-extern fn page_fault_handler() void;
-
-export fn page_fault_handler_inner(error_code: u64, unmapped_address: u64) callconv(.C) void {
-    const apic = w64.get_processor_context().apic;
-    boot_log_println("Page fault: ISR {}", .{amd64.get_in_service_interrupt_vector(apic)});
-    const to_map = toolbox.align_down(unmapped_address, w64.MEMORY_PAGE_SIZE);
-    if (to_map == 0) {
-        toolbox.panic("Allocating memory at null page! Address: {X}", .{unmapped_address});
-    }
-    boot_log_println("Allocating page for address: {X}, Error code: {}", .{
-        to_map,
-        error_code,
-    });
-    var it = StackUnwinder.init();
-    while (it.next()) |address| {
-        boot_log_println("At {X}", .{address});
-    }
-
-    //TODO: remove
-    const page = kernel_memory.allocate_at_address(to_map, 1);
-    // println_serial("Page virtual address: {X}", .{@intFromPtr(page.ptr)});
-    for (page) |*b| {
-        b.* = 0xAA;
-    }
-
-    // //return address should have something like FFFFFFFF80008D70
-    // toolbox.panic(
-    //     "Page fault! Error code: {}, Unmapped address: {X}",
-    //     .{
-    //         error_code,
-    //         unmapped_address,
-    //     },
-    // );
 }
 
 fn main_loop() void {
@@ -1414,7 +1468,7 @@ fn handle_parse_result(parse_result: commands.ParseResult, command_buffer: []con
     echo_line("\n\\", .{});
 }
 
-pub fn xhci_interrupt_handler() callconv(.Interrupt) void {
+pub fn xhci_interrupt_handler(_: u64, _: u64) callconv(.C) void {
     // debug_clear_screen_and_hang(123, 12, 23);
     const apic = w64.get_processor_context().apic;
     const vector = amd64.get_in_service_interrupt_vector(apic);

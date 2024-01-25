@@ -554,6 +554,7 @@ pub fn get_gdt() []volatile GDTDescriptor {
     const gdtr = get_gdt_register();
     return gdtr.gdt[0 .. (gdtr.limit + 1) / @sizeOf(GDTDescriptor)];
 }
+pub const IDT_LEN = 256;
 pub const IDTRegister = extern struct {
     limit: u16 align(1),
     idt: [*]volatile IDTDescriptor align(1),
@@ -623,57 +624,6 @@ pub fn get_idt() []volatile IDTDescriptor {
     return idtr.idt[0 .. (idtr.limit + 1) / @sizeOf(IDTDescriptor)];
 }
 
-pub fn register_exception_handler(
-    comptime handler: anytype,
-    comptime exception: ExceptionCode,
-    idt: []volatile IDTDescriptor,
-) void {
-    const handler_addr = @intFromPtr(handler);
-    idt[@intFromEnum(exception)] = .{
-        .offset_bits_0_to_15 = @as(u16, @truncate(handler_addr)),
-        .selector = asm volatile ("mov %%cs, %[ret]"
-            : [ret] "=r" (-> u16),
-            :
-            : "cs"
-        ),
-        .ist = 0,
-        .type_attr = .TrapGate64Bit,
-        .zeroA = 0,
-        .privilege_bits = 0,
-        .is_present = true,
-        .offset_bits_16_to_31 = @as(u16, @truncate(handler_addr >> 16)),
-        .offset_bits_32_to_63 = @as(u32, @truncate(handler_addr >> 32)),
-        .zeroB = 0,
-    };
-}
-pub fn register_interrupt_handler(
-    comptime handler: anytype,
-    vector: usize,
-    idt: []volatile IDTDescriptor,
-) void {
-    const handler_addr = @intFromPtr(handler);
-    toolbox.assert(
-        vector >= 32,
-        "Interrupt vector should be >=32 as to not interfere with exception handlers. Vector was {}",
-        .{vector},
-    );
-    idt[vector] = .{
-        .offset_bits_0_to_15 = @as(u16, @truncate(handler_addr)),
-        .selector = asm volatile ("mov %%cs, %[ret]"
-            : [ret] "=r" (-> u16),
-            :
-            : "cs"
-        ),
-        .ist = 0,
-        .type_attr = .InterruptGate64Bit,
-        .zeroA = 0,
-        .privilege_bits = 0,
-        .is_present = true,
-        .offset_bits_16_to_31 = @as(u16, @truncate(handler_addr >> 16)),
-        .offset_bits_32_to_63 = @as(u32, @truncate(handler_addr >> 32)),
-        .zeroB = 0,
-    };
-}
 //APIC and register definitions
 pub const APIC = struct {
     data: []volatile u32,
@@ -766,7 +716,7 @@ pub fn send_end_of_interrupt(apic: APIC) void {
 
 //return 0 if no interrupt is in service
 pub fn get_in_service_interrupt_vector(apic: APIC) usize {
-    const start = 0x110 / @sizeOf(u32);
+    const start = 0x100 / @sizeOf(u32);
     const end = 0x170 / @sizeOf(u32);
     var starting_irq: usize = 0;
     var cursor: usize = start;

@@ -403,7 +403,7 @@ pub const InstallInterruptResult = struct {
 };
 pub fn install_interrupt_hander(
     device: Device,
-    comptime handler: *const fn () callconv(.Interrupt) void,
+    comptime handler: kernel.InterruptHandler,
 ) InstallInterruptResult {
     const end_point_device_header = device.end_point_device_header();
     var offset = end_point_device_header.capabilities_pointer;
@@ -446,15 +446,11 @@ pub fn install_interrupt_hander(
     const bar = bar_opt.?;
 
     const StaticVars = struct {
-        var vector: u8 = 0; //32;
+        var vector: u8 = 32;
     };
-    StaticVars.vector = @max(StaticVars.vector, 32);
-    // const StaticVars = .{
-    //     .vector = 32,
-    // };
 
     boot_log_println("installing vector: {}", .{StaticVars.vector});
-    amd64.register_interrupt_handler(handler, StaticVars.vector, amd64.get_idt());
+    kernel.register_interrupt_handler(handler, StaticVars.vector);
     defer StaticVars.vector += 1;
 
     boot_log_println("BIR: {}, Physical: {X} BARs: physical low: {X}, high: {X}", .{
