@@ -52,6 +52,25 @@ fn platform_print_to_console(comptime fmt: []const u8, args: anytype, comptime i
                 };
             toolbox.playdate_log_to_console("%s", to_print.ptr);
         },
+        .Wozmon64, .UEFI => {
+            var buffer = [_]u8{0} ** 2048;
+            //TODO dynamically allocate buffer for printing.  use std.fmt.count to count the size
+
+            const to_print = if (is_err)
+                std.fmt.bufPrint(&buffer, "ERROR: " ++ fmt ++ nl, args) catch return
+            else
+                std.fmt.bufPrint(&buffer, fmt ++ nl, args) catch return;
+            const COM1_PORT_ADDRESS = 0x3F8;
+            for (to_print) |b| {
+                asm volatile (
+                    \\outb %%al, %%dx
+                    :
+                    : [data] "{al}" (b),
+                      [port] "{dx}" (COM1_PORT_ADDRESS),
+                    : "rax", "rdx"
+                );
+            }
+        },
         else => @compileError("Unsupported platform"),
     }
     //TODO support BoksOS

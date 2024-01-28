@@ -387,6 +387,7 @@ inline fn rdmsr(msr: u32) u64 {
 //for debugging purposes on QEMU
 
 pub fn println_serial(comptime fmt: []const u8, args: anytype) void {
+    //TODO copy to toolbox println
     if (comptime !toolbox.IS_DEBUG) {
         return;
     }
@@ -396,9 +397,9 @@ pub fn println_serial(comptime fmt: []const u8, args: anytype) void {
     };
     StaticVars.lock.lock();
     defer StaticVars.lock.release();
-    const COM1_PORT_ADDRESS = 0x3F8;
     var buf: [MAX_BYTES]u8 = undefined;
     const bytes = std.fmt.bufPrint(&buf, fmt ++ "\r\n", args) catch buf[0..];
+    const COM1_PORT_ADDRESS = 0x3F8;
     for (bytes) |b| {
         asm volatile (
             \\outb %%al, %%dx

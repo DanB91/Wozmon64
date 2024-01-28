@@ -7,8 +7,10 @@ const mpsp = @import("mp_service_protocol.zig");
 const w64 = @import("wozmon64_kernel.zig");
 const amd64 = @import("amd64.zig");
 const console = @import("bootloader_console.zig");
+const profiler = toolbox.profiler;
 
 pub const THIS_PLATFORM = toolbox.Platform.UEFI;
+pub const ENABLE_PROFILER = true;
 
 const KERNEL_ELF = @embedFile("kernel.elf");
 const UEFI_PAGE_SIZE = toolbox.kb(4);
@@ -73,18 +75,21 @@ var image_load_address: usize = 0;
 pub fn main() noreturn {
     //disable interrupts
     asm volatile ("cli");
+    profiler.start_profiler();
+
+    var bootloader_arena = toolbox.Arena.init_with_buffer(&bootloader_arena_buffer);
 
     const system_table = std.os.uefi.system_table;
     const handle = std.os.uefi.handle;
 
+    profiler.begin("clear UEFI console");
     const con_out = system_table.con_out.?;
     _ = con_out.reset(false);
     _ = con_out.clearScreen();
     _ = con_out.setCursorPosition(0, 0);
+    profiler.end();
 
     const bs = system_table.boot_services.?;
-
-    var bootloader_arena = toolbox.Arena.init_with_buffer(&bootloader_arena_buffer);
 
     //get image load address
     {
@@ -196,12 +201,19 @@ pub fn main() noreturn {
     var memory_map: []LargeUEFIMemoryDescriptor = undefined;
     var map_key: usize = 0;
     {
+        profiler.begin("retrieve UEFI memory map");
+        defer profiler.end();
+
         const MAX_MEMORY_DESCRIPTORS = 512;
         var mmap_store: [MAX_MEMORY_DESCRIPTORS]LargeUEFIMemoryDescriptor = undefined;
         var mmap_size: usize = @sizeOf(@TypeOf(mmap_store));
         var descriptor_size: usize = 0;
         var descriptor_version: u32 = 0;
+
+        profiler.begin("UEFI GetMemoryMap");
         const status = bs.getMemoryMap(&mmap_size, @ptrCast(&mmap_store), &map_key, &descriptor_size, &descriptor_version);
+        profiler.end();
+
         if (status != ZSUEFIStatus.Success) {
             fatal("Failed to get memory map! Error: {}", .{status});
         }
@@ -219,6 +231,7 @@ pub fn main() noreturn {
 
         const num_descriptors = mmap_size / descriptor_size;
         memory_map = bootloader_arena.push_slice(LargeUEFIMemoryDescriptor, num_descriptors);
+
         @memcpy(memory_map, mmap_store[0..num_descriptors]);
     }
 
@@ -226,7 +239,10 @@ pub fn main() noreturn {
 
     //exit boot services
     {
+        profiler.begin("UEFI ExitBootServices");
         const status = bs.exitBootServices(handle, map_key);
+        profiler.end();
+
         if (status != ZSUEFIStatus.Success) {
             fatal(
                 "Failed to exit boot services! Error: {}, Handle: {}, Map key: {X}",
@@ -311,22 +327,7 @@ pub fn main() noreturn {
             );
         }
     };
-    //set up screen
-    //TODO put back
-    // const screen = w64.Screen.init(
-    //     gop_mode.info.horizontal_resolution,
-    //     gop_mode.info.vertical_resolution,
-    //     gop_mode.info.pixels_per_scan_line,
-    //     frame_buffer,
-    //     global_arena,
-    // );
-    // //TODO: delete
-    // {
-    //     for (frame_buffer) |*pixel| {
-    //         pixel.colors = .{ .r = 255, .b = 255, .g = 0 };
-    //     }
-    //     toolbox.hang();
-    // }
+
     console.init_graphics_console(screen);
     if (screen.frame_buffer.len >= w64.DEFAULT_PROGRAM_LOAD_ADDRESS - w64.FRAME_BUFFER_VIRTUAL_ADDRESS) {
         fatal(
@@ -365,6 +366,8 @@ pub fn main() noreturn {
     var mapped_memory = toolbox.DynamicArray(w64.VirtualMemoryMapping)
         .init(global_arena, memory_map.len);
     {
+        profiler.begin("Set up page tables");
+        defer profiler.end();
 
         //map kernel global arena
         map_virtual_memory(
@@ -502,17 +505,24 @@ pub fn main() noreturn {
     }
 
     const tsc_mhz = b: {
-        var tmp: u64 = 0;
-        //the purpose of this loop is because clock rates are typically
-        //multiples of 100 or more.  we want to make sure we are getting the most
-        //accurate clock rate
-        for (0..10) |_| {
-            tmp = calculaute_tsc_mhz(root_xsdt, bootloader_arena);
-            if (tmp % 10 == 0) {
-                break :b tmp;
-            }
-        }
-        break :b tmp;
+        profiler.begin("Estimate clock speed");
+        defer profiler.end();
+
+        // var tmp: u64 = 0;
+        // //the purpose of this loop is because clock rates are typically
+        // //multiples of 100 or more.  we want to make sure we are getting the most
+        // //accurate clock rate
+        // for (0..10) |_| {
+        //     tmp = calculaute_tsc_mhz(root_xsdt, bootloader_arena);
+        //     if (tmp % 10 == 0) {
+        //         break :b tmp;
+        //     }
+        // }
+
+        const tsc_mhz = calculaute_tsc_mhz(root_xsdt, bootloader_arena);
+        //TODO:
+
+        break :b tsc_mhz;
     };
 
     println("tsc mhz: {}", .{tsc_mhz});
@@ -520,6 +530,7 @@ pub fn main() noreturn {
     //TODO, probably shouldn't assume BSP is 0 for core id
     amd64.wrmsr(amd64.IA32_TSC_AUX_MSR, 0);
 
+    profiler.begin("Bootstrap cores");
     const bootloader_processor_contexts =
         bootstrap_application_processors(global_arena, number_of_enabled_processors);
 
@@ -531,6 +542,8 @@ pub fn main() noreturn {
             }
         }
     }
+    profiler.end();
+
     println("APs booted!", .{});
 
     for (bootloader_processor_contexts) |*context| {
@@ -551,6 +564,7 @@ pub fn main() noreturn {
         .tsc_mhz = tsc_mhz,
         .kernel_elf_bytes = physical_to_virtual_pointer(kernel_elf_bytes, mapped_memory.items()),
         .stack_bottom_address = KERNEL_STACK_BOTTOM_ADDRESS,
+        .boot_profiler_snapshot = .{}, //profiler.save(global_arena),
     };
     kernel_start_context.screen.back_buffer = physical_to_virtual_pointer(
         kernel_start_context.screen.back_buffer,
@@ -609,6 +623,7 @@ fn start_kernel(
     mapped_memory: []w64.VirtualMemoryMapping,
     entry_point: u64,
 ) noreturn {
+    kernel_start_context.boot_profiler_snapshot = profiler.save();
     asm volatile (
         \\mov %%cr4, %%rax 
         \\# wrfsbase and wrfsbase instructions were only enabled on
@@ -1073,6 +1088,9 @@ fn map_virtual_memory(
     }
 }
 fn parse_kernel_elf(arena: *toolbox.Arena) !KernelParseResult {
+    profiler.begin("Parse kernel ELF");
+    defer profiler.end();
+
     var page_table_data = toolbox.DynamicArray(PageTableData).init(arena, 32);
     var kernel_image_byte_stream = std.io.fixedBufferStream(KERNEL_ELF);
     var header = try std.elf.Header.read(&kernel_image_byte_stream);
@@ -1089,7 +1107,13 @@ fn parse_kernel_elf(arena: *toolbox.Arena) !KernelParseResult {
                 const is_executable = program_header.p_flags & std.elf.PF_X != 0;
                 const is_writable = program_header.p_flags & std.elf.PF_W != 0;
                 const data_to_copy = KERNEL_ELF[program_header.p_offset .. program_header.p_offset + program_header.p_filesz];
-                const data = arena.push_bytes_aligned(data_to_copy.len, w64.MEMORY_PAGE_SIZE);
+                const data = arena.push_slice_clear_aligned(u8, data_to_copy.len, w64.MEMORY_PAGE_SIZE);
+
+                println("ELF vaddr: {X}, mem size: {X}, data to copy len: {}", .{
+                    program_header.p_vaddr,
+                    program_header.p_memsz,
+                    data_to_copy.len,
+                });
                 @memcpy(data, data_to_copy);
                 const page_table_setup_data = PageTableData{
                     .destination_virtual_address = program_header.p_vaddr,
@@ -1104,7 +1128,6 @@ fn parse_kernel_elf(arena: *toolbox.Arena) !KernelParseResult {
                     next_free_virtual_address,
                     toolbox.align_down(program_header.p_vaddr + program_header.p_memsz + w64.MEMORY_PAGE_SIZE, w64.MEMORY_PAGE_SIZE),
                 );
-                println("ELF vaddr: {X}, size: {X}", .{ program_header.p_vaddr, program_header.p_memsz });
             },
             std.elf.PT_GNU_STACK => {
                 const stack_size = toolbox.align_up(program_header.p_memsz, w64.MEMORY_PAGE_SIZE);
@@ -1220,6 +1243,9 @@ fn calculaute_tsc_mhz(root_xsdt: *const amd64.XSDT, arena: *toolbox.Arena) u64 {
     const NUM_ITERATIONS = 10;
 
     const wait_value = b: {
+        profiler.begin("calculaute_tsc_mhz: Calc wait value");
+        defer profiler.end();
+
         var wait_value: usize = 16;
         var tsc_time: u64 = 0;
         while (tsc_time < 5_000_000) : (wait_value *= 2) {
@@ -1237,6 +1263,9 @@ fn calculaute_tsc_mhz(root_xsdt: *const amd64.XSDT, arena: *toolbox.Arena) u64 {
     var tsc_time: u64 = std.math.maxInt(u64);
 
     for (0..NUM_ITERATIONS) |_| {
+        profiler.begin("calculaute_tsc_mhz: timing iteration");
+        defer profiler.end();
+
         const start_hpet = hpet.main_counter().*;
         const start_tsc = amd64.rdtsc();
         //wait a bit

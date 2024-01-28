@@ -7,6 +7,7 @@ const boot_log_println = kernel.boot_log_println;
 
 pub const VENDOR_ID = 0x8086;
 pub const DEVICE_ID = 0x10D3;
+pub const CHECKSUM = 0xBABA;
 
 //AKA "EERD"
 const EEPROMReadRegister = packed struct(u32) {
@@ -16,6 +17,14 @@ const EEPROMReadRegister = packed struct(u32) {
     data: u16,
 
     pub const BYTE_OFFSET = 0x14;
+};
+
+const InterruptMaskClearRegister = packed struct(u32) {
+    //this can be broken up, into different fields.  but lumping them all together for now
+    all_masks: u25,
+    must_be_zero: u7 = 0,
+
+    pub const BYTE_OFFSET = 0xD8;
 };
 
 pub fn init(pcie_device: pcie.Device) void {
@@ -32,26 +41,47 @@ pub fn init(pcie_device: pcie.Device) void {
     //TODO: reset hardware before doing anything else
     const bar0 = pcie_device.base_address_registers[0].?;
 
+    //initialize device
+    {
+        //disable interrupts
+        write_register(bar0, InterruptMaskClearRegister{
+            .all_masks = 0x1FFFFFF,
+        });
+        //TODO: we are supposed to do a global reset here.
+        //I can't figure out how to do this, since I can't figure out how to strobe the PE_RST_N pin.
+        //let's just assume its reset and in a default state for now
+
+        //TODO: once we global reset, we re-disable interrupts
+
+    }
+
     var checksum: u16 = 0;
     for (0..0x40) |nvm_address| {
-        const data = read_nvm(@intCast(nvm_address), bar0) catch |e| {
-            boot_log_println("Error reading NVM: {}", .{e});
-            return;
-        };
+        const data = read_nvm(@intCast(nvm_address), bar0);
         checksum +%= data;
     }
-    boot_log_println("Ethernet check sum: {X}", .{checksum});
 
-    for (0..3) |i| {
-        const data = read_nvm(@intCast(i), bar0) catch |e| {
-            boot_log_println("Error reading NVM: {}", .{e});
-            return;
-        };
-        boot_log_println("MAC address bytes: {X}, {X}", .{ data & 0xFF, data >> 8 });
+    if (checksum != CHECKSUM) {
+        boot_log_println("Ethernet checksum is incorrect! Expected: {X}, but was {X}", .{ CHECKSUM, checksum });
+        return;
     }
+
+    var mac_address = [_]u8{0} ** 6;
+    var cursor: usize = 0;
+    for (0..mac_address.len / 2) |i| {
+        const data = read_nvm(@intCast(i), bar0);
+        mac_address[cursor] = @intCast(data & 0xFF);
+        cursor += 1;
+        mac_address[cursor] = @intCast(data >> 8);
+        cursor += 1;
+    }
+    boot_log_println("Ethernet MAC address: {X}", .{mac_address});
+
+    const version = read_nvm(5, bar0);
+    boot_log_println("Ethernet version: {X}", .{version});
 }
 
-fn read_nvm(nvm_address: u14, bar: pcie.BaseAddressRegisterData) !u16 {
+fn read_nvm(nvm_address: u14, bar: pcie.BaseAddressRegisterData) u16 {
     var eerd_value = EEPROMReadRegister{
         .start = true,
         .done = false,
@@ -65,7 +95,7 @@ fn read_nvm(nvm_address: u14, bar: pcie.BaseAddressRegisterData) !u16 {
             return eerd_value.data;
         }
     }
-    return error.NvmReadTimedOut;
+    return 0;
 }
 fn read_register(comptime Type: type, bar: pcie.BaseAddressRegisterData) Type {
     const register_ptr = bar_to_register(Type, bar);

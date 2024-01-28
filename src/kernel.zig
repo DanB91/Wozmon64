@@ -62,7 +62,13 @@ const KernelState = struct {
     is_user_program_running: bool,
 
     //profiler state
+    profiler_to_draw: enum {
+        BootProfiler,
+        FrameProfiler,
+    },
     show_profiler: bool,
+    last_frames_profiler_snapshot: profiler.State,
+    boot_profiler_snapshot: profiler.State,
 };
 
 const StackUnwinder = struct {
@@ -133,6 +139,8 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
     @setAlignStack(256);
     //disable interrupts
     asm volatile ("cli");
+    profiler.restore(kernel_start_context.boot_profiler_snapshot);
+
     toolbox.amd64_ticks_to_microseconds = @intCast(kernel_start_context.tsc_mhz);
     {
         const vtable: *std.mem.Allocator.VTable =
@@ -140,6 +148,8 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
         vtable.* = toolbox.Arena.ZSTD_VTABLE;
     }
     {
+        profiler.begin("Set up boot log");
+        defer profiler.end();
         //set up boot log
 
         @memset(kernel_start_context.screen.back_buffer, .{ .data = 0 });
@@ -147,6 +157,9 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
         boot_log.println("Booting Wozmon64 kernel...", .{});
     }
     {
+        profiler.begin("Set up global kernel state");
+        defer profiler.end();
+
         const frame_arena =
             kernel_start_context.global_arena.create_arena_from_arena(w64.KERNEL_FRAME_ARENA_SIZE);
         const scratch_arena =
@@ -169,6 +182,9 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
             .debug_symbols = undefined,
 
             .show_profiler = false,
+            .profiler_to_draw = .FrameProfiler,
+            .last_frames_profiler_snapshot = .{},
+            .boot_profiler_snapshot = .{},
 
             .command_buffer = toolbox.DynamicArray(u8).init(
                 kernel_start_context.global_arena,
@@ -194,6 +210,11 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
             .user_key_events = null,
             .is_user_program_running = false,
         };
+    }
+    {
+        profiler.begin("Set up debug symbols");
+        defer profiler.end();
+
         const debug_symbols = parse_dwarf_debug_symbols(
             kernel_start_context.kernel_elf_bytes,
             kernel_start_context.global_arena,
@@ -202,6 +223,11 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
             toolbox.hang();
         };
         g_state.debug_symbols = debug_symbols;
+    }
+    {
+        profiler.begin("Set up kernel memory allocator");
+        defer profiler.end();
+
         const mapped_memory = b: {
             var mapped_memory = toolbox.RandomRemovalLinkedList(w64.VirtualMemoryMapping).init(g_state.global_arena);
             for (kernel_start_context.mapped_memory) |mapping| {
@@ -216,12 +242,17 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
             mapped_memory,
         );
     }
-    profiler.init(g_state.global_arena);
-    //set up GDT
-    set_up_gdt(g_state.global_arena);
+    {
+        profiler.begin("Set up GDT");
+        set_up_gdt(g_state.global_arena);
+        profiler.end();
+    }
 
-    //set up IDT
-    set_up_idt(g_state.global_arena);
+    {
+        profiler.begin("Set up IDT");
+        set_up_idt(g_state.global_arena);
+        profiler.end();
+    }
 
     //map APIC and set up main core context
     const apic_base_address = kernel_memory.map_mmio_physical_address(
@@ -439,6 +470,8 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
     //enable interrupts
     asm volatile ("sti");
 
+    profiler.end_profiler();
+    g_state.boot_profiler_snapshot = profiler.save();
     main_loop();
 
     toolbox.hang();
@@ -488,7 +521,11 @@ pub inline fn free_memory(data: []u8) void {
 fn parse_dwarf_debug_symbols(kernel_elf: []const u8, arena: *toolbox.Arena) !std.dwarf.DwarfInfo {
     var section_store = toolbox.DynamicArray(std.elf.Elf64_Shdr).init(arena, 64);
     const header = b: {
+        profiler.begin("Parse ELF header");
+        defer profiler.end();
+
         var kernel_image_byte_stream = std.io.fixedBufferStream(kernel_elf);
+
         var header = std.elf.Header.read(&kernel_image_byte_stream) catch {
             return error.ErrorParsingHeader;
         };
@@ -534,19 +571,23 @@ fn parse_dwarf_debug_symbols(kernel_elf: []const u8, arena: *toolbox.Arena) !std
             }
         }
     }
-    var debug_info = std.dwarf.DwarfInfo{
-        .endian = header.endian,
-        .sections = debug_sections,
-        .is_macho = false,
-    };
-    std.dwarf.openDwarfDebugInfo(
-        &debug_info,
-        arena.zstd_allocator,
-    ) catch {
-        return error.ErrorOpeningDwarfDebugInfo;
-    };
+    {
+        profiler.begin("Parse DWARF");
+        defer profiler.end();
 
-    return debug_info;
+        var debug_info = std.dwarf.DwarfInfo{
+            .endian = header.endian,
+            .sections = debug_sections,
+            .is_macho = false,
+        };
+        std.dwarf.openDwarfDebugInfo(
+            &debug_info,
+            arena.zstd_allocator,
+        ) catch {
+            return error.ErrorOpeningDwarfDebugInfo;
+        };
+        return debug_info;
+    }
 }
 
 pub fn echo_welcome_line(comptime fmt: []const u8, args: anytype) void {
@@ -930,7 +971,8 @@ comptime {
 fn main_loop() void {
     while (true) {
         profiler.start_profiler();
-
+        profiler.begin("Frame");
+        defer {}
         // {
         //     profiler.begin("Poll USB controllers");
         //     defer profiler.end();
@@ -971,7 +1013,22 @@ fn main_loop() void {
         while (g_state.key_events.key_pressed_events.dequeue()) |scancode| {
             switch (scancode) {
                 .F1 => type_program(programs.woz_and_jobs),
-                .F2 => g_state.show_profiler = !g_state.show_profiler,
+                .F2 => {
+                    if (g_state.show_profiler and g_state.profiler_to_draw == .FrameProfiler) {
+                        g_state.show_profiler = false;
+                    } else {
+                        g_state.show_profiler = true;
+                        g_state.profiler_to_draw = .FrameProfiler;
+                    }
+                },
+                .F3 => {
+                    if (g_state.show_profiler and g_state.profiler_to_draw == .BootProfiler) {
+                        g_state.show_profiler = false;
+                    } else {
+                        g_state.show_profiler = true;
+                        g_state.profiler_to_draw = .BootProfiler;
+                    }
+                },
                 else => type_key(scancode, g_state.are_characters_shifted),
             }
         }
@@ -986,22 +1043,35 @@ fn main_loop() void {
         blink_cursor();
 
         render();
+
+        profiler.end();
+        profiler.end_profiler();
+        g_state.last_frames_profiler_snapshot = profiler.save();
     }
 }
 fn render() void {
-    profiler.begin("Clear back buffer");
-    @memset(g_state.screen.back_buffer, .{ .data = 0 });
-    profiler.end();
-    profiler.end_profiler();
-
-    if ((comptime ENABLE_PROFILER) and g_state.show_profiler) {
-        draw_profiler();
-    } else {
-        draw_runes();
-        draw_cursor();
+    {
+        profiler.begin("Clear back buffer");
+        @memset(g_state.screen.back_buffer, .{ .data = 0 });
+        profiler.end();
     }
 
-    @memcpy(g_state.screen.frame_buffer, g_state.screen.back_buffer);
+    {
+        if ((comptime ENABLE_PROFILER) and g_state.show_profiler) {
+            profiler.begin("Draw Profiler");
+            draw_profiler();
+            profiler.end();
+        } else {
+            draw_runes();
+            draw_cursor();
+        }
+    }
+
+    {
+        profiler.begin("Blit to screen");
+        @memcpy(g_state.screen.frame_buffer, g_state.screen.back_buffer);
+        profiler.end();
+    }
 }
 
 fn draw_profiler() void {
@@ -1009,7 +1079,14 @@ fn draw_profiler() void {
         return;
     }
 
-    var profiler_it = profiler.line_iterator();
+    g_state.scratch_arena.save();
+    defer g_state.scratch_arena.restore();
+    const profiler_snapshot = switch (g_state.profiler_to_draw) {
+        .FrameProfiler => g_state.last_frames_profiler_snapshot,
+        .BootProfiler => g_state.boot_profiler_snapshot,
+    };
+
+    var profiler_it = profiler.line_iterator(profiler_snapshot, g_state.scratch_arena);
 
     var rune_y: usize = 0;
     while (profiler_it.next()) |line| {

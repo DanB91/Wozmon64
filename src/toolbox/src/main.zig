@@ -8,13 +8,11 @@ pub const panic = toolbox.panic_handler;
 
 pub fn main() anyerror!void {
     if (toolbox.IS_DEBUG) {
-        try run_tests(0);
+        try run_tests();
     } else {
-        run_benchmarks(0);
+        run_benchmarks();
     }
 }
-
-const TestModule = u32;
 
 //TODO
 //enum {
@@ -25,8 +23,7 @@ const TestModule = u32;
 //All,
 //};
 
-fn run_tests(which_tests: TestModule) !void {
-    _ = which_tests;
+fn run_tests() !void {
 
     //print tests
     {
@@ -485,14 +482,12 @@ fn concurrent_queue_dequeue_test_loop(ring_queue: *toolbox.SingleProducerMultiCo
     }
 }
 
-fn run_benchmarks(which_tests: TestModule) void {
-    _ = which_tests;
+fn run_benchmarks() void {
     var arena = toolbox.Arena.init(toolbox.mb(16));
-    profiler.init(arena);
     profiler.start_profiler();
     defer {
         profiler.end_profiler();
-        var it = profiler.line_iterator();
+        var it = profiler.line_iterator(profiler.save(), arena);
         while (it.next()) |to_print| {
             toolbox.println_str8(to_print);
         }
@@ -514,16 +509,16 @@ fn run_benchmarks(which_tests: TestModule) void {
         {
             var list = toolbox.LinkedListQueue(i64).init(arena);
             var llpq = LinkedListQueuePushBenchmark{ .list = &list };
-            benchmark("LinkedListDeque push ", &llpq, arena);
+            benchmark("LinkedListDeque push", &llpq, arena);
             var llpop = LinkedListQueuePopBenchmark{ .list = &list };
-            benchmark("LinkedListDeque pop ", &llpop, arena);
+            benchmark("LinkedListDeque pop", &llpop, arena);
         }
         {
             var list = toolbox.LinkedListStack(i64).init(arena);
             var llps = LinkedListStackPushBenchmark{ .list = &list };
-            benchmark("LinkedListStack push ", &llps, arena);
+            benchmark("LinkedListStack push", &llps, arena);
             var llpop = LinkedListStackPopBenchmark{ .list = &list };
-            benchmark("LinkedListStack pop ", &llpop, arena);
+            benchmark("LinkedListStack pop", &llpop, arena);
         }
         // arena.reset();
     }
@@ -550,9 +545,11 @@ fn run_benchmarks(which_tests: TestModule) void {
             benchmark("Toolbox IntHashMap", &thimb, arena);
         }
 
-        var thb = ToolboxHashBenchmark{};
-        benchmark("Toolbox Hash", &thb, arena);
-        toolbox.println("last hash {x}", .{thb.last_hash});
+        {
+            var thb = ToolboxHashBenchmark{};
+            benchmark("Toolbox Hash", &thb, arena);
+            toolbox.println("last hash {x}", .{thb.last_hash});
+        }
     }
 }
 

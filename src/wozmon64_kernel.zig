@@ -6,6 +6,7 @@ pub usingnamespace @import("wozmon64_user.zig");
 const w64_user = @import("wozmon64_user.zig");
 const std = @import("std");
 const toolbox = @import("toolbox");
+const profiler = toolbox.profiler;
 const amd64 = @import("amd64.zig");
 const bitmaps = @import("bitmaps.zig");
 
@@ -120,6 +121,7 @@ pub const KernelStartContext = struct {
     tsc_mhz: u64,
     stack_bottom_address: u64, //initial stack pointer
     kernel_elf_bytes: []const u8,
+    boot_profiler_snapshot: profiler.State,
 };
 
 pub const ConventionalMemoryDescriptor = struct {

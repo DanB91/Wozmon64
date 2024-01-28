@@ -115,6 +115,8 @@ pub const MSIXCapabilityHeader = packed struct(u32) {
         enable: bool,
     };
 };
+//TODO: first we should check and log if there is MSI. we need to disable MSI
+//TODO: We should re-work this API to only read/write 32-bit registers at a time
 pub const MSIXCapabilityStructure = extern struct {
     header: MSIXCapabilityHeader align(4),
     table_offset: u32 align(4),
