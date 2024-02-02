@@ -101,6 +101,8 @@ Wozmon64 is line based and support similar syntax as the original WozMon. That i
     - Hit Enter to run the program.
     - You now see the picture of Woz and Jobs on the screen.
     - Press Escape to quit out of the program and you should return to the prompt.
+- Hitting F2 will bring up the profiler.
+- Hitting F3 will bring up the snapshot of the boot-time profiler.
 
 ## Questions and Feedback
 If you have any questions or feedback, I'd love to hear from you! Please reach out to me at dan@boksos.com or DM @dbokser91 on X/Twitter.
