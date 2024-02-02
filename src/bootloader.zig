@@ -1104,6 +1104,9 @@ fn parse_kernel_elf(arena: *toolbox.Arena) !KernelParseResult {
                 if (program_header.p_memsz == 0) {
                     continue;
                 }
+                if (program_header.p_memsz > w64.MEMORY_PAGE_SIZE) {
+                    toolbox.panic("ELF segment is greater than page size! We need to support this!", .{});
+                }
                 const is_executable = program_header.p_flags & std.elf.PF_X != 0;
                 const is_writable = program_header.p_flags & std.elf.PF_W != 0;
                 const data_to_copy = KERNEL_ELF[program_header.p_offset .. program_header.p_offset + program_header.p_filesz];

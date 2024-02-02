@@ -209,7 +209,7 @@ pub fn pdp_from_virtual_address(virtual_address: u64) *amd64.PageDirectoryPointe
     return @ptrFromInt(0xFFFF_FF7F_BF80_0000 | (pdp_index << (12 + 9 + 9)));
 }
 pub const Time = struct {
-    ticks: i64,
+    ticks: i64 = 0,
 
     var ticks_to_microseconds: i64 = 0;
     pub fn init(tsc_mhz: u64) void {

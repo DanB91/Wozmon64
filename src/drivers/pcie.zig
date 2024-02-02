@@ -4,7 +4,7 @@ const w64 = @import("../wozmon64_kernel.zig");
 const kernel_memory = @import("../kernel_memory.zig");
 const kernel = @import("../kernel.zig");
 
-const boot_log_println = kernel.boot_log_println;
+const echo_line = kernel.echo_line;
 
 pub const END_POINT_DEVICE_HEADER_TYPE = 0;
 pub const BRIDGE_DEVICE_HEADER_TYPE = 1;
@@ -17,6 +17,8 @@ pub const SERIAL_BUS_CLASS_CODE = 0xC;
 pub const USB_SUBCLASS_CODE = 0x3;
 pub const EHCI_PROGRAMING_INTERFACE = 0x20;
 pub const XHCI_PROGRAMING_INTERFACE = 0x30;
+pub const USB_DEVICE_PROGRAMING_INTERFACE = 0xFE;
+pub const MSI_CAPABILITY_ID = 0x5;
 pub const MSI_X_CAPABILITY_ID = 0x11;
 
 pub const BaseAddressRegisterData = []volatile u8;
@@ -104,15 +106,41 @@ pub const CapabilityHeader = packed struct(u32) {
     reserved: u16,
 };
 pub const MSIXCapabilityHeader = packed struct(u32) {
-    capability_id: u8,
-    next_pointer: u8,
-    message_control: MessageControl,
+    capability_id: u8 = 0,
+    next_pointer: u8 = 0,
+    message_control: MessageControl = .{},
 
     pub const MessageControl = packed struct(u16) {
-        table_size: u11,
-        reserved: u3,
-        function_mask: u1,
-        enable: bool,
+        table_size: u11 = 0,
+        reserved: u3 = 0,
+        function_mask: u1 = 0,
+        enable: bool = false,
+    };
+};
+
+pub const MSICapabilityHeader = packed struct(u32) {
+    capability_id: u8 = 0,
+    next_pointer: u8 = 0,
+    message_control: MessageControl = .{},
+
+    pub const MessageControl = packed struct(u16) {
+        enable: bool = false,
+        multiple_message_capable: NumberOfVectors = .OneVector,
+        multiple_message_enable: NumberOfVectors = .OneVector,
+        is_64_bit_address_capable: bool = false,
+        is_per_vector_masking_capable: bool = false,
+        reserved: u7 = 0,
+
+        const NumberOfVectors = enum(u3) {
+            OneVector,
+            TwoVectors,
+            FourVectors,
+            EightVectors,
+            SixteenVectors,
+            ThirtyTwoVectors,
+            Reserved0,
+            Reserved1,
+        };
     };
 };
 //TODO: first we should check and log if there is MSI. we need to disable MSI
@@ -127,15 +155,15 @@ pub const MSIXCapabilityStructure = extern struct {
     pub fn table(self: MSIXCapabilityStructure, bar: BaseAddressRegisterData) []volatile MSIXTableEntry {
         const offset: usize = self.table_offset & ~@as(u32, BIR_MASK);
         const len = @as(usize, self.header.message_control.table_size) + 1;
-        boot_log_println("BAR len: {X}, Table offset: {X}, PBA offset: {X}, table byte len: {X}", .{
+        echo_line("BAR len: 0x{X}, Table offset: 0x{X}, PBA offset: 0x{X}, table byte len: 0x{X}", .{
             bar.len,
             offset,
             self.pending_bit_array_offset,
             len * @sizeOf(MSIXTableEntry),
         });
         const table_bytes = bar[offset .. offset + len * @sizeOf(MSIXTableEntry)];
-        boot_log_println(
-            "Table addr: {X}, table len: {}",
+        echo_line(
+            "Table addr: 0x{X}, table len: {}",
             .{
                 @intFromPtr(table_bytes.ptr),
                 len,
@@ -157,6 +185,8 @@ pub const MSIXAMD64MessageAddress = packed struct(u32) {
     reserved1: u8 = 0,
     destination_id: u8 = 0, //id of the core to interrupt
     address_prefix: u12 = 0xFEE, //fixed value.  do not change
+
+    const DWORD_OFFSET = 0;
 };
 
 pub const MSIXAMD64MessageData = packed struct(u32) {
@@ -172,7 +202,7 @@ pub const MSIXAMD64MessageData = packed struct(u32) {
         Initialize = 0b101, //INIT
         Reserved1 = 0b110,
         ExternalInterrupt = 0b111,
-    } = .ExternalInterrupt,
+    } = .Fixed, //.ExternalInterrupt,
 
     reserved0: u3 = 0,
 
@@ -189,15 +219,32 @@ pub const MSIXAMD64MessageData = packed struct(u32) {
     } = .Edge, //thinking we only care about Edge triggered
 
     reserved1: u16 = 0,
+
+    const DWORD_OFFSET = 2;
 };
-pub const MSIXTableEntry = packed struct(u128) {
-    message_address: MSIXAMD64MessageAddress = .{},
-    unused_in_amd64: u32 = 0,
-    message_data: MSIXAMD64MessageData = .{},
-    vector_control: packed struct(u32) {
-        disabled: bool = false, //the "mask" bit
-        reserved: u31 = 0,
-    },
+pub const MSIXVectorControl = packed struct(u32) {
+    disabled: bool = false, //the "mask" bit
+    reserved: u31 = 0,
+
+    const DWORD_OFFSET = 3;
+};
+pub const MSIXTableEntry = extern struct {
+    data: [4]u32 align(4),
+    // message_address: MSIXAMD64MessageAddress = .{},
+    // unused_in_amd64: u32 = 0,
+    // message_data: MSIXAMD64MessageData = .{},
+    // vector_control: packed struct(u32) {
+    //     disabled: bool = false, //the "mask" bit
+    //     reserved: u31 = 0,
+    // },
+
+    pub fn read_register(self: *const volatile MSIXTableEntry, comptime T: type) T {
+        return @bitCast(self.data[T.DWORD_OFFSET]);
+    }
+    pub fn write_register(self: *volatile MSIXTableEntry, value: anytype) void {
+        const T = @TypeOf(value);
+        self.data[T.DWORD_OFFSET] = @bitCast(value);
+    }
 };
 
 // pub const MSIXTableEntry = extern struct {
@@ -325,18 +372,18 @@ pub fn enumerate_devices(
                     break;
                 }
             }
-            device_loop: for (0..32) |device| {
-                function_loop: for (0..8) |function| {
+            device_loop: for (0..32) |device_number| {
+                function_loop: for (0..8) |function_number| {
                     const pci_request_paddr = pd.base_address +
-                        ((bus - pd.start_pci_bus_number) << 20 | device << 15 | function << 12);
+                        ((bus - pd.start_pci_bus_number) << 20 | device_number << 15 | function_number << 12);
 
                     const pci_request_vaddr = kernel_memory.physical_to_virtual(pci_request_paddr) catch |e| {
-                        toolbox.panic("Error finding descriptor address {x}. Error: {} ", .{ pci_request_paddr, e });
+                        toolbox.panic("Error finding descriptor address 0x{X}. Error: {} ", .{ pci_request_paddr, e });
                     };
                     const pcie_device_header = @as([*]align(4096) u8, @ptrFromInt(pci_request_vaddr))[0..64];
                     if (pcie_device_header[0] == 0xFF and pcie_device_header[1] == 0xFF) {
-                        if (function == 0) {
-                            if (max_bus_opt == null and device == 0) {
+                        if (function_number == 0) {
+                            if (max_bus_opt == null and device_number == 0) {
                                 break :bus_loop;
                             }
                             continue :device_loop;
@@ -364,9 +411,9 @@ pub fn enumerate_devices(
                             arena,
                         );
                         ret.append(.{
-                            .device = device,
+                            .device = device_number,
                             .bus = bus,
-                            .function = function,
+                            .function = function_number,
                             .header = pcie_bridge_device,
                             .header_type = .BridgeDevice,
                             .base_address_registers = base_address_registers,
@@ -383,15 +430,17 @@ pub fn enumerate_devices(
                             command_register,
                             arena,
                         );
-                        ret.append(.{
-                            .device = device,
+                        const device = .{
+                            .device = device_number,
                             .bus = bus,
-                            .function = function,
+                            .function = function_number,
                             .header = pcie_endpoint_device_header,
                             .header_type = .EndPointDevice,
                             .base_address_registers = base_address_registers,
                             .config_data = @as([*]volatile u8, @ptrFromInt(pci_request_vaddr))[0..4096],
-                        });
+                        };
+                        disable_msi_and_msix(device);
+                        ret.append(device);
                     }
                 }
             }
@@ -399,8 +448,37 @@ pub fn enumerate_devices(
     }
     return ret.items();
 }
+
+//TODO: not sure if necessary?
+fn disable_msi_and_msix(device: Device) void {
+    const end_point_device_header = device.end_point_device_header();
+    var offset = end_point_device_header.capabilities_pointer;
+    var cap_header_cursor = device.get_config_data(
+        CapabilityHeader,
+        offset,
+    );
+    while (cap_header_cursor) |cap_header| {
+        switch (cap_header.capability_id) {
+            MSI_CAPABILITY_ID => {
+                const msi: *volatile MSICapabilityHeader = @ptrCast(cap_header);
+                msi.* = .{};
+            },
+            MSI_X_CAPABILITY_ID => {
+                const msix: *volatile MSIXCapabilityHeader = @ptrCast(cap_header);
+                msix.* = .{};
+            },
+            else => {},
+        }
+        offset = cap_header.next_pointer;
+        cap_header_cursor = device.get_config_data(
+            CapabilityHeader,
+            offset,
+        );
+    }
+}
 pub const InstallInterruptResult = struct {
     vector: usize = 0,
+    //TODO: change to enum and get rid of panic
     success: bool = false,
 };
 pub fn install_interrupt_hander(
@@ -433,7 +511,7 @@ pub fn install_interrupt_hander(
     switch (paddr_bar_index) {
         0, 2, 4 => {},
         else => {
-            boot_log_println("Bad paddr_bar_index: {}", .{paddr_bar_index});
+            echo_line("Bad paddr_bar_index: {}", .{paddr_bar_index});
             //TODO: log error
             return .{};
         },
@@ -451,11 +529,11 @@ pub fn install_interrupt_hander(
         var vector: u8 = 32;
     };
 
-    boot_log_println("installing vector: {}", .{StaticVars.vector});
+    echo_line("installing vector: {}", .{StaticVars.vector});
     kernel.register_interrupt_handler(handler, StaticVars.vector);
     defer StaticVars.vector += 1;
 
-    boot_log_println("BIR: {}, Physical: {X} BARs: physical low: {X}, high: {X}", .{
+    echo_line("BIR: {}, Physical: 0x{X} BARs: physical low: 0x{X}, high: 0x{X}", .{
         paddr_bar_index,
         effective_bar(
             end_point_device_header.base_address_registers[0],
@@ -464,39 +542,36 @@ pub fn install_interrupt_hander(
         end_point_device_header.base_address_registers[0],
         end_point_device_header.base_address_registers[1],
     });
-    boot_log_println("BARs virtual: {X}, physical: {X}, Core ID: {}", .{
+    echo_line("BARs virtual: 0x{X}, physical: 0x{X}, Core ID: {}", .{
         @intFromPtr(bar.ptr),
         kernel_memory.virtual_to_physical(@intFromPtr(bar.ptr)) catch 0,
         w64.get_core_id(),
     });
     const msi_x_table = msi_x_capability_structure.table(bar);
-    for (msi_x_table) |*entry| {
-        const disabled_entry = MSIXTableEntry{
-            .vector_control = .{ .disabled = true },
-        };
-        entry.* = disabled_entry;
+    for (msi_x_table, 0..) |*entry, i| {
+        _ = i; // autofix
+        const vector_control = MSIXVectorControl{ .disabled = true };
+        entry.write_register(vector_control);
     }
 
-    // const first_entry: *volatile MSIXTableEntry = &msi_x_table[0];
-    const first_entry = MSIXTableEntry{
-        .message_address = .{
-            .destination_id = @intCast(w64.get_core_id()),
-        },
-        .message_data = .{
-            .vector = StaticVars.vector,
-        },
-        .vector_control = .{
-            .disabled = false,
-            // .disabled = true,
-        },
-    };
-    msi_x_table[0] = first_entry;
+    const first_entry = &msi_x_table[0];
+    first_entry.write_register(MSIXAMD64MessageAddress{
+        .destination_id = @intCast(w64.get_core_id()),
+    });
+    //zero-out reserved field in table entry
+    first_entry.data[MSIXAMD64MessageAddress.DWORD_OFFSET + 1] = 0;
 
-    const message_data: u32 = @bitCast(first_entry.message_data);
-    const message_address: u32 = @bitCast(first_entry.message_address);
-    boot_log_println("MSI-X message address: {X} message data: {X}", .{ message_address, message_data });
-    boot_log_println("first_entry vector: {}, static var vector: {}", .{
-        first_entry.message_data.vector,
+    first_entry.write_register(MSIXAMD64MessageData{
+        .vector = StaticVars.vector,
+    });
+    first_entry.write_register(MSIXVectorControl{ .disabled = false });
+
+    echo_line("MSI-X message address: 0x{X} message data: 0x{X}", .{
+        first_entry.data[MSIXAMD64MessageAddress.DWORD_OFFSET],
+        first_entry.data[MSIXAMD64MessageData.DWORD_OFFSET],
+    });
+    echo_line("first_entry vector: {}, static var vector: {}", .{
+        first_entry.read_register(MSIXAMD64MessageData).vector,
         StaticVars.vector,
     });
 
@@ -514,14 +589,20 @@ fn bar_address_space_size(
     //     //TODO: log error
     //     return result;
     // }
-    const command_to_restore = command_register.*;
+    var command_to_restore = command_register.*;
     var command = command_to_restore;
     command.io_mapped = false;
     command.memory_mapped = false;
     command.interrupt_disabled = true;
     command_register.* = command;
 
-    defer command_register.* = command_to_restore;
+    defer {
+        //TODO: I _think_ this is only for MSI? If so, we want it disabled since we only support MSI-X right now
+        //Need to make sure of this.
+        command_to_restore.interrupt_disabled = true;
+
+        command_register.* = command_to_restore;
+    }
 
     //Find size of MMIO space per https://wiki.osdev.org/PCI#Address_and_size_of_the_BAR
     const bar_ptr: *volatile BARSize = @ptrCast(@alignCast(&physical_bars[bar_index]));
@@ -575,7 +656,7 @@ fn map_base_address_register_into_virtual_memory(
         );
         if (!toolbox.is_aligned_to(len, w64.MMIO_PAGE_SIZE)) {
             //TODO: log error
-            boot_log_println("Bad alignment for bar: low: {X}, high: {X}, len: {}", .{ low, high, len });
+            echo_line("Bad alignment for bar: low: 0x{X}, high: 0x{X}, len: {}", .{ low, high, len });
             continue;
         }
         const virtual_bar = kernel_memory.map_mmio_physical_address(

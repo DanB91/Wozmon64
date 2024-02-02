@@ -4,7 +4,13 @@ const w64 = @import("../wozmon64_kernel.zig");
 const kernel = @import("../kernel.zig");
 const kernel_memory = @import("../kernel_memory.zig");
 
-const boot_log_println = kernel.boot_log_println;
+const echo_line = kernel.echo_line;
+
+//TODO: for debugging on desktop
+// fn echo_line(a: anytype, b: anytype) void {
+//     _ = a; // autofix
+//     _ = b; // autofix
+// }
 
 pub const USBHIDDevice = struct {
     device_types: []Type,
@@ -276,7 +282,7 @@ pub fn init_hid_interface(
         device.endpoint_0_transfer_ring,
         controller,
     );
-    boot_log_println("Device {?s} Interface: {} Number of endpoints: {}", .{
+    echo_line("Device {?s} Interface: {} Number of endpoints: {}", .{
         device.product,
         hid_interface.interface_number,
         hid_interface.endpoints.len,
@@ -691,7 +697,7 @@ pub fn poll(
                 hid_device.last_transfer_request_physical_address,
             )) |event_response| {
                 if (event_response.err) |e| {
-                    boot_log_println("Error polling device: {}", .{e});
+                    echo_line("Error polling device: {}", .{e});
                     continue;
                 }
                 const number_of_bytes_not_transferred = event_response.number_of_bytes_not_transferred;

@@ -23,13 +23,23 @@ const State = struct {
 var g_state = State{ .screen = undefined };
 const MAX_BYTES = 1024;
 
+pub fn print(comptime fmt: []const u8, args: anytype) void {
+    g_state.lock.lock();
+    defer g_state.lock.release();
+    switch (g_state.stage) {
+        .UEFI => uefi_print(fmt, args),
+        .AfterExitButBeforeScreenIsSetup => serial_print(fmt, args),
+        .GraphicsConsole => graphics_print(fmt, args),
+        .Disabled => {},
+    }
+}
 pub fn println(comptime fmt: []const u8, args: anytype) void {
     g_state.lock.lock();
     defer g_state.lock.release();
     switch (g_state.stage) {
-        .UEFI => uefi_println(fmt, args),
+        .UEFI => uefi_print(fmt ++ "\r\n", args),
         .AfterExitButBeforeScreenIsSetup => serial_println(fmt, args),
-        .GraphicsConsole => graphics_println(fmt, args),
+        .GraphicsConsole => graphics_print(fmt ++ "\n", args),
         .Disabled => {},
     }
 }
@@ -51,7 +61,7 @@ pub fn disable() void {
     g_state.stage = .Disabled;
 }
 
-fn graphics_println(comptime fmt: []const u8, args: anytype) void {
+fn graphics_print(comptime fmt: []const u8, args: anytype) void {
     if (comptime !ENABLE_CONSOLE) {
         return;
     }
@@ -59,7 +69,7 @@ fn graphics_println(comptime fmt: []const u8, args: anytype) void {
 
     var buf: [MAX_BYTES]u8 = undefined;
     const utf8 =
-        toolbox.str8(std.fmt.bufPrint(&buf, fmt ++ "\n", args) catch buf[0..]);
+        toolbox.str8(std.fmt.bufPrint(&buf, fmt, args) catch buf[0..]);
     var it = utf8.iterator();
     while (it.next()) |rune_and_length| {
         const rune = rune_and_length.rune;
@@ -188,18 +198,21 @@ fn carriage_return() void {
     }
 }
 
-fn uefi_println(comptime fmt: []const u8, args: anytype) void {
+fn uefi_print(comptime fmt: []const u8, args: anytype) void {
     if (comptime !ENABLE_CONSOLE) {
         return;
     }
     var buf8: [MAX_BYTES:0]u8 = undefined;
     var buf16: [MAX_BYTES:0]u16 = [_:0]u16{0} ** MAX_BYTES;
-    const utf8 = std.fmt.bufPrintZ(&buf8, fmt ++ "\r\n", args) catch buf8[0..];
+    const utf8 = std.fmt.bufPrintZ(&buf8, fmt, args) catch buf8[0..];
     _ = std.unicode.utf8ToUtf16Le(&buf16, utf8) catch return;
     _ = std.os.uefi.system_table.con_out.?.outputString(&buf16);
 }
-
 pub fn serial_println(comptime fmt: []const u8, args: anytype) void {
+    serial_print(fmt ++ "\n", args);
+}
+
+pub fn serial_print(comptime fmt: []const u8, args: anytype) void {
     if (comptime !ENABLE_CONSOLE) {
         return;
     }

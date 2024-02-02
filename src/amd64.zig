@@ -697,6 +697,94 @@ pub const APICInterruptControlRegisterHigh = packed struct(u32) {
 
     pub const BYTE_OFFSET = 0x310;
 };
+pub const APICIDRegister = packed struct(u32) {
+    reserved: u24,
+    apic_id: u16,
+
+    pub const BYTE_OFFSET = 0x20;
+};
+
+///
+/// LVT Registers
+///
+pub const DeliveryMode = enum(u3) {
+    Fixed = 0,
+    Reserved0 = 1,
+    SMI = 2,
+    Reserved1 = 3,
+    NMI = 4,
+    Initialize = 5,
+    Reserved2 = 6,
+    ExternalInterrupt = 7,
+};
+pub const DeliveryStatus = enum(u1) {
+    Idle,
+    SendPending,
+};
+pub const TriggerMode = enum(u1) {
+    Edge,
+    Level,
+};
+pub const LVTTimerRegister = packed struct(u32) {
+    vector: u8,
+    reserved0: u4,
+    delivery_status: DeliveryStatus,
+    reserved1: u3,
+    is_disabled: bool, //mask bit
+    timer_mode: enum(u2) {
+        OneShot,
+        Periodic,
+        TSCDeadline,
+    },
+    reserved2: u13,
+
+    pub const BYTE_OFFSET = 0x320;
+};
+
+pub const LVTCMCIRegister = packed struct(u32) {
+    vector: u8,
+    delivery_mode: DeliveryMode,
+    reserved0: u1,
+    delivery_status: DeliveryStatus,
+    reserved1: u3,
+    is_disabled: bool, //mask bit
+    reserved2: u15,
+
+    pub const BYTE_OFFSET = 0x2F0;
+};
+
+pub const LVTLINT0Register = packed struct(u32) {
+    vector: u8,
+    delivery_mode: DeliveryMode,
+    reserved0: u1,
+    delivery_status: DeliveryStatus,
+    input_pin_polarity: u1,
+    remote_irr_flag: u1,
+    trigger_mode: TriggerMode,
+    is_disabled: bool, //mask bit
+    reserved2: u15,
+
+    pub const BYTE_OFFSET = 0x350;
+};
+
+pub const LVTLINT1Register = packed struct(u32) {
+    vector: u8,
+    delivery_mode: DeliveryMode,
+    reserved0: u1,
+    delivery_status: DeliveryStatus,
+    input_pin_polarity: u1,
+    remote_irr_flag: u1,
+    trigger_mode: TriggerMode,
+    is_disabled: bool, //mask bit
+    reserved2: u15,
+
+    pub const BYTE_OFFSET = 0x360;
+};
+
+//TODO: error LVT register
+//TODO: we want to see if any of these LVT registers have the firing vector (0x5F or 0x6F) that's happening
+//      on real hardware
+
 pub fn send_interprocessor_interrupt(
     apic: APIC,
     interrupt_command_register_low: APICInterruptControlRegisterLow,
@@ -723,7 +811,7 @@ pub fn get_in_service_interrupt_vector(apic: APIC) usize {
     while (cursor <= end) : (cursor += 4) {
         const register = apic.data[cursor];
         if (register != 0) {
-            for (0..31) |i| {
+            for (0..32) |i| {
                 if (register & (@as(usize, 1) << @intCast(i)) != 0) {
                     const irq = starting_irq + i;
                     toolbox.assert(irq < 256, "IRQ vector must be less than 256, but was: {}", .{irq});

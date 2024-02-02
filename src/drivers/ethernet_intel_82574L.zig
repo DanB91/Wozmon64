@@ -3,7 +3,7 @@ const w64 = @import("../wozmon64_kernel.zig");
 const kernel_memory = @import("../kernel_memory.zig");
 const kernel = @import("../kernel.zig");
 
-const boot_log_println = kernel.boot_log_println;
+const echo_line = kernel.echo_line;
 
 pub const VENDOR_ID = 0x8086;
 pub const DEVICE_ID = 0x10D3;
@@ -62,7 +62,7 @@ pub fn init(pcie_device: pcie.Device) void {
     }
 
     if (checksum != CHECKSUM) {
-        boot_log_println("Ethernet checksum is incorrect! Expected: {X}, but was {X}", .{ CHECKSUM, checksum });
+        echo_line("Ethernet checksum is incorrect! Expected: {X}, but was {X}", .{ CHECKSUM, checksum });
         return;
     }
 
@@ -75,10 +75,10 @@ pub fn init(pcie_device: pcie.Device) void {
         mac_address[cursor] = @intCast(data >> 8);
         cursor += 1;
     }
-    boot_log_println("Ethernet MAC address: {X}", .{mac_address});
+    echo_line("Ethernet MAC address: {X}", .{mac_address});
 
     const version = read_nvm(5, bar0);
-    boot_log_println("Ethernet version: {X}", .{version});
+    echo_line("Ethernet version: {X}", .{version});
 }
 
 fn read_nvm(nvm_address: u14, bar: pcie.BaseAddressRegisterData) u16 {

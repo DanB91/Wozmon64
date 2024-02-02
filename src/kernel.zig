@@ -15,8 +15,6 @@ const commands = @import("commands.zig");
 const programs = @import("programs.zig");
 const boot_log = @import("bootloader_console.zig");
 
-pub const boot_log_println = boot_log.println;
-
 pub const THIS_PLATFORM = toolbox.Platform.Wozmon64;
 pub const ENABLE_PROFILER = true;
 
@@ -26,11 +24,6 @@ const ENABLE_SERIAL = toolbox.IS_DEBUG;
 pub const InterruptHandler = *const fn (vector_number: u64, error_code: u64) callconv(.C) void;
 
 const KernelState = struct {
-    cursor_x: usize,
-    cursor_y: usize,
-    last_cursor_update: w64.Time,
-    cursor_char: toolbox.Rune,
-
     screen: w64.Screen,
     root_xsdt: *const amd64.XSDT,
     application_processor_contexts: []*w64.ApplicationProcessorKernelContext,
@@ -38,7 +31,7 @@ const KernelState = struct {
     usb_xhci_controllers: toolbox.RandomRemovalLinkedList(*usb_xhci.Controller),
     key_events: w64.KeyEvents,
     are_characters_shifted: bool,
-    debug_symbols: std.dwarf.DwarfInfo,
+    debug_symbols: ?std.dwarf.DwarfInfo,
 
     global_arena: *toolbox.Arena,
     frame_arena: *toolbox.Arena,
@@ -47,6 +40,11 @@ const KernelState = struct {
     interrupt_handler_table: [amd64.IDT_LEN]?InterruptHandler,
 
     //monitor state
+    cursor_x: usize,
+    cursor_y: usize,
+    last_cursor_update: w64.Time,
+    cursor_char: toolbox.Rune,
+    is_monitor_enabled: bool,
     rune_buffer: []toolbox.Rune,
     command_buffer: toolbox.DynamicArray(u8),
     opened_address: u64,
@@ -92,7 +90,11 @@ const StackUnwinder = struct {
             return null;
         }
         self.fp = new_fp;
-        return ip;
+
+        //TODO: make this CALL_INSTRUCTION_SIZE optional since it doesn't
+        // work well for external interrupts
+        const CALL_INSTRUCTION_SIZE = 5;
+        return ip - CALL_INSTRUCTION_SIZE;
     }
 };
 
@@ -102,41 +104,58 @@ pub fn panic(msg: []const u8, error_return_trace: ?*std.builtin.StackTrace, ret_
     _ = ret_addr;
     _ = error_return_trace;
 
-    echo_line("{s}", .{msg});
-    var it = StackUnwinder.init();
-    const debug_symbols = &g_state.debug_symbols;
     const global_allocator = g_state.global_arena.zstd_allocator;
-    while (it.next()) |return_address| {
-        const CALL_INSTRUCTION_SIZE = 5;
-        const address = return_address - CALL_INSTRUCTION_SIZE;
-        const compile_unit = debug_symbols.findCompileUnit(address) catch |e| {
-            echo_line("At {X} CompileUnit error: {}", .{ address, e });
-            continue;
-        };
-        const line_info = debug_symbols.getLineNumberInfo(
-            global_allocator,
-            compile_unit.*,
-            address,
-        ) catch |e| {
-            echo_line("At {X} Line Info Error: {}", .{ address, e });
-            continue;
-        };
-        echo_line("At {s}:{}:{} -- {?s}: 0x{X}", .{
-            line_info.file_name,
-            line_info.line,
-            line_info.column,
-            debug_symbols.getSymbolName(address),
-            address,
-        });
+    if (g_state.debug_symbols) |*debug_symbols| {
+        echo_line("{s}", .{msg});
+        var it = StackUnwinder.init();
+        while (it.next()) |address| {
+            const compile_unit = debug_symbols.findCompileUnit(address) catch |e| {
+                echo_line("At {X} CompileUnit error: {}", .{ address, e });
+                continue;
+            };
+            const line_info = debug_symbols.getLineNumberInfo(
+                global_allocator,
+                compile_unit.*,
+                address,
+            ) catch |e| {
+                echo_line("At {X} Line Info Error: {}", .{ address, e });
+                continue;
+            };
+            echo_line("At {s}:{}:{} -- {?s}: 0x{X}", .{
+                line_info.file_name,
+                line_info.line,
+                line_info.column,
+                debug_symbols.getSymbolName(address),
+                address,
+            });
+        }
+        render();
+        toolbox.hang();
+    } else {
+        echo_line("{s}", .{msg});
+        var it = StackUnwinder.init();
+        while (it.next()) |address| {
+            echo_line("At {X}", .{address});
+        }
+        toolbox.hang();
     }
-    render();
-    toolbox.hang();
 }
 
 var g_state: KernelState = undefined;
 
+extern var _bss_start: u8;
+extern var _bss_end: u8;
+
 export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.C) noreturn {
     @setAlignStack(256);
+    //clear bss
+    {
+        const bss_start_address = @intFromPtr(&_bss_start);
+        const bss_end_address = @intFromPtr(&_bss_end);
+        const len = bss_end_address - bss_start_address;
+        const bss = @as([*]u8, @ptrCast(&_bss_start))[0..len];
+        @memset(bss, 0);
+    }
     //disable interrupts
     asm volatile ("cli");
     profiler.restore(kernel_start_context.boot_profiler_snapshot);
@@ -150,11 +169,11 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
     {
         profiler.begin("Set up boot log");
         defer profiler.end();
-        //set up boot log
+        // set up boot log
 
         @memset(kernel_start_context.screen.back_buffer, .{ .data = 0 });
         boot_log.init_graphics_console(kernel_start_context.screen);
-        boot_log.println("Booting Wozmon64 kernel...", .{});
+        echo_line("Booting Wozmon64 kernel...", .{});
     }
     {
         profiler.begin("Set up global kernel state");
@@ -167,6 +186,7 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
         w64.Time.init(kernel_start_context.tsc_mhz);
 
         g_state = .{
+            .is_monitor_enabled = false,
             .cursor_x = 0,
             .cursor_y = 0,
             .last_cursor_update = w64.now(),
@@ -179,7 +199,7 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
             .key_events = w64.KeyEvents.init(kernel_start_context.global_arena),
             .usb_xhci_controllers = toolbox.RandomRemovalLinkedList(*usb_xhci.Controller).init(kernel_start_context.global_arena),
             .are_characters_shifted = false,
-            .debug_symbols = undefined,
+            .debug_symbols = null,
 
             .show_profiler = false,
             .profiler_to_draw = .FrameProfiler,
@@ -212,6 +232,17 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
         };
     }
     {
+        profiler.begin("Set up GDT");
+        set_up_gdt(g_state.global_arena);
+        profiler.end();
+    }
+
+    {
+        profiler.begin("Set up IDT");
+        set_up_idt(g_state.global_arena);
+        profiler.end();
+    }
+    {
         profiler.begin("Set up debug symbols");
         defer profiler.end();
 
@@ -219,7 +250,7 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
             kernel_start_context.kernel_elf_bytes,
             kernel_start_context.global_arena,
         ) catch |e| {
-            boot_log_println("failed to parse debug symbols: {}", .{e});
+            echo_line("failed to parse debug symbols: {}", .{e});
             toolbox.hang();
         };
         g_state.debug_symbols = debug_symbols;
@@ -242,24 +273,15 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
             mapped_memory,
         );
     }
-    {
-        profiler.begin("Set up GDT");
-        set_up_gdt(g_state.global_arena);
-        profiler.end();
-    }
-
-    {
-        profiler.begin("Set up IDT");
-        set_up_idt(g_state.global_arena);
-        profiler.end();
-    }
 
     //map APIC and set up main core context
+    const apic_base_msr = amd64.rdmsr(amd64.IA32_APIC_BASE_MSR);
     const apic_base_address = kernel_memory.map_mmio_physical_address(
-        amd64.rdmsr(amd64.IA32_APIC_BASE_MSR) &
+        apic_base_msr &
             toolbox.mask_for_bit_range(12, 63, u64),
         1,
     );
+
     const apic = amd64.APIC.init(apic_base_address);
 
     //set up main core processor context and thread local storage
@@ -355,7 +377,7 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
                     if (end_point_device_header.class_code == pcie.MASS_STORAGE_CLASS_CODE and
                         end_point_device_header.subclass_code == pcie.NVME_SUBCLASS_CODE)
                     {
-                        boot_log_println("Found NVMe drive! ", .{});
+                        echo_line("Found NVMe drive! ", .{});
 
                         //TODO:
                         // const nvme_device = nvme.init(dev, nvme_bar0) catch |e| {
@@ -416,8 +438,11 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
                                     }
                                 }
                             },
+                            pcie.USB_DEVICE_PROGRAMING_INTERFACE => {
+                                echo_line("PCIe-attached USB device", .{});
+                            },
                             else => {
-                                boot_log_println("USB controller: {}", .{end_point_device_header});
+                                echo_line("USB controller: {}", .{end_point_device_header});
                             },
                         }
                     } else if (end_point_device_header.class_code == pcie.NETWORK_CONTROLLER_CLASS_CODE and
@@ -427,7 +452,7 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
                             eth_intel.init(dev);
                         }
                     } else {
-                        boot_log_println("Unsupported PCIe device.  Class: {X}, SubClass: {X}", .{
+                        echo_line("Unsupported PCIe device.  Class: {X}, SubClass: {X}", .{
                             end_point_device_header.class_code,
                             end_point_device_header.subclass_code,
                         });
@@ -439,7 +464,7 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
             }
         }
 
-        boot_log_println("PCIE devices len: {}", .{pcie_devices.len});
+        echo_line("PCIE devices len: {}", .{pcie_devices.len});
     }
 
     //populate runtime constants
@@ -449,9 +474,25 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
         g_state.frame_buffer_size.* = g_state.screen.frame_buffer.len;
         g_state.frame_buffer_stride.* = g_state.screen.stride;
     }
-
-    //disable boot log console
+    //TODO delete
     {
+        const lvt_offsets = .{ 0xF0, 0x320, 0x2F0, 0x350, 0x360, 0x370, 0x340, 0x330 };
+        // const apic = w64.get_processor_context().apic;
+        inline for (lvt_offsets) |offset| {
+            const register = apic.data[offset / 4];
+            echo_line("LVT Register offset {X}, value: {X}, vector: {X}, mask: {}", .{
+                offset,
+                register,
+                register & 0xFF,
+                (register >> 16) & 1,
+            });
+        }
+        // toolbox.hang();
+    }
+
+    //enable monitor
+    {
+        g_state.is_monitor_enabled = true;
         boot_log.disable();
     }
 
@@ -615,6 +656,11 @@ pub inline fn echo_line(comptime fmt: []const u8, args: anytype) void {
 }
 
 pub fn echo_fmt(comptime fmt: []const u8, args: anytype) void {
+    if (!g_state.is_monitor_enabled) {
+        boot_log.print(fmt, args);
+        return;
+    }
+
     const scratch_arena = g_state.scratch_arena;
     const arena_save_point = scratch_arena.create_save_point();
     defer scratch_arena.restore_save_point(arena_save_point);
@@ -782,7 +828,13 @@ fn double_fault_handler(vector_number: u64, error_code: u64) callconv(.C) void {
 }
 fn general_protection_fault_handler(vector_number: u64, error_code: u64) callconv(.C) void {
     _ = vector_number;
-    toolbox.panic("General protection fault occurred! Error code: {}", .{error_code});
+    echo_line("General protection fault occurred! Error code: {}", .{error_code});
+    var it = StackUnwinder.init();
+    while (it.next()) |address| {
+        echo_line("At {X}", .{address});
+    }
+    toolbox.hang();
+    //toolbox.panic("General protection fault occurred! Error code: {}", .{error_code});
 }
 fn nmi_handler(vector_number: u64, error_code: u64) callconv(.C) void {
     _ = error_code;
@@ -818,14 +870,10 @@ fn page_fault_handler(vector_number: u64, error_code: u64) callconv(.C) void {
     if (to_map == 0) {
         toolbox.panic("Allocating memory at null page! Address: {X}", .{unmapped_address});
     }
-    boot_log_println("Allocating page for address: {X}, Error code: {}", .{
+    echo_line("Allocating page for address: {X}, Error code: {}", .{
         to_map,
         error_code,
     });
-    var it = StackUnwinder.init();
-    while (it.next()) |address| {
-        boot_log_println("At {X}", .{address});
-    }
 
     //TODO: remove
     const page = kernel_memory.allocate_at_address(to_map, 1);
@@ -840,7 +888,12 @@ fn invalid_opcode_handler(vector_number: u64, error_code: u64) callconv(.C) void
     toolbox.panic("Invalid opcode!", .{});
 }
 export fn interrupt_handler_common_inner(vector_number: u64, error_code: u64) callconv(.C) void {
-    boot_log_println("Vector number: {}, error code: {}", .{ vector_number, error_code });
+    //NOTE: debug code
+    // echo_line("Vector number: {}, error code: {}", .{ vector_number, error_code });
+    // var it = StackUnwinder.init();
+    // while (it.next()) |address| {
+    //     echo_line("At {X}", .{address});
+    // }
     if (g_state.interrupt_handler_table[vector_number]) |interrupt_handler| {
         interrupt_handler(vector_number, error_code);
     } else {
@@ -1437,8 +1490,9 @@ fn handle_command(command: commands.Command) void {
 }
 fn print_apic_id_and_core_id() void {
     const core_id = w64.get_core_id();
-    const apic_id = @as(*u32, @ptrFromInt(g_state.apic_address + 0x20)).*;
-    boot_log_println(
+    const apic = w64.get_processor_context().apic;
+    const apic_id = apic.read_register(amd64.APICIDRegister).apic_id;
+    echo_line(
         "Core id {}, APIC ID {X}: fbase tls: {x} context: {x},",
         .{
             core_id,
@@ -1449,10 +1503,10 @@ fn print_apic_id_and_core_id() void {
     );
 }
 fn exit_running_program() void {
-    boot_log_println("Escape hit", .{});
+    echo_line("Escape hit", .{});
     for (g_state.application_processor_contexts) |context| {
         if (context.job.get()) |_| {
-            boot_log_println("Sending NMI to {}", .{context.processor_id});
+            echo_line("Sending NMI to {}", .{context.processor_id});
             const interrupt_command_register_low = amd64.APICInterruptControlRegisterLow{
                 .vector = 0,
                 .message_type = .NonMaskableInterrupt,
@@ -1465,7 +1519,7 @@ fn exit_running_program() void {
             const interrupt_command_register_high = amd64.APICInterruptControlRegisterHigh{
                 .destination = @intCast(context.processor_id),
             };
-            boot_log_println("Low command {X}, High command {X}, ", .{
+            echo_line("Low command {X}, High command {X}, ", .{
                 @as(u32, @bitCast(interrupt_command_register_low)),
                 @as(u32, @bitCast(interrupt_command_register_high)),
             });
@@ -1550,7 +1604,6 @@ pub fn xhci_interrupt_handler(_: u64, _: u64) callconv(.C) void {
     const apic = w64.get_processor_context().apic;
     const vector = amd64.get_in_service_interrupt_vector(apic);
     toolbox.assert(vector != 0, "Interrupt handler called with no interrupt in service", .{});
-    boot_log_println("Vector fired: {}", .{vector});
 
     var it = g_state.usb_xhci_controllers.iterator();
     while (it.next()) |controller_ptr| {

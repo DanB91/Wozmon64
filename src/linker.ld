@@ -20,6 +20,8 @@ SECTIONS {
         *(.rodata*) 
     }
     .bss : ALIGN(PAGE_SIZE) { 
+        _bss_start = .;
         *(.bss*) 
+        _bss_end = .;
     }
 }

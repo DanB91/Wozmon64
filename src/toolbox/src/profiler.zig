@@ -127,6 +127,11 @@ pub fn line_iterator(snapshot: State, arena: *toolbox.Arena) PrintLineIterator {
 }
 
 pub fn save() State {
+    toolbox.assert(
+        g_state.block_stack.back == 0,
+        "All profiling sections should be ended before saving profile snapshot!",
+        .{},
+    );
     return g_state;
 }
 

@@ -8,10 +8,10 @@ const usb_hid = @import("usb_hid.zig");
 const w64 = @import("../wozmon64_kernel.zig");
 const kernel_memory = @import("../kernel_memory.zig");
 const static_assert = toolbox.static_assert;
-const boot_log_println = kernel.boot_log_println;
+const echo_line = kernel.echo_line;
 
 //TODO: for debugging on desktop
-// pub fn boot_log_println(comptime fmt: []const u8, args: anytype) void {
+// pub fn echo_line(comptime fmt: []const u8, args: anytype) void {
 //     _ = args;
 //     _ = fmt;
 // }
@@ -859,7 +859,7 @@ pub fn init(
     }
 
     const bar0 = pcie_device.base_address_registers[0].?;
-    boot_log_println("Found USB xHCI controller! ", .{});
+    echo_line("Found USB xHCI controller! ", .{});
 
     const capability_registers = bar_to_register(
         CapabilityRegisters,
@@ -872,7 +872,7 @@ pub fn init(
         capability_registers.runtime_registers_space_offset + 0x20,
     );
 
-    boot_log_println("CR Len: {}", .{capability_registers.length});
+    echo_line("CR Len: {}", .{capability_registers.length});
     const operational_registers = bar_to_register(
         OperationalRegisters,
         bar0,
@@ -882,7 +882,7 @@ pub fn init(
     const hcsparams1 = capability_registers.read_register(CapabilityRegisters.StructuralParameters1);
     const hccparams1 = capability_registers.read_register(CapabilityRegisters.HCCPARAMS1);
 
-    boot_log_println(
+    echo_line(
         "Detected xHCI device at with {} ports and {} slots.",
         .{ hcsparams1.max_ports, hcsparams1.max_device_slots },
     );
@@ -919,7 +919,7 @@ pub fn init(
             return error.TimeOutWaitingForControllerToBeReset;
         }
 
-        boot_log_println("xHCI controller reset!", .{});
+        echo_line("xHCI controller reset!", .{});
     }
 
     //After Chip Hardware Reset wait until the Controller Not Ready (CNR) flag in the USBSTS is ‘0’
@@ -1011,7 +1011,7 @@ pub fn init(
 
         const install_result = pcie.install_interrupt_hander(pcie_device, kernel.xhci_interrupt_handler);
         if (!install_result.success) {
-            boot_log_println("Failed to install interrupt!!!", .{});
+            toolbox.panic("Failed to install interrupt!!!", .{});
             //TODO log error
         }
         interrupt_vector = install_result.vector;
@@ -1062,7 +1062,7 @@ pub fn init(
             @as(u64, hcsparams2.max_scratchpad_buffers_lo);
 
         if (number_of_scratch_pad_buffers > 0) {
-            boot_log_println("Creating {} scratch pad buffers for xHCI controller...", .{number_of_scratch_pad_buffers});
+            echo_line("Creating {} scratch pad buffers for xHCI controller...", .{number_of_scratch_pad_buffers});
             const scratch_pad_buffer_pointer_array_allocation_result = alloc_slice_aligned(
                 ScratchPadBufferPointer,
                 number_of_scratch_pad_buffers,
@@ -1081,9 +1081,9 @@ pub fn init(
             }
 
             device_slots[0] = scratch_pad_buffer_pointer_array_allocation_result.physical_address_start;
-            boot_log_println("Done!", .{});
+            echo_line("Done!", .{});
         } else {
-            boot_log_println("No scratch pad buffers for xHCI controller!", .{});
+            echo_line("No scratch pad buffers for xHCI controller!", .{});
         }
         operational_registers.write_device_context_base_address_array_pointer(
             device_slots_allocation_result.physical_address_start,
@@ -1110,14 +1110,14 @@ pub fn init(
 
         //wait 20ms
         w64.delay_milliseconds(20);
-        boot_log_println("xHCI controller started!", .{});
+        echo_line("xHCI controller started!", .{});
     }
 
     //check if there was an error starting it up
     {
         const status = operational_registers.read_register(OperationalRegisters.USBStatus);
         if (status.host_controller_error) {
-            boot_log_println("Status: {}", .{status});
+            echo_line("Status: {}", .{status});
             return error.ErrorStartingXHCIController;
         }
     }
@@ -1164,7 +1164,7 @@ pub fn init(
             scratch_arena,
             controller,
         ) catch |e| {
-            boot_log_println("Error initializing device! {}", .{e});
+            echo_line("Error initializing device! {}", .{e});
             continue;
         };
         if (device_opt) |device| {
@@ -1225,7 +1225,7 @@ fn init_device(
             portsc = port_registers.read_register(PortRegisters.StatusAndControlRegister);
         }
         if (!portsc.current_connect_status) {
-            boot_log_println("No device on port {}", .{port_number});
+            echo_line("No device on port {}", .{port_number});
             return null;
         }
     }
@@ -1250,7 +1250,7 @@ fn init_device(
             port_registers.write_register(portsc);
         },
         else => {
-            boot_log_println("Unexpected state for USB device!", .{});
+            echo_line("Unexpected state for USB device!", .{});
 
             //TODO report error and give up on port
             return error.UnexpectedStateForUSBDevice;
@@ -1264,7 +1264,7 @@ fn init_device(
         while (i < 20) : (i += 1) {
             if (portsc.port_enabled_disabled) {
                 //reset done!
-                boot_log_println("USB device deteced on port {}! Port Speed: {}", .{ port_number, portsc.port_speed });
+                echo_line("USB device deteced on port {}! Port Speed: {}", .{ port_number, portsc.port_speed });
 
                 reset_success = true;
                 break;
@@ -1279,7 +1279,7 @@ fn init_device(
         }
 
         if (!reset_success) {
-            boot_log_println("Failed to reset USB port", .{});
+            echo_line("Failed to reset USB port", .{});
             //TODO report error and give up on port
             return error.TimedOutWaitingUSBPortToReset;
         }
@@ -1298,11 +1298,11 @@ fn init_device(
             //TODO get slot type and OR into control
             .control = @as(u32, @intFromEnum(TransferRequestBlock.Type.EnableSlotCommand)) << 10,
         }, controller) catch |e| {
-            boot_log_println("Error enabling slot: {}", .{e});
+            echo_line("Error enabling slot: {}", .{e});
             return e;
         };
         if (command_response.number_of_bytes_not_transferred != 0) {
-            boot_log_println("Error enabling slot, due to short packet", .{});
+            echo_line("Error enabling slot, due to short packet", .{});
             return error.ShortPacketError;
         }
 
@@ -1345,7 +1345,7 @@ fn init_device(
         };
         //TODO verify no error from submit command.  verify output context is addressed
         _ = submit_command(command, controller) catch |e| {
-            boot_log_println("Error setting input context: {}", .{e});
+            echo_line("Error setting input context: {}", .{e});
             return e;
         };
     }
@@ -1377,7 +1377,7 @@ fn init_device(
             device_slot_data_structures.endpoint_0_transfer_ring,
             controller,
         ) catch |e| {
-            boot_log_println("Error getting device descriptor: {}", .{e});
+            echo_line("Error getting device descriptor: {}", .{e});
             return e;
         };
 
@@ -1404,14 +1404,14 @@ fn init_device(
                     .control = @as(u32, slot_id) << 24 | @as(u32, @intFromEnum(TransferRequestBlock.Type.EvaluateContextCommand)) << 10,
                 };
                 _ = submit_command(command, controller) catch |e| {
-                    boot_log_println("Error setting max packet on input context: {}", .{e});
+                    echo_line("Error setting max packet on input context: {}", .{e});
                     return e;
                 };
 
                 const output_device_context = device_slot_data_structures.output_device_context;
                 const output_control_endpoint_context = get_endpoint_context_from_output_device_context(1, output_device_context);
 
-                boot_log_println("old packet size: {}, new packet size: {}", .{ old_max_packet, output_control_endpoint_context.max_packet_size });
+                echo_line("old packet size: {}, new packet size: {}", .{ old_max_packet, output_control_endpoint_context.max_packet_size });
             }
         }
     }
@@ -1425,7 +1425,7 @@ fn init_device(
         device_slot_data_structures.endpoint_0_transfer_ring,
         controller,
     ) catch |e| {
-        boot_log_println("Error getting device descriptor: {}", .{e});
+        echo_line("Error getting device descriptor: {}", .{e});
         return e;
     };
 
@@ -1486,7 +1486,7 @@ fn init_device(
             device_slot_data_structures.endpoint_0_transfer_ring,
             controller,
         ) catch |e| {
-            boot_log_println("Error getting config descriptor: {}", .{e});
+            echo_line("Error getting config descriptor: {}", .{e});
             return e;
         };
         const configuration_and_interface_descriptor_result = alloc_slice(
@@ -1507,12 +1507,12 @@ fn init_device(
             device_slot_data_structures.endpoint_0_transfer_ring,
             controller,
         ) catch |e| {
-            boot_log_println("Error getting full config descriptor: {}", .{e});
+            echo_line("Error getting full config descriptor: {}", .{e});
             return e;
         };
         //TODO set configuration for endpoint
 
-        boot_log_println("Device {?s} (Serial Number: {?s}) by {?s} has {} interfaces and {} configs", .{ product_string, serial_number_string, manufacturer_string, configuration_descriptor.num_interfaces, device_descriptor.num_configurations });
+        echo_line("Device {?s} (Serial Number: {?s}) by {?s} has {} interfaces and {} configs", .{ product_string, serial_number_string, manufacturer_string, configuration_descriptor.num_interfaces, device_descriptor.num_configurations });
 
         //TODO store configuration descriptors in a list and retrieve them with a generic function that takes in a descriptor struct type?
         if (configuration_descriptor.num_interfaces <= 0) {
@@ -1532,7 +1532,7 @@ fn init_device(
             const length = configuration_and_interface_descriptor[i];
             const descriptor_type = configuration_and_interface_descriptor[i + 1];
             if (length == 0) {
-                boot_log_println("Zero length descriptor, aborting enumerating this device...", .{});
+                echo_line("Zero length descriptor, aborting enumerating this device...", .{});
                 break;
             }
             defer i += length;
@@ -1546,7 +1546,7 @@ fn init_device(
                         *USBInterfaceDescriptor,
                         @ptrCast(configuration_and_interface_descriptor.ptr + i),
                     );
-                    boot_log_println("    {} interface {}, setting {} with {} endpoints", .{ interface_descriptor.interface_class, interface_descriptor.interface_number, interface_descriptor.alternate_setting, interface_descriptor.num_endpoints });
+                    echo_line("    {} interface {}, setting {} with {} endpoints", .{ interface_descriptor.interface_class, interface_descriptor.interface_number, interface_descriptor.alternate_setting, interface_descriptor.num_endpoints });
 
                     //TODO
                     const class_data: Interface.ClassData = switch (interface_descriptor.interface_class) {
@@ -1728,20 +1728,20 @@ fn init_device(
             command,
             controller,
         ) catch |e| {
-            boot_log_println("Error running Configure Endpoint Command: {}", .{e});
+            echo_line("Error running Configure Endpoint Command: {}", .{e});
             return e;
         };
-        boot_log_println("Successfully ran Configure Endpoint Command!", .{});
+        echo_line("Successfully ran Configure Endpoint Command!", .{});
 
         set_configuration_on_endpoint0(
             configuration_descriptor.configuration_value,
             device_slot_data_structures.endpoint_0_transfer_ring,
             controller,
         ) catch |e| {
-            boot_log_println("Error running SET_CONFIGURATION: {}", .{e});
+            echo_line("Error running SET_CONFIGURATION: {}", .{e});
             return e;
         };
-        boot_log_println("Successfully ran SET_CONFIGURATION!", .{});
+        echo_line("Successfully ran SET_CONFIGURATION!", .{});
 
         //TODO send SET_FEATURE for remote wake up and others if supported
 
@@ -1787,7 +1787,7 @@ fn get_string_descriptor(
         endpoint_0_transfer_ring,
         controller,
     ) catch |e| {
-        boot_log_println("Failed to get string descriptor header: {}", .{e});
+        echo_line("Failed to get string descriptor header: {}", .{e});
     };
     const string_descriptor_result = alloc_slice(
         u8,
@@ -1808,7 +1808,7 @@ fn get_string_descriptor(
         endpoint_0_transfer_ring,
         controller,
     ) catch |e| {
-        boot_log_println("Failed to get string descriptor: {}", .{e});
+        echo_line("Failed to get string descriptor: {}", .{e});
     };
     return string_descriptor[@sizeOf(USBDescriptorHeader)..];
 }
@@ -2108,7 +2108,7 @@ pub fn poll_controller(controller: *Controller) bool {
                 //TODO
             },
             else => {
-                boot_log_println("Unhandled USB event: {} -- {}", .{ trb.read_trb_type(), trb });
+                echo_line("Unhandled USB event: {} -- {}", .{ trb.read_trb_type(), trb });
             },
         }
 
