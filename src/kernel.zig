@@ -129,7 +129,9 @@ pub fn panic(msg: []const u8, error_return_trace: ?*std.builtin.StackTrace, ret_
                 address,
             });
         }
-        render();
+        if (g_state.is_monitor_enabled) {
+            render();
+        }
         toolbox.hang();
     } else {
         echo_line("{s}", .{msg});
@@ -176,9 +178,6 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
         echo_line("Booting Wozmon64 kernel...", .{});
     }
     {
-        profiler.begin("Set up global kernel state");
-        defer profiler.end();
-
         const frame_arena =
             kernel_start_context.global_arena.create_arena_from_arena(w64.KERNEL_FRAME_ARENA_SIZE);
         const scratch_arena =
@@ -231,17 +230,15 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
             .is_user_program_running = false,
         };
     }
+
     {
-        profiler.begin("Set up GDT");
         set_up_gdt(g_state.global_arena);
-        profiler.end();
     }
 
     {
-        profiler.begin("Set up IDT");
         set_up_idt(g_state.global_arena);
-        profiler.end();
     }
+
     {
         profiler.begin("Set up debug symbols");
         defer profiler.end();
@@ -366,6 +363,9 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
 
     //set up drivers
     {
+        profiler.begin("set up drivers");
+        defer profiler.end();
+
         const pcie_devices = pcie.enumerate_devices(
             kernel_start_context.root_xsdt,
             g_state.global_arena,
@@ -474,21 +474,6 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
         g_state.frame_buffer_size.* = g_state.screen.frame_buffer.len;
         g_state.frame_buffer_stride.* = g_state.screen.stride;
     }
-    //TODO delete
-    {
-        const lvt_offsets = .{ 0xF0, 0x320, 0x2F0, 0x350, 0x360, 0x370, 0x340, 0x330 };
-        // const apic = w64.get_processor_context().apic;
-        inline for (lvt_offsets) |offset| {
-            const register = apic.data[offset / 4];
-            echo_line("LVT Register offset {X}, value: {X}, vector: {X}, mask: {}", .{
-                offset,
-                register,
-                register & 0xFF,
-                (register >> 16) & 1,
-            });
-        }
-        // toolbox.hang();
-    }
 
     //enable monitor
     {
@@ -562,9 +547,6 @@ pub inline fn free_memory(data: []u8) void {
 fn parse_dwarf_debug_symbols(kernel_elf: []const u8, arena: *toolbox.Arena) !std.dwarf.DwarfInfo {
     var section_store = toolbox.DynamicArray(std.elf.Elf64_Shdr).init(arena, 64);
     const header = b: {
-        profiler.begin("Parse ELF header");
-        defer profiler.end();
-
         var kernel_image_byte_stream = std.io.fixedBufferStream(kernel_elf);
 
         var header = std.elf.Header.read(&kernel_image_byte_stream) catch {
@@ -1025,27 +1007,6 @@ fn main_loop() void {
     while (true) {
         profiler.start_profiler();
         profiler.begin("Frame");
-        defer {}
-        // {
-        //     profiler.begin("Poll USB controllers");
-        //     defer profiler.end();
-
-        //     var it = g_state.usb_xhci_controllers.iterator();
-        //     while (it.next_value()) |controller| {
-        //         profiler.begin("Poll XHCI controller");
-        //         const should_poll_hid = usb_xhci.poll_controller(controller);
-        //         profiler.end();
-
-        //         if (should_poll_hid) {
-        //             profiler.begin("Poll USB HID");
-        //             usb_hid.poll(
-        //                 controller,
-        //                 &g_state.key_events,
-        //             );
-        //             profiler.end();
-        //         }
-        //     }
-        // }
         while (g_state.key_events.modifier_key_pressed_events.dequeue()) |scancode| {
             switch (scancode) {
                 .LeftShift, .RightShift => {
@@ -1139,17 +1100,29 @@ fn draw_profiler() void {
         .BootProfiler => g_state.boot_profiler_snapshot,
     };
 
-    var profiler_it = profiler.line_iterator(profiler_snapshot, g_state.scratch_arena);
+    var stats = profiler.compute_statistics(profiler_snapshot, g_state.scratch_arena);
+    draw_line(
+        toolbox.str8fmt(
+            "Total elapsed: {}ms",
+            .{stats.total_elapsed.milliseconds()},
+            g_state.scratch_arena,
+        ),
+        0,
+    );
+    stats.section_statistics.sort_reverse("percent_with_children");
 
-    var rune_y: usize = 0;
-    while (profiler_it.next()) |line| {
-        var rune_x: usize = 0;
-        var it = line.iterator();
-        while (it.next()) |rune_and_length| {
-            draw_rune(rune_and_length.rune, rune_x, rune_y);
-            rune_x += 1;
-        }
-        rune_y += 1;
+    for (stats.section_statistics.items(), 0..) |section_stats, line_number| {
+        const offset_y = 1;
+        draw_line(section_stats.str8(g_state.scratch_arena), line_number + offset_y);
+    }
+}
+
+fn draw_line(line: toolbox.String8, line_y: usize) void {
+    var rune_x: usize = 0;
+    var it = line.iterator();
+    while (it.next()) |rune_and_length| {
+        draw_rune(rune_and_length.rune, rune_x, line_y, 10);
+        rune_x += 1;
     }
 }
 
@@ -1158,7 +1131,7 @@ fn draw_runes() void {
     var rune_y: usize = 0;
     const rune_buffer = g_state.rune_buffer;
     for (rune_buffer) |c| {
-        draw_rune(c, rune_x, rune_y);
+        draw_rune(c, rune_x, rune_y, 0);
 
         rune_x += 1;
         if (rune_x >= g_state.screen.width_in_runes) {
@@ -1167,7 +1140,7 @@ fn draw_runes() void {
         }
     }
 }
-fn draw_rune(rune: toolbox.Rune, rune_x: usize, rune_y: usize) void {
+fn draw_rune(rune: toolbox.Rune, rune_x: usize, rune_y: usize, vertical_padding: usize) void {
     const r = switch (rune) {
         'a'...'z' => rune - 32,
         else => rune,
@@ -1185,7 +1158,7 @@ fn draw_rune(rune: toolbox.Rune, rune_x: usize, rune_y: usize) void {
         0,
         0,
         rune_x * font.kerning,
-        rune_y * font.height,
+        rune_y * (font.height + vertical_padding),
         font.width,
         font.height,
     );
@@ -1236,7 +1209,7 @@ fn blink_cursor() void {
 }
 
 fn draw_cursor() void {
-    draw_rune(g_state.cursor_char, g_state.cursor_x, g_state.cursor_y);
+    draw_rune(g_state.cursor_char, g_state.cursor_x, g_state.cursor_y, 0);
 }
 
 fn carriage_return() void {

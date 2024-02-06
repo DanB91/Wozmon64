@@ -5,6 +5,7 @@ const kernel = @import("../kernel.zig");
 const kernel_memory = @import("../kernel_memory.zig");
 
 const echo_line = kernel.echo_line;
+const profiler = toolbox.profiler;
 
 //TODO: for debugging on desktop
 // fn echo_line(a: anytype, b: anytype) void {
@@ -253,6 +254,9 @@ pub fn init_hid_interface(
     hid_descriptor: Descriptor,
     scratch_arena: *toolbox.Arena,
 ) !void {
+    profiler.begin("set up USB HID");
+    defer profiler.end();
+
     const save_point = scratch_arena.create_save_point();
     defer scratch_arena.restore_save_point(save_point);
     const in_endpoint = b: {

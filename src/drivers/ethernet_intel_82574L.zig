@@ -19,6 +19,12 @@ const EEPROMReadRegister = packed struct(u32) {
     pub const BYTE_OFFSET = 0x14;
 };
 
+const ControlRegister = packed struct(u32) {
+    data: u32,
+
+    pub const BYTE_OFFSET = 0;
+};
+
 const InterruptMaskClearRegister = packed struct(u32) {
     //this can be broken up, into different fields.  but lumping them all together for now
     all_masks: u25,
@@ -53,6 +59,7 @@ pub fn init(pcie_device: pcie.Device) void {
 
         //TODO: once we global reset, we re-disable interrupts
 
+        echo_line("CTRL: {b}", .{read_register(ControlRegister, bar0).data});
     }
 
     var checksum: u16 = 0;

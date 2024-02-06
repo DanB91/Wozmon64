@@ -210,9 +210,7 @@ pub fn main() noreturn {
         var descriptor_size: usize = 0;
         var descriptor_version: u32 = 0;
 
-        profiler.begin("UEFI GetMemoryMap");
         const status = bs.getMemoryMap(&mmap_size, @ptrCast(&mmap_store), &map_key, &descriptor_size, &descriptor_version);
-        profiler.end();
 
         if (status != ZSUEFIStatus.Success) {
             fatal("Failed to get memory map! Error: {}", .{status});
@@ -1088,9 +1086,6 @@ fn map_virtual_memory(
     }
 }
 fn parse_kernel_elf(arena: *toolbox.Arena) !KernelParseResult {
-    profiler.begin("Parse kernel ELF");
-    defer profiler.end();
-
     var page_table_data = toolbox.DynamicArray(PageTableData).init(arena, 32);
     var kernel_image_byte_stream = std.io.fixedBufferStream(KERNEL_ELF);
     var header = try std.elf.Header.read(&kernel_image_byte_stream);

@@ -65,7 +65,7 @@ fn graphics_print(comptime fmt: []const u8, args: anytype) void {
     if (comptime !ENABLE_CONSOLE) {
         return;
     }
-    serial_println(fmt, args);
+    serial_print(fmt, args);
 
     var buf: [MAX_BYTES]u8 = undefined;
     const utf8 =
@@ -220,7 +220,7 @@ pub fn serial_print(comptime fmt: []const u8, args: anytype) void {
     defer g_state.serial_lock.release();
     const COM1_PORT_ADDRESS = 0x3F8;
     var buf: [MAX_BYTES]u8 = undefined;
-    const bytes = std.fmt.bufPrint(&buf, fmt ++ "\r\n", args) catch buf[0..];
+    const bytes = std.fmt.bufPrint(&buf, fmt, args) catch buf[0..];
     for (bytes) |b| {
         asm volatile (
             \\outb %%al, %%dx

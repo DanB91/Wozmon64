@@ -4,6 +4,7 @@ const w64 = @import("../wozmon64_kernel.zig");
 const kernel_memory = @import("../kernel_memory.zig");
 const kernel = @import("../kernel.zig");
 
+const profiler = toolbox.profiler;
 const echo_line = kernel.echo_line;
 
 pub const END_POINT_DEVICE_HEADER_TYPE = 0;
@@ -357,6 +358,9 @@ pub fn enumerate_devices(
     root_xsdt: *const amd64.XSDT,
     arena: *toolbox.Arena,
 ) []const Device {
+    profiler.begin("Enumerate PCIe devices");
+    defer profiler.end();
+
     var ret = toolbox.DynamicArray(Device).init(arena, 32);
     const mcfg = amd64.find_acpi_table(root_xsdt, "MCFG", MCFG) catch
         toolbox.panic("Could not find MCFG table!", .{});

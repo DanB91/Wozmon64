@@ -53,6 +53,12 @@ pub fn DynamicArray(comptime T: type) type {
             else => @compileError("Unsupported type " ++ @typeName(T) ++ " for DynamicArray"),
         };
 
+        pub const sort_reverse = switch (@typeInfo(T)) {
+            .Int, .Float => sort_number_reverse,
+            .Struct => sort_struct_reverse,
+            else => @compileError("Unsupported type " ++ @typeName(T) ++ " for DynamicArray"),
+        };
+
         fn sort_number(self: *Self) void {
             std.sort.block(T, self.store[0..self.len()], self, struct {
                 fn less_than(context: *Self, a: T, b: T) bool {
@@ -67,6 +73,24 @@ pub fn DynamicArray(comptime T: type) type {
                 fn less_than(context: *Self, a: T, b: T) bool {
                     _ = context;
                     return @field(a, field_name) < @field(b, field_name);
+                }
+            }.less_than);
+        }
+
+        fn sort_number_reverse(self: *Self) void {
+            std.sort.block(T, self.store[0..self.len()], self, struct {
+                fn less_than(context: *Self, a: T, b: T) bool {
+                    _ = context;
+                    return a > b;
+                }
+            }.less_than);
+        }
+
+        fn sort_struct_reverse(self: *Self, comptime field_name: []const u8) void {
+            std.sort.block(T, self.store[0..self.len()], self, struct {
+                fn less_than(context: *Self, a: T, b: T) bool {
+                    _ = context;
+                    return @field(a, field_name) > @field(b, field_name);
                 }
             }.less_than);
         }

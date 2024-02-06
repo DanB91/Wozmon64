@@ -487,9 +487,10 @@ fn run_benchmarks() void {
     profiler.start_profiler();
     defer {
         profiler.end_profiler();
-        var it = profiler.line_iterator(profiler.save(), arena);
-        while (it.next()) |to_print| {
-            toolbox.println_str8(to_print);
+        const stats = profiler.compute_statistics(profiler.save(), arena);
+        toolbox.println("Total time: {}ms", .{stats.total_elapsed.milliseconds()});
+        for (stats.section_statistics.items()) |to_print| {
+            toolbox.println_str8(to_print.str8(arena));
         }
         arena.free_all();
     }

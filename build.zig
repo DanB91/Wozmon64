@@ -129,7 +129,7 @@ pub fn build(b: *std.Build) !void {
             "-cpu",
             "Skylake-Client-v3",
             "-d",
-            "int,cpu_reset,trace:pic_interrupt,trace:pci_*,trace:usb_*,trace:apic_*,trace:msix_*",
+            "int,cpu_reset,trace:pic_interrupt,trace:pci_*,trace:usb_*,trace:apic_*,trace:msix_*,trace:e1000e_*",
             "-D",
             "zig-out/qemu.log",
             "-serial",
@@ -149,7 +149,7 @@ pub fn build(b: *std.Build) !void {
             "-device",
             "usb-mouse,bus=xhci.0",
             "-nic",
-            "mac=12:34:56:AB:CD:EF",
+            "model=e1000e,mac=12:34:56:AB:CD:EF",
         };
         const run_step = b.step("run", "Run Wozmon64 in qemu");
         const qemu_command = b.addSystemCommand(&args_array);

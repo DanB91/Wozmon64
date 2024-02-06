@@ -8,7 +8,9 @@ const usb_hid = @import("usb_hid.zig");
 const w64 = @import("../wozmon64_kernel.zig");
 const kernel_memory = @import("../kernel_memory.zig");
 const static_assert = toolbox.static_assert;
+
 const echo_line = kernel.echo_line;
+const profiler = toolbox.profiler;
 
 //TODO: for debugging on desktop
 // pub fn echo_line(comptime fmt: []const u8, args: anytype) void {
@@ -845,6 +847,9 @@ pub fn init(
     pcie_device: pcie.Device,
     scratch_arena: *toolbox.Arena,
 ) !*Controller {
+    profiler.begin("set up xhci controller");
+    defer profiler.end();
+
     var controller_arena = toolbox.Arena.init(toolbox.mb(2));
     errdefer controller_arena.free_all();
 
@@ -887,7 +892,6 @@ pub fn init(
         .{ hcsparams1.max_ports, hcsparams1.max_device_slots },
     );
     {
-        var i: usize = 0;
         //stop the controller
         var command = operational_registers
             .read_register(OperationalRegisters.USBCommand);
@@ -895,28 +899,50 @@ pub fn init(
         operational_registers.write_register(command);
         var status = operational_registers
             .read_register(OperationalRegisters.USBStatus);
-        while (!status.hc_halted and i < 20) : (i += 1) {
-            status = operational_registers
-                .read_register(OperationalRegisters.USBStatus);
-            w64.delay_milliseconds(5);
-        }
-        if (!status.hc_halted) {
-            return error.TimeOutWaitingForControllerToBeHalted;
+
+        //wait for controller to halt
+        {
+            profiler.begin("Wait for xHCI controller to halt");
+            defer profiler.end();
+
+            const timeout_ms = 100;
+            const deadline_ms = toolbox.now().milliseconds() + timeout_ms;
+            while (true) {
+                if (status.hc_halted) {
+                    break;
+                }
+                if (toolbox.now().milliseconds() >= deadline_ms) {
+                    return error.TimeOutWaitingForControllerToBeHalted;
+                }
+                status = operational_registers
+                    .read_register(OperationalRegisters.USBStatus);
+                std.atomic.spinLoopHint();
+            }
         }
 
         //reset controller
-        i = 0;
         command = @as(OperationalRegisters.USBCommand, @bitCast(@as(u32, 0)));
         command.host_controller_reset = true;
         operational_registers.write_register(command);
 
-        while (command.host_controller_reset and i < 20) : (i += 1) {
-            command = operational_registers
-                .read_register(OperationalRegisters.USBCommand);
-            w64.delay_milliseconds(5);
-        }
-        if (command.host_controller_reset) {
-            return error.TimeOutWaitingForControllerToBeReset;
+        //wait for controller to reset
+        {
+            profiler.begin("Wait for xHCI controller to reset");
+            defer profiler.end();
+
+            const timeout_ms = 100;
+            const deadline_ms = toolbox.now().milliseconds() + timeout_ms;
+            while (true) {
+                if (!command.host_controller_reset) {
+                    break;
+                }
+                if (toolbox.now().milliseconds() >= deadline_ms) {
+                    return error.TimeOutWaitingForControllerToBeReset;
+                }
+                command = operational_registers
+                    .read_register(OperationalRegisters.USBCommand);
+                std.atomic.spinLoopHint();
+            }
         }
 
         echo_line("xHCI controller reset!", .{});
@@ -1108,8 +1134,6 @@ pub fn init(
         //}
         //}
 
-        //wait 20ms
-        w64.delay_milliseconds(20);
         echo_line("xHCI controller started!", .{});
     }
 
@@ -1150,15 +1174,11 @@ pub fn init(
         .devices = toolbox.RandomRemovalLinkedList(*Device).init(controller_arena),
     };
 
-    //TODO refactor the body of the loop with an error handler.  don't want errors bubbling up if a single port fails
     for (root_hub_usb_ports, 0..) |*port_registers, port_index| {
         const device_opt = init_device(
             port_registers,
             port_index,
             hccparams1.csz,
-            command_trb_ring,
-            event_trb_ring,
-            &controller.event_response_map,
             device_slots,
             doorbells,
             scratch_arena,
@@ -1200,33 +1220,32 @@ fn init_device(
     port_registers: *volatile PortRegisters,
     port_index: usize,
     uses_64byte_contexts: bool,
-    command_trb_ring: *volatile CommandRing,
-    event_trb_ring: *volatile EventRing,
-    event_response_map: *EventResponseMap,
     device_slots: []DeviceContextPointer,
     doorbells: []volatile u32,
     scratch_arena: *toolbox.Arena,
     controller: *Controller,
 ) !?*Device {
-    _ = event_response_map;
-    _ = event_trb_ring;
-    _ = command_trb_ring;
     const port_number = port_index + 1;
     var portsc = port_registers.read_register(PortRegisters.StatusAndControlRegister);
     //TODO SeaBIOS seems to create a usb device object per port?
     //     not sure we want that
 
     {
-        for (0..20) |_| {
+        profiler.begin("Detect xHCI port");
+        defer profiler.end();
+
+        const timeout_ms = 10;
+        const deadline_ms = toolbox.now().milliseconds() + timeout_ms;
+        while (true) {
             if (portsc.current_connect_status) {
                 break;
             }
-            w64.delay_milliseconds(5);
+            if (toolbox.now().milliseconds() >= deadline_ms) {
+                echo_line("No device on port {}", .{port_number});
+                return null;
+            }
             portsc = port_registers.read_register(PortRegisters.StatusAndControlRegister);
-        }
-        if (!portsc.current_connect_status) {
-            echo_line("No device on port {}", .{port_number});
-            return null;
+            std.atomic.spinLoopHint();
         }
     }
     var device_arena = toolbox.Arena.init(toolbox.mb(2));
@@ -1239,6 +1258,7 @@ fn init_device(
 
     //reset the port
     switch (portsc.port_link_state) {
+
         //TODO
         .U0 => {
             // A USB3 port - controller automatically performs reset
@@ -1259,29 +1279,28 @@ fn init_device(
 
     //wait for reset
     {
-        var reset_success = false;
-        var i: usize = 0;
-        while (i < 20) : (i += 1) {
+        profiler.begin("Wait xHCI device reset");
+        defer profiler.end();
+
+        const timeout_ms = 1000;
+        const deadline_ms = toolbox.now().milliseconds() + timeout_ms;
+        while (true) {
             if (portsc.port_enabled_disabled) {
                 //reset done!
                 echo_line("USB device deteced on port {}! Port Speed: {}", .{ port_number, portsc.port_speed });
-
-                reset_success = true;
                 break;
             }
             if (!portsc.current_connect_status) {
                 //TODO report error and give up on port
                 return error.UnknownErrorWaitingUSBPortToReset;
             }
-            //println_serial("Waiting for USB...", .{});
-            w64.delay_milliseconds(5);
+            if (toolbox.now().milliseconds() >= deadline_ms) {
+                echo_line("Failed to reset USB port", .{});
+                //TODO report error and give up on port
+                return error.TimedOutWaitingUSBPortToReset;
+            }
             portsc = port_registers.read_register(PortRegisters.StatusAndControlRegister);
-        }
-
-        if (!reset_success) {
-            echo_line("Failed to reset USB port", .{});
-            //TODO report error and give up on port
-            return error.TimedOutWaitingUSBPortToReset;
+            std.atomic.spinLoopHint();
         }
     }
     switch (portsc.port_speed) {
@@ -2294,6 +2313,10 @@ fn wait_for_transfer_response(
     transfer_trb_phyiscal_address: usize,
     controller: *Controller,
 ) !PollEventRingResult {
+    const timeout_ms = 1000;
+    const deadline_ms = toolbox.now().milliseconds() + timeout_ms;
+    profiler.begin("Wait for xHCI transfer");
+    defer profiler.end();
     while (true) {
         if (poll_controller(controller)) {
             const response_opt = controller.event_response_map.get(transfer_trb_phyiscal_address);
@@ -2304,7 +2327,10 @@ fn wait_for_transfer_response(
                 return response;
             }
         }
-        w64.delay_milliseconds(10);
+        if (toolbox.now().milliseconds() >= deadline_ms) {
+            return error.TimeoutWaitingForTransferResponse;
+        }
+        std.atomic.spinLoopHint();
     }
 }
 
