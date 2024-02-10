@@ -31,6 +31,7 @@ const KernelState = struct {
     usb_xhci_controllers: toolbox.RandomRemovalLinkedList(*usb_xhci.Controller),
     key_events: w64.KeyEvents,
     are_characters_shifted: bool,
+    is_ctrl_down: bool,
     debug_symbols: ?std.dwarf.DwarfInfo,
 
     global_arena: *toolbox.Arena,
@@ -93,8 +94,10 @@ const StackUnwinder = struct {
 
         //TODO: make this CALL_INSTRUCTION_SIZE optional since it doesn't
         // work well for external interrupts
-        const CALL_INSTRUCTION_SIZE = 5;
-        return ip - CALL_INSTRUCTION_SIZE;
+        //const CALL_INSTRUCTION_SIZE = 5;
+        //return ip - CALL_INSTRUCTION_SIZE;
+
+        return ip;
     }
 };
 
@@ -198,6 +201,7 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
             .key_events = w64.KeyEvents.init(kernel_start_context.global_arena),
             .usb_xhci_controllers = toolbox.RandomRemovalLinkedList(*usb_xhci.Controller).init(kernel_start_context.global_arena),
             .are_characters_shifted = false,
+            .is_ctrl_down = false,
             .debug_symbols = null,
 
             .show_profiler = false,
@@ -449,7 +453,8 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
                         end_point_device_header.subclass_code == pcie.ETHERNET_CONTROLLER_SUBCLASS_CODE)
                     {
                         if (end_point_device_header.vendor_id == eth_intel.VENDOR_ID and end_point_device_header.device_id == eth_intel.DEVICE_ID) {
-                            eth_intel.init(dev);
+                            //TODO
+                            _ = eth_intel.init(dev);
                         }
                     } else {
                         echo_line("Unsupported PCIe device.  Class: {X}, SubClass: {X}", .{
@@ -809,14 +814,8 @@ fn double_fault_handler(vector_number: u64, error_code: u64) callconv(.C) void {
     toolbox.panic("Double fault occurred! Error code: {}", .{error_code});
 }
 fn general_protection_fault_handler(vector_number: u64, error_code: u64) callconv(.C) void {
-    _ = vector_number;
-    echo_line("General protection fault occurred! Error code: {}", .{error_code});
-    var it = StackUnwinder.init();
-    while (it.next()) |address| {
-        echo_line("At {X}", .{address});
-    }
-    toolbox.hang();
-    //toolbox.panic("General protection fault occurred! Error code: {}", .{error_code});
+    _ = vector_number; // autofix
+    toolbox.panic("General protection fault occurred! Error code: {}", .{error_code});
 }
 fn nmi_handler(vector_number: u64, error_code: u64) callconv(.C) void {
     _ = error_code;
@@ -857,11 +856,8 @@ fn page_fault_handler(vector_number: u64, error_code: u64) callconv(.C) void {
         error_code,
     });
 
-    //TODO: remove
     const page = kernel_memory.allocate_at_address(to_map, 1);
-    for (page) |*b| {
-        b.* = 0xAA;
-    }
+    @memset(page, 0);
 }
 
 fn invalid_opcode_handler(vector_number: u64, error_code: u64) callconv(.C) void {
@@ -1027,7 +1023,8 @@ fn main_loop() void {
         while (g_state.key_events.key_pressed_events.dequeue()) |scancode| {
             switch (scancode) {
                 .F1 => type_program(programs.woz_and_jobs),
-                .F2 => {
+                .F2 => type_program(programs.doom),
+                .F3 => {
                     if (g_state.show_profiler and g_state.profiler_to_draw == .FrameProfiler) {
                         g_state.show_profiler = false;
                     } else {
@@ -1035,7 +1032,7 @@ fn main_loop() void {
                         g_state.profiler_to_draw = .FrameProfiler;
                     }
                 },
-                .F3 => {
+                .F4 => {
                     if (g_state.show_profiler and g_state.profiler_to_draw == .BootProfiler) {
                         g_state.show_profiler = false;
                     } else {
@@ -1243,8 +1240,10 @@ fn carriage_return() void {
 fn type_program(program: []const u8) void {
     const load_address: u32 = w64.DEFAULT_PROGRAM_LOAD_ADDRESS;
     const dest = @as([*]u8, @ptrFromInt(load_address))[0..program.len];
+    @memset(dest, 0);
     @memcpy(dest, program);
-    echo_line("Loaded program to address {X}!", .{load_address});
+
+    echo_line("Loaded {} byte program to address {X}!", .{ program.len, load_address });
     type_number(load_address);
     type_key(.Slash, false);
     type_number(@as(u32, 16));
@@ -1252,7 +1251,7 @@ fn type_program(program: []const u8) void {
     type_number(load_address);
     type_key(.R, false);
 
-    // type_number(@as(u32, 0x230_0000));
+    // type_number(@as(u32, w64.DEFAULT_PROGRAM_LOAD_ADDRESS));
     // type_key(.Semicolon, true);
     // type_key(.Space, false);
     // for (program) |b| {
@@ -1397,7 +1396,8 @@ fn handle_command(command: commands.Command) void {
         },
         .Execute => |arguments| {
             const entry_point: *const fn (?*anyopaque) callconv(.C) void = @ptrFromInt(arguments.start);
-            var system_api = w64.SystemAPI{
+            var system_api = w64.ProgramContext{
+                .tsc_mhz = toolbox.amd64_ticks_to_microseconds,
                 .error_and_terminate = &user_program_error_and_terminate,
                 .terminate = &user_program_terminate,
                 .register_key_events_queue = &register_key_events_queue,
@@ -1423,6 +1423,9 @@ fn handle_command(command: commands.Command) void {
                         .LeftShift, .RightShift => {
                             g_state.are_characters_shifted = true;
                         },
+                        .LeftCtrl, .RightCtrl => {
+                            g_state.is_ctrl_down = true;
+                        },
                         else => {},
                     }
                     if (g_state.user_key_events) |user_key_events| {
@@ -1434,6 +1437,9 @@ fn handle_command(command: commands.Command) void {
                         .LeftShift, .RightShift => {
                             g_state.are_characters_shifted = false;
                         },
+                        .LeftCtrl, .RightCtrl => {
+                            g_state.is_ctrl_down = false;
+                        },
                         else => {},
                     }
                     if (g_state.user_key_events) |user_key_events| {
@@ -1441,7 +1447,7 @@ fn handle_command(command: commands.Command) void {
                     }
                 }
                 while (g_state.key_events.key_pressed_events.dequeue()) |scancode| {
-                    if (scancode == .Escape) {
+                    if (scancode == .Escape and g_state.is_ctrl_down) {
                         exit_running_program();
                         return;
                     }
@@ -1476,10 +1482,9 @@ fn print_apic_id_and_core_id() void {
     );
 }
 fn exit_running_program() void {
-    echo_line("Escape hit", .{});
+    g_state.user_key_events = null;
     for (g_state.application_processor_contexts) |context| {
         if (context.job.get()) |_| {
-            echo_line("Sending NMI to {}", .{context.processor_id});
             const interrupt_command_register_low = amd64.APICInterruptControlRegisterLow{
                 .vector = 0,
                 .message_type = .NonMaskableInterrupt,
@@ -1492,10 +1497,6 @@ fn exit_running_program() void {
             const interrupt_command_register_high = amd64.APICInterruptControlRegisterHigh{
                 .destination = @intCast(context.processor_id),
             };
-            echo_line("Low command {X}, High command {X}, ", .{
-                @as(u32, @bitCast(interrupt_command_register_low)),
-                @as(u32, @bitCast(interrupt_command_register_high)),
-            });
             amd64.send_interprocessor_interrupt(
                 w64.get_processor_context().apic,
                 interrupt_command_register_low,

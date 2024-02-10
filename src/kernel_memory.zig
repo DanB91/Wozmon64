@@ -86,33 +86,35 @@ pub fn allocate_at_address(virtual_address: u64, number_of_pages: usize) []u8 {
     defer g_state.lock.release();
 
     for (g_state.free_conventional_memory) |*desc| {
-        if (desc.number_of_pages >= number_of_pages) {
-            //  1) map virtual address
-            const mapping_result = map_conventional_memory_physical_address(
-                desc.physical_address,
-                virtual_address,
-                number_of_pages,
-                g_state.arena,
-            ) catch |e| toolbox.panic("Could not map virtual address {X} to {X}: {}", .{
-                g_state.next_free_virtual_address,
-                desc.physical_address,
-                e,
-            });
-            g_state.next_free_virtual_address = mapping_result.next_free_virtual_address;
-            //  2) update descriptor
-            desc.number_of_pages -= number_of_pages;
-            desc.physical_address += number_of_pages * w64.MEMORY_PAGE_SIZE;
-            //  3) add to allocated block map
-            g_state.allocated_blocks.put(virtual_address, .{
-                .virtual_address = virtual_address,
-                .number_of_pages = number_of_pages,
-            });
-
-            return @as(
-                [*]u8,
-                @ptrFromInt(virtual_address),
-            )[0 .. number_of_pages * w64.MEMORY_PAGE_SIZE];
+        if (desc.number_of_pages < number_of_pages) {
+            continue;
         }
+
+        //  1) map virtual address
+        const mapping_result = map_conventional_memory_physical_address(
+            desc.physical_address,
+            virtual_address,
+            number_of_pages,
+            g_state.arena,
+        ) catch |e| toolbox.panic("Could not map virtual address {X} to {X}: {}", .{
+            g_state.next_free_virtual_address,
+            desc.physical_address,
+            e,
+        });
+        g_state.next_free_virtual_address = mapping_result.next_free_virtual_address;
+        //  2) update descriptor
+        desc.number_of_pages -= number_of_pages;
+        desc.physical_address += number_of_pages * w64.MEMORY_PAGE_SIZE;
+        //  3) add to allocated block map
+        g_state.allocated_blocks.put(virtual_address, .{
+            .virtual_address = virtual_address,
+            .number_of_pages = number_of_pages,
+        });
+
+        return @as(
+            [*]u8,
+            @ptrFromInt(virtual_address),
+        )[0 .. number_of_pages * w64.MEMORY_PAGE_SIZE];
     }
     toolbox.panic(
         "Out of page memory! Requested {} pages for virtual address: {X}",
@@ -336,7 +338,7 @@ pub fn map_mmio_physical_address(
     });
     return starting_virtual_address;
 }
-pub const MapMemoryResult = struct {
+pub const ConventionalMapMemoryResult = struct {
     virtual_address: u64,
     next_free_virtual_address: u64,
 };
@@ -345,7 +347,7 @@ pub fn map_conventional_memory_physical_address(
     starting_virtual_address: u64,
     number_of_pages: usize,
     arena: *toolbox.Arena,
-) !MapMemoryResult {
+) !ConventionalMapMemoryResult {
     g_state.lock.lock();
     defer g_state.lock.release();
 

@@ -23,16 +23,14 @@ pub fn build(b: *std.Build) !void {
         }));
         const exe = b.addExecutable(.{
             .name = "woz_and_jobs",
-            .root_source_file = .{ .path = "sample_programs/woz_and_jobs.zig" },
+            .root_source_file = .{ .path = "sample_programs/woz_and_jobs/woz_and_jobs.zig" },
             .target = target,
-            .optimize = b.standardOptimizeOption(.{
-                .preferred_optimize_mode = .Debug,
-            }),
+            .optimize = .Debug,
             .pic = true,
         });
 
         exe.entry = .{ .symbol_name = "entry" };
-        exe.linker_script = .{ .path = "sample_programs/linker.ld" };
+        exe.linker_script = .{ .path = "sample_programs/woz_and_jobs/linker.ld" };
         exe.root_module.addImport("wozmon64", w64_module);
         exe.root_module.addImport("toolbox", toolbox_module);
         exe.root_module.red_zone = false;
@@ -48,13 +46,56 @@ pub fn build(b: *std.Build) !void {
         woz_and_jobs_install_step =
             b.addInstallBinFile(objcopy.getOutput(), "woz_and_jobs.bin");
 
-        //woz_and_jobs_install_step.step.dependOn(&install_step.step);
         install_elf.step.dependOn(&exe.step);
         objcopy.step.dependOn(&install_elf.step);
         woz_and_jobs_install_step.step.dependOn(&objcopy.step);
     }
     const woz_and_jobs_module = b.addModule("woz_and_job_program", .{
         .root_source_file = woz_and_jobs_install_step.source,
+    });
+
+    var doom_step: *std.Build.Step.Compile = undefined;
+    var doom_install_step: *std.Build.Step.InstallFile = undefined;
+    {
+        const target = b.resolveTargetQuery(try std.zig.CrossTarget.parse(.{
+            .arch_os_abi = "x86_64-freestanding-gnu",
+        }));
+        const exe = b.addExecutable(.{
+            .name = "doom",
+            .target = target,
+            .root_source_file = .{ .path = "sample_programs/doom/doom.zig" },
+            .optimize = .ReleaseFast,
+            .pic = true,
+        });
+        exe.addIncludePath(.{ .cwd_relative = "sample_programs/doom" });
+        exe.addCSourceFiles(.{
+            .files = &.{"sample_programs/doom/doom.c"},
+            // .flags = &.{"-fno-sanitize=alignment,shift,signed-integer-overflow"},
+            .flags = &.{"-fno-sanitize=all"},
+        });
+        exe.entry = .{ .symbol_name = "entry" };
+        exe.linker_script = .{ .path = "sample_programs/doom/linker.ld" };
+        exe.root_module.addImport("wozmon64", w64_module);
+        exe.root_module.addImport("toolbox", toolbox_module);
+        exe.root_module.red_zone = false;
+
+        doom_step = exe;
+        const install_elf =
+            b.addInstallArtifact(exe, .{});
+        const objcopy = exe.addObjCopy(.{
+            .format = .bin,
+        });
+        doom_step.step.dependOn(&woz_and_jobs_step.step);
+
+        doom_install_step =
+            b.addInstallBinFile(objcopy.getOutput(), "doom.bin");
+
+        install_elf.step.dependOn(&exe.step);
+        objcopy.step.dependOn(&install_elf.step);
+        doom_install_step.step.dependOn(&woz_and_jobs_install_step.step);
+    }
+    const doom_module = b.addModule("doom", .{
+        .root_source_file = doom_install_step.source,
     });
 
     var kernel_step: *std.Build.Step.Compile = undefined;
@@ -78,12 +119,18 @@ pub fn build(b: *std.Build) !void {
         exe.root_module.addImport("toolbox", toolbox_module);
         exe.root_module.addImport("woz_and_jobs_program", woz_and_jobs_module);
 
-        exe.step.dependOn(&woz_and_jobs_step.step);
-
         kernel_step = exe;
         kernel_install_step = b.addInstallArtifact(exe, .{});
 
-        kernel_install_step.step.dependOn(&woz_and_jobs_install_step.step);
+        const compile_doom = true;
+        if (compile_doom) {
+            exe.root_module.addImport("doom", doom_module);
+            exe.step.dependOn(&doom_step.step);
+            kernel_install_step.step.dependOn(&doom_step.step);
+        } else {
+            exe.step.dependOn(&woz_and_jobs_step.step);
+            kernel_install_step.step.dependOn(&woz_and_jobs_install_step.step);
+        }
     }
     const kernel_elf_module = b.addModule("kernel_image", .{
         .root_source_file = kernel_step.getEmittedBin(),

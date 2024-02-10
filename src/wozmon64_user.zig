@@ -7,7 +7,8 @@ const std = @import("std");
 
 pub const MEMORY_PAGE_SIZE = toolbox.mb(2);
 
-pub const SystemAPI = struct {
+pub const ProgramContext = struct {
+    tsc_mhz: i64,
     error_and_terminate: *const fn (bytes: [*c]const u8, len: u64) callconv(.C) noreturn,
     terminate: *const fn () callconv(.C) noreturn,
     register_key_events_queue: *const fn (key_events: *KeyEvents) callconv(.C) void,
@@ -385,12 +386,15 @@ inline fn rdmsr(msr: u32) u64 {
     return (edx << 32) | eax;
 }
 //for debugging purposes on QEMU
+pub inline fn println_serial(comptime fmt: []const u8, args: anytype) void {
+    print_serial(fmt ++ "\r\n", args);
+}
 
-pub fn println_serial(comptime fmt: []const u8, args: anytype) void {
+pub fn print_serial(comptime fmt: []const u8, args: anytype) void {
     //TODO copy to toolbox println
-    if (comptime !toolbox.IS_DEBUG) {
-        return;
-    }
+    // if (comptime !toolbox.IS_DEBUG) {
+    //     return;
+    // }
     const MAX_BYTES = 1024;
     const StaticVars = struct {
         var lock: ReentrantTicketLock = .{};
@@ -398,7 +402,7 @@ pub fn println_serial(comptime fmt: []const u8, args: anytype) void {
     StaticVars.lock.lock();
     defer StaticVars.lock.release();
     var buf: [MAX_BYTES]u8 = undefined;
-    const bytes = std.fmt.bufPrint(&buf, fmt ++ "\r\n", args) catch buf[0..];
+    const bytes = std.fmt.bufPrint(&buf, fmt, args) catch buf[0..];
     const COM1_PORT_ADDRESS = 0x3F8;
     for (bytes) |b| {
         asm volatile (
