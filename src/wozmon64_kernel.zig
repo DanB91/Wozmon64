@@ -19,6 +19,7 @@ pub const KERNEL_FRAME_ARENA_SIZE = toolbox.mb(4);
 pub const KERNEL_SCRATCH_ARENA_SIZE = toolbox.mb(4);
 
 pub const PAGE_TABLE_RECURSIVE_OFFSET = 510;
+pub const KERNEL_VIRTUAL_ADDRESS_PREFIX = 0xFFFF_FFFF_8000_0000;
 
 pub const SUPPORTED_RESOLUTIONS = [_]struct {
     width: u32,
@@ -155,7 +156,7 @@ pub fn get_pml4t() *amd64.PageMappingLevel4Table {
     return address.to(*amd64.PageMappingLevel4Table);
 }
 
-pub fn get_pdp(virtual_address: u64) *amd64.PageDirectoryPointer {
+pub fn get_pdp(virtual_address: u64) *volatile amd64.PageDirectoryPointer {
     const vaddr_bits: amd64.VirtualAddress4KBPage = @bitCast(virtual_address);
     const pdp_address = amd64.VirtualAddress4KBPage{
         .signed_bits = 0xFFFF,
@@ -167,7 +168,7 @@ pub fn get_pdp(virtual_address: u64) *amd64.PageDirectoryPointer {
     };
     return pdp_address.to(*amd64.PageDirectoryPointer);
 }
-pub fn get_pd_4kb(virtual_address: u64) *amd64.PageDirectory4KB {
+pub fn get_pd_4kb(virtual_address: u64) *volatile amd64.PageDirectory4KB {
     const vaddr_bits: amd64.VirtualAddress4KBPage = @bitCast(virtual_address);
     const pd_address = amd64.VirtualAddress4KBPage{
         .signed_bits = 0xFFFF,
@@ -179,7 +180,7 @@ pub fn get_pd_4kb(virtual_address: u64) *amd64.PageDirectory4KB {
     };
     return pd_address.to(*amd64.PageDirectory4KB);
 }
-pub fn get_pd_2mb(virtual_address: u64) *amd64.PageDirectory2MB {
+pub fn get_pd_2mb(virtual_address: u64) *volatile amd64.PageDirectory2MB {
     const vaddr_bits: amd64.VirtualAddress4KBPage = @bitCast(virtual_address);
     const pd_address = amd64.VirtualAddress4KBPage{
         .signed_bits = 0xFFFF,
@@ -191,7 +192,7 @@ pub fn get_pd_2mb(virtual_address: u64) *amd64.PageDirectory2MB {
     };
     return pd_address.to(*amd64.PageDirectory2MB);
 }
-pub fn get_pt(virtual_address: u64) *amd64.PageTable {
+pub fn get_pt(virtual_address: u64) *volatile amd64.PageTable {
     const vaddr_bits: amd64.VirtualAddress4KBPage = @bitCast(virtual_address);
     const pt_address = amd64.VirtualAddress4KBPage{
         .signed_bits = 0xFFFF,
@@ -208,48 +209,10 @@ pub fn pdp_from_virtual_address(virtual_address: u64) *amd64.PageDirectoryPointe
     const pdp_index = (virtual_address >> (12 + 9 + 9)) & 0xFF8;
     return @ptrFromInt(0xFFFF_FF7F_BF80_0000 | (pdp_index << (12 + 9 + 9)));
 }
-pub const Time = struct {
-    ticks: i64 = 0,
-
-    var ticks_to_microseconds: i64 = 0;
-    pub fn init(tsc_mhz: u64) void {
-        ticks_to_microseconds = @intCast(tsc_mhz);
-    }
-
-    pub inline fn sub(self: Time, other: Time) Time {
-        return .{ .ticks = self.ticks - other.ticks };
-    }
-
-    pub inline fn nanoseconds(self: Time) i64 {
-        return self.microseconds() * 1000;
-    }
-    pub inline fn microseconds(self: Time) i64 {
-        return @divTrunc(@as(i64, @intCast(self.ticks)), ticks_to_microseconds);
-    }
-    pub inline fn milliseconds(self: Time) i64 {
-        return @divTrunc(self.microseconds(), 1000);
-    }
-    pub inline fn seconds(self: Time) i64 {
-        return @divTrunc(self.microseconds(), 1_000_000);
-    }
-    pub inline fn minutes(self: Time) i64 {
-        return @divTrunc(self.microseconds(), 1_000_000 / 60);
-    }
-    pub inline fn hours(self: Time) i64 {
-        return @divTrunc(self.microseconds(), 1_000_000 / 60 / 60);
-    }
-    pub inline fn days(self: Time) i64 {
-        return @divTrunc(self.microseconds(), 1_000_000 / 60 / 60 / 24);
-    }
-};
-
-pub fn now() Time {
-    return .{ .ticks = @intCast(amd64.rdtsc()) };
-}
 
 pub fn delay_milliseconds(n: i64) void {
-    const start = now();
-    while (now().sub(start).milliseconds() < n) {
+    const start = toolbox.now();
+    while (toolbox.now().sub(start).milliseconds() < n) {
         std.atomic.spinLoopHint();
     }
 }
@@ -259,6 +222,40 @@ pub fn get_processor_context() *ApplicationProcessorKernelContext {
         : [ret] "=r" (-> *ApplicationProcessorKernelContext),
     );
 }
+
+pub fn is_kernel_address(address: u64) bool {
+    return (address & KERNEL_VIRTUAL_ADDRESS_PREFIX) == KERNEL_VIRTUAL_ADDRESS_PREFIX;
+}
+pub const StackUnwinder = struct {
+    fp: u64,
+    i: usize = 0,
+    max_iterations: usize = 10,
+
+    pub fn init() StackUnwinder {
+        return .{
+            .fp = @frameAddress(),
+        };
+    }
+    pub fn next(self: *StackUnwinder) ?u64 {
+        defer self.i += 1;
+        if (self.i >= self.max_iterations or self.fp == 0 or !toolbox.is_aligned_to(self.fp, @alignOf(u64))) {
+            return null;
+        }
+        const ip = @as(*const u64, @ptrFromInt(self.fp + @sizeOf(u64))).*;
+        const new_fp = @as(*const u64, @ptrFromInt(self.fp)).*;
+        if (new_fp <= self.fp) {
+            return null;
+        }
+        self.fp = new_fp;
+
+        //TODO: make this CALL_INSTRUCTION_SIZE optional since it doesn't
+        // work well for external interrupts
+        //const CALL_INSTRUCTION_SIZE = 5;
+        //return ip - CALL_INSTRUCTION_SIZE;
+
+        return ip;
+    }
+};
 
 comptime {
     toolbox.static_assert(@sizeOf(w64_user.Pixel) == 4, "Incorrect size for Pixel");

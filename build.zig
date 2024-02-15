@@ -226,13 +226,15 @@ pub fn build(b: *std.Build) !void {
         // Creates a step for unit testing. This only builds the test executable
         // but does not run it.
         const unit_tests = b.addTest(.{
-            .root_source_file = .{ .path = "src/commands.zig" },
+            .root_source_file = .{ .path = "src/unit_tests.zig" },
             .target = target,
             .optimize = optimize,
         });
         unit_tests.root_module.addImport("toolbox", toolbox_module);
+        const unit_test_install_step = b.addInstallArtifact(unit_tests, .{});
 
         const run_unit_tests = b.addRunArtifact(unit_tests);
+        run_unit_tests.step.dependOn(&unit_test_install_step.step);
 
         // Similar to creating the run step earlier, this exposes a `test` step to
         // the `zig build --help` menu, providing a way for the user to request

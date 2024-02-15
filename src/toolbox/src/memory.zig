@@ -265,6 +265,7 @@ pub const Arena = struct {
         if (new_len <= buf.len) {
             return true;
         }
+
         return false;
     }
 

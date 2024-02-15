@@ -370,6 +370,7 @@ pub fn enumerate_devices(
     for (pci_descriptors) |pd| {
         var bus: u64 = 0;
         var max_bus_opt: ?u64 = null;
+        var pci_request_vaddr = kernel_memory.generate_new_virtual_address(1, w64.MMIO_PAGE_SIZE);
         bus_loop: while (true) : (bus += 1) {
             if (max_bus_opt) |max_bus| {
                 if (bus >= max_bus) {
@@ -380,23 +381,32 @@ pub fn enumerate_devices(
                 function_loop: for (0..8) |function_number| {
                     const pci_request_paddr = pd.base_address +
                         ((bus - pd.start_pci_bus_number) << 20 | device_number << 15 | function_number << 12);
-
-                    const pci_request_vaddr = kernel_memory.physical_to_virtual(pci_request_paddr) catch |e| {
-                        toolbox.panic("Error finding descriptor address 0x{X}. Error: {} ", .{ pci_request_paddr, e });
-                    };
+                    if (!kernel_memory.map_mmio(pci_request_vaddr, pci_request_paddr)) {
+                        //TODO: logging
+                    }
                     const pcie_device_header = @as([*]align(4096) u8, @ptrFromInt(pci_request_vaddr))[0..64];
                     if (pcie_device_header[0] == 0xFF and pcie_device_header[1] == 0xFF) {
                         if (function_number == 0) {
                             if (max_bus_opt == null and device_number == 0) {
+                                if (kernel_memory.unmap(pci_request_vaddr) == 0) {
+                                    //TODO: logging
+                                }
                                 break :bus_loop;
+                            }
+                            if (kernel_memory.unmap(pci_request_vaddr) == 0) {
+                                //TODO: logging
                             }
                             continue :device_loop;
                         }
+                        if (kernel_memory.unmap(pci_request_vaddr) == 0) {
+                            //TODO: logging
+                        }
                         continue :function_loop;
                     }
+
                     const header_type = pcie_device_header[HEADER_TYPE_BYTE_OFFSET] & 0x7F;
                     if (header_type == BRIDGE_DEVICE_HEADER_TYPE) {
-                        const pcie_bridge_device: *align(4096) volatile BridgeDeviceHeader =
+                        const pcie_bridge_device: *align(w64.MMIO_PAGE_SIZE) volatile BridgeDeviceHeader =
                             @ptrCast(pcie_device_header);
 
                         if (max_bus_opt) |max_bus| {
@@ -446,6 +456,7 @@ pub fn enumerate_devices(
                         disable_msi_and_msix(device);
                         ret.append(device);
                     }
+                    pci_request_vaddr = kernel_memory.generate_new_virtual_address(1, w64.MMIO_PAGE_SIZE);
                 }
             }
         }
@@ -548,7 +559,7 @@ pub fn install_interrupt_hander(
     });
     echo_line("BARs virtual: 0x{X}, physical: 0x{X}, Core ID: {}", .{
         @intFromPtr(bar.ptr),
-        kernel_memory.virtual_to_physical(@intFromPtr(bar.ptr)) catch 0,
+        kernel_memory.virtual_to_physical(@intFromPtr(bar.ptr)),
         w64.get_core_id(),
     });
     const msi_x_table = msi_x_capability_structure.table(bar);
@@ -663,11 +674,24 @@ fn map_base_address_register_into_virtual_memory(
             echo_line("Bad alignment for bar: low: 0x{X}, high: 0x{X}, len: {}", .{ low, high, len });
             continue;
         }
-        const virtual_bar = kernel_memory.map_mmio_physical_address(
-            effective_physical_bar,
-            len / w64.MMIO_PAGE_SIZE,
+        const num_pages = len / w64.MMIO_PAGE_SIZE;
+        const virtual_bar_start = kernel_memory.generate_new_virtual_address(
+            num_pages,
+            w64.MMIO_PAGE_SIZE,
         );
-        const bar_data = @as([*]u8, @ptrFromInt(virtual_bar))[0..len];
+        var virtual_bar = virtual_bar_start;
+        var physical_bar = effective_physical_bar;
+        for (0..num_pages) |_| {
+            if (!kernel_memory.map_mmio(virtual_bar, physical_bar)) {
+                toolbox.panic("Failed to map pcie BAR! Virtual: {X}, Physical: {X}", .{
+                    virtual_bar,
+                    physical_bar,
+                });
+            }
+            virtual_bar += w64.MMIO_PAGE_SIZE;
+            physical_bar += w64.MMIO_PAGE_SIZE;
+        }
+        const bar_data = @as([*]u8, @ptrFromInt(virtual_bar_start))[0..len];
         virtual_bars[i / 2] = bar_data;
     }
     {

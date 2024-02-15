@@ -14,6 +14,7 @@ const eth_intel = @import("drivers/ethernet_intel_82574L.zig");
 const commands = @import("commands.zig");
 const programs = @import("programs.zig");
 const boot_log = @import("bootloader_console.zig");
+const error_log = @import("error_log.zig");
 
 pub const THIS_PLATFORM = toolbox.Platform.Wozmon64;
 pub const ENABLE_PROFILER = true;
@@ -43,7 +44,7 @@ const KernelState = struct {
     //monitor state
     cursor_x: usize,
     cursor_y: usize,
-    last_cursor_update: w64.Time,
+    last_cursor_update: toolbox.Duration,
     cursor_char: toolbox.Rune,
     is_monitor_enabled: bool,
     rune_buffer: []toolbox.Rune,
@@ -59,6 +60,7 @@ const KernelState = struct {
     //user program state
     user_key_events: ?*w64.KeyEvents,
     is_user_program_running: bool,
+    user_working_set: toolbox.DynamicArray(u64),
 
     //profiler state
     profiler_to_draw: enum {
@@ -70,37 +72,6 @@ const KernelState = struct {
     boot_profiler_snapshot: profiler.State,
 };
 
-const StackUnwinder = struct {
-    fp: u64,
-    i: usize = 0,
-    max_iterations: usize = 10,
-
-    fn init() StackUnwinder {
-        return .{
-            .fp = @frameAddress(),
-        };
-    }
-    fn next(self: *StackUnwinder) ?u64 {
-        defer self.i += 1;
-        if (self.i >= self.max_iterations or self.fp == 0 or !toolbox.is_aligned_to(self.fp, @alignOf(u64))) {
-            return null;
-        }
-        const ip = @as(*const u64, @ptrFromInt(self.fp + @sizeOf(u64))).*;
-        const new_fp = @as(*const u64, @ptrFromInt(self.fp)).*;
-        if (new_fp <= self.fp) {
-            return null;
-        }
-        self.fp = new_fp;
-
-        //TODO: make this CALL_INSTRUCTION_SIZE optional since it doesn't
-        // work well for external interrupts
-        //const CALL_INSTRUCTION_SIZE = 5;
-        //return ip - CALL_INSTRUCTION_SIZE;
-
-        return ip;
-    }
-};
-
 pub fn panic(msg: []const u8, error_return_trace: ?*std.builtin.StackTrace, ret_addr: ?usize) noreturn {
     asm volatile ("cli");
     //not set
@@ -110,7 +81,7 @@ pub fn panic(msg: []const u8, error_return_trace: ?*std.builtin.StackTrace, ret_
     const global_allocator = g_state.global_arena.zstd_allocator;
     if (g_state.debug_symbols) |*debug_symbols| {
         echo_line("{s}", .{msg});
-        var it = StackUnwinder.init();
+        var it = w64.StackUnwinder.init();
         while (it.next()) |address| {
             const compile_unit = debug_symbols.findCompileUnit(address) catch |e| {
                 echo_line("At {X} CompileUnit error: {}", .{ address, e });
@@ -132,13 +103,43 @@ pub fn panic(msg: []const u8, error_return_trace: ?*std.builtin.StackTrace, ret_
                 address,
             });
         }
+        if (error_log.get_log().len > 0) {
+            echo_line("\nCaused by:\n", .{});
+            var error_it = error_log.get_log().iterator();
+            while (error_it.next()) |entry| {
+                echo_line("{}\n", .{entry.message});
+                for (entry.stacktrace.items()) |address| {
+                    const compile_unit = debug_symbols.findCompileUnit(address) catch |e| {
+                        echo_line("At {X} CompileUnit error: {}", .{ address, e });
+                        continue;
+                    };
+                    const line_info = debug_symbols.getLineNumberInfo(
+                        global_allocator,
+                        compile_unit.*,
+                        address,
+                    ) catch |e| {
+                        echo_line("At {X} Line Info Error: {}", .{ address, e });
+                        continue;
+                    };
+                    echo_line("At {s}:{}:{} -- {?s}: 0x{X}", .{
+                        line_info.file_name,
+                        line_info.line,
+                        line_info.column,
+                        debug_symbols.getSymbolName(address),
+                        address,
+                    });
+                }
+                echo_line("", .{});
+            }
+        }
+
         if (g_state.is_monitor_enabled) {
             render();
         }
         toolbox.hang();
     } else {
         echo_line("{s}", .{msg});
-        var it = StackUnwinder.init();
+        var it = w64.StackUnwinder.init();
         while (it.next()) |address| {
             echo_line("At {X}", .{address});
         }
@@ -152,6 +153,9 @@ extern var _bss_start: u8;
 extern var _bss_end: u8;
 
 export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.C) noreturn {
+    //disable interrupts
+    asm volatile ("cli");
+
     @setAlignStack(256);
     //clear bss
     {
@@ -161,8 +165,6 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
         const bss = @as([*]u8, @ptrCast(&_bss_start))[0..len];
         @memset(bss, 0);
     }
-    //disable interrupts
-    asm volatile ("cli");
     profiler.restore(kernel_start_context.boot_profiler_snapshot);
 
     toolbox.amd64_ticks_to_microseconds = @intCast(kernel_start_context.tsc_mhz);
@@ -185,13 +187,13 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
             kernel_start_context.global_arena.create_arena_from_arena(w64.KERNEL_FRAME_ARENA_SIZE);
         const scratch_arena =
             kernel_start_context.global_arena.create_arena_from_arena(w64.KERNEL_SCRATCH_ARENA_SIZE);
-        w64.Time.init(kernel_start_context.tsc_mhz);
+        toolbox.amd64_ticks_to_microseconds = @intCast(kernel_start_context.tsc_mhz);
 
         g_state = .{
             .is_monitor_enabled = false,
             .cursor_x = 0,
             .cursor_y = 0,
-            .last_cursor_update = w64.now(),
+            .last_cursor_update = toolbox.now(),
             .cursor_char = '@',
 
             .screen = kernel_start_context.screen,
@@ -232,6 +234,10 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
 
             .user_key_events = null,
             .is_user_program_running = false,
+            .user_working_set = toolbox.DynamicArray(u64).init(
+                kernel_start_context.global_arena,
+                32,
+            ),
         };
     }
 
@@ -260,31 +266,32 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
         profiler.begin("Set up kernel memory allocator");
         defer profiler.end();
 
-        const mapped_memory = b: {
-            var mapped_memory = toolbox.RandomRemovalLinkedList(w64.VirtualMemoryMapping).init(g_state.global_arena);
-            for (kernel_start_context.mapped_memory) |mapping| {
-                _ = mapped_memory.append(mapping);
-            }
-            break :b mapped_memory;
-        };
         kernel_memory.init(
             g_state.global_arena,
-            kernel_start_context.next_free_virtual_address,
             kernel_start_context.free_conventional_memory,
-            mapped_memory,
+            kernel_start_context.next_free_virtual_address,
         );
     }
 
     //map APIC and set up main core context
     const apic_base_msr = amd64.rdmsr(amd64.IA32_APIC_BASE_MSR);
-    const apic_base_address = kernel_memory.map_mmio_physical_address(
-        apic_base_msr &
-            toolbox.mask_for_bit_range(12, 63, u64),
-        1,
-    );
+    const apic_base_physical_address = apic_base_msr &
+        toolbox.mask_for_bit_range(12, 63, u64);
+    const apic_base_virtual_address = kernel_memory.generate_new_virtual_address(1, w64.MMIO_PAGE_SIZE);
+    if (!kernel_memory.map_mmio(
+        apic_base_virtual_address,
+        apic_base_physical_address,
+    )) {
+        toolbox.panic(
+            "Failed to map APIC to virtual address space! Virtual: {X}, Physcial: {X}",
+            .{
+                apic_base_virtual_address,
+                apic_base_physical_address,
+            },
+        );
+    }
 
-    const apic = amd64.APIC.init(apic_base_address);
-
+    const apic = amd64.APIC.init(apic_base_virtual_address);
     //set up main core processor context and thread local storage
     {
         const context = g_state.global_arena.push(w64.ApplicationProcessorKernelContext);
@@ -314,6 +321,7 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
             : "rax"
         );
     }
+
     //bring processors in to kernel space
     {
         g_state.application_processor_contexts = g_state.global_arena.push_slice(
@@ -521,11 +529,15 @@ fn core_entry(context: *w64.ApplicationProcessorKernelContext) callconv(.C) nore
     set_up_gdt(arena);
     set_up_idt(arena);
     asm volatile (
+        \\mov %%cr3, %%rax
+        \\mov %%rax, %%cr3 #flush TLB
+        \\
         \\wrfsbase %[fsbase]
         \\wrgsbase %[gsbase]
         :
         : [fsbase] "r" (context.fsbase),
           [gsbase] "r" (context.gsbase),
+        : "rax"
     );
     //println_serial("APIC register {X}", .{amd64.rdmsr(amd64.IA32_APIC_BASE_MSR)});
     fbase_tls = context.fsbase;
@@ -539,14 +551,23 @@ fn core_entry(context: *w64.ApplicationProcessorKernelContext) callconv(.C) nore
         std.atomic.spinLoopHint();
     }
 }
-pub inline fn allocate_memory(n: usize) []u8 {
-    return kernel_memory.allocate(
+pub inline fn allocate_memory(n: usize) []align(w64.MEMORY_PAGE_SIZE) u8 {
+    return kernel_memory.allocate_conventional(
         @divTrunc(toolbox.align_up(n, w64.MEMORY_PAGE_SIZE), w64.MEMORY_PAGE_SIZE),
-    );
+    )[0..n];
 }
 
 pub inline fn free_memory(data: []u8) void {
-    kernel_memory.free(data);
+    const vaddr = @intFromPtr(data.ptr);
+    const vaddr_aligned = toolbox.align_down(vaddr, w64.MEMORY_PAGE_SIZE);
+    const new_len = data.len + (vaddr - vaddr_aligned);
+
+    const aligned_data =
+        @as(
+        [*]align(w64.MEMORY_PAGE_SIZE) u8,
+        @ptrFromInt(vaddr_aligned),
+    )[0..new_len];
+    kernel_memory.free_conventional(aligned_data);
 }
 
 fn parse_dwarf_debug_symbols(kernel_elf: []const u8, arena: *toolbox.Arena) !std.dwarf.DwarfInfo {
@@ -844,20 +865,28 @@ fn nmi_handler(vector_number: u64, error_code: u64) callconv(.C) void {
 }
 fn page_fault_handler(vector_number: u64, error_code: u64) callconv(.C) void {
     _ = vector_number;
+    _ = error_code;
     const unmapped_address = asm volatile ("mov %%cr2, %[unmapped_address]"
         : [unmapped_address] "=r" (-> u64),
     );
+    if (unmapped_address == 0xFFFFFFFFB20060C8) {
+        asm volatile ("nop");
+    }
+
     const to_map = toolbox.align_down(unmapped_address, w64.MEMORY_PAGE_SIZE);
     if (to_map == 0) {
         toolbox.panic("Allocating memory at null page! Address: {X}", .{unmapped_address});
     }
-    echo_line("Allocating page for address: {X}, Error code: {}", .{
-        to_map,
-        error_code,
-    });
+    if (!kernel_memory.is_valid_2mb_page_virtual_address(to_map)) {
+        toolbox.panic("Page fault at MMIO address: {X}", .{unmapped_address});
+    }
 
-    const page = kernel_memory.allocate_at_address(to_map, 1);
+    const page = kernel_memory.allocate_conventional_at_address(to_map, 1);
     @memset(page, 0);
+
+    if (!w64.is_kernel_address(to_map) and to_map >= w64.DEFAULT_PROGRAM_LOAD_ADDRESS) {
+        g_state.user_working_set.append(to_map);
+    }
 }
 
 fn invalid_opcode_handler(vector_number: u64, error_code: u64) callconv(.C) void {
@@ -1008,6 +1037,9 @@ fn main_loop() void {
                 .LeftShift, .RightShift => {
                     g_state.are_characters_shifted = true;
                 },
+                .LeftCtrl, .RightCtrl => {
+                    g_state.is_ctrl_down = true;
+                },
                 else => {},
             }
         }
@@ -1015,6 +1047,9 @@ fn main_loop() void {
             switch (scancode) {
                 .LeftShift, .RightShift => {
                     g_state.are_characters_shifted = false;
+                },
+                .LeftCtrl, .RightCtrl => {
+                    g_state.is_ctrl_down = false;
                 },
                 else => {},
             }
@@ -1198,8 +1233,8 @@ fn draw_bitmap(
 fn blink_cursor() void {
     profiler.begin("blink cursor");
     defer profiler.end();
-    const now = w64.now();
-    if (now.sub(g_state.last_cursor_update).milliseconds() >= CURSOR_BLINK_TIME_MS) {
+    const now = toolbox.now();
+    if (now.subtract(g_state.last_cursor_update).milliseconds() >= CURSOR_BLINK_TIME_MS) {
         g_state.last_cursor_update = now;
         g_state.cursor_char = if (g_state.cursor_char == '@') ' ' else '@';
     }
@@ -1243,7 +1278,8 @@ fn type_program(program: []const u8) void {
     @memset(dest, 0);
     @memcpy(dest, program);
 
-    echo_line("Loaded {} byte program to address {X}!", .{ program.len, load_address });
+    g_state.command_buffer.clear();
+    echo_line("\nLoaded {} byte program to address {X}!", .{ program.len, load_address });
     type_number(load_address);
     type_key(.Slash, false);
     type_number(@as(u32, 16));
@@ -1482,7 +1518,6 @@ fn print_apic_id_and_core_id() void {
     );
 }
 fn exit_running_program() void {
-    g_state.user_key_events = null;
     for (g_state.application_processor_contexts) |context| {
         if (context.job.get()) |_| {
             const interrupt_command_register_low = amd64.APICInterruptControlRegisterLow{
@@ -1504,6 +1539,13 @@ fn exit_running_program() void {
             );
         }
     }
+
+    g_state.user_key_events = null;
+    for (g_state.user_working_set.items()) |page_virtual_address| {
+        const mapped_physical_address = kernel_memory.unmap(page_virtual_address);
+        toolbox.assert(mapped_physical_address != 0, "Unmapping bad virtual address: {X}", .{page_virtual_address});
+    }
+    g_state.user_working_set.clear();
 }
 fn read_memory(from_address: ?u64, to_address: ?u64, number_of_bytes: ?u64) void {
     const length = number_of_bytes orelse 1;

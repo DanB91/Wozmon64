@@ -4,6 +4,8 @@
 //This file is meant to be the main source file for the wozmon64 module imported by programs
 const toolbox = @import("toolbox");
 const std = @import("std");
+//TODO: remove after adding core id into toolbox
+const builtin = @import("builtin");
 
 pub const MEMORY_PAGE_SIZE = toolbox.mb(2);
 
@@ -371,8 +373,22 @@ pub const ReentrantTicketLock = struct {
     }
 };
 pub fn get_core_id() u64 {
-    const IA32_TSC_AUX_MSR = 0xC0000103; //Used for storing processor id
-    return rdmsr(IA32_TSC_AUX_MSR);
+    //TODO: remove after adding core id into toolbox
+    switch (comptime builtin.os.tag) {
+        .macos => {
+            const pthread = @cImport(@cInclude("pthread.h"));
+            var thread_id: u64 = 0;
+            const result = pthread.pthread_threadid_np(0, &thread_id);
+            if (result != 0) {
+                toolbox.panic("pthread_threadid_np failed!", .{});
+            }
+            return thread_id;
+        },
+        else => {
+            const IA32_TSC_AUX_MSR = 0xC0000103; //Used for storing processor id
+            return rdmsr(IA32_TSC_AUX_MSR);
+        },
+    }
 }
 inline fn rdmsr(msr: u32) u64 {
     var eax: u64 = 0;

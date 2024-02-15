@@ -448,11 +448,11 @@ pub fn main() noreturn {
                         });
                     }
                 },
-                .ACPIMemoryNVS,
-                .ACPIReclaimMemory,
                 .MemoryMappedIO,
                 .MemoryMappedIOPortSpace,
                 .ReservedMemoryType,
+                .ACPIMemoryNVS,
+                .ACPIReclaimMemory,
                 => {
                     map_virtual_memory(
                         desc.physical_start,
@@ -606,6 +606,23 @@ pub fn main() noreturn {
             .{ .cache_policy = .Uncachable }, //0b111
         };
         amd64.wrmsr(amd64.PAT_MSR, @bitCast(pat));
+    }
+
+    //TODO: delete
+    for (mapped_memory.items()) |mm| {
+        if (mm.virtual_address == 0xFFFFFFFFFEE00000) {
+            continue;
+        }
+        print_serial("vaddr: {X}, size: {X}, type: {}, next free: {X}", .{
+            mm.virtual_address,
+            mm.size,
+            mm.memory_type,
+            next_free_virtual_address,
+        });
+        if (mm.virtual_address + mm.size > next_free_virtual_address) {
+            print_serial("Nooo!!!!", .{});
+            toolbox.hang();
+        }
     }
 
     start_kernel(

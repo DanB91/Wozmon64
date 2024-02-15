@@ -2423,8 +2423,10 @@ fn alloc_object_aligned(
     arena: *toolbox.Arena,
 ) AllocationResultObject(T, alignment) {
     const obj = arena.push_clear_aligned(T, alignment);
-    const physical_address = kernel_memory.virtual_to_physical(@intFromPtr(obj)) catch
+    const physical_address = kernel_memory.virtual_to_physical(@intFromPtr(obj));
+    if (physical_address == 0) {
         toolbox.panic("Could not find physical address for virtual address {X}", .{@intFromPtr(obj)});
+    }
     return .{
         .data = obj,
         .physical_address_start = physical_address,
@@ -2449,8 +2451,10 @@ fn alloc_slice_aligned(
         n,
         alignment,
     );
-    const physical_address = kernel_memory.virtual_to_physical(@intFromPtr(slice.ptr)) catch
+    const physical_address = kernel_memory.virtual_to_physical(@intFromPtr(slice.ptr));
+    if (physical_address == 0) {
         toolbox.panic("Could not find physical address for virtual address {X}", .{@intFromPtr(slice.ptr)});
+    }
     return .{
         .data = slice,
         .physical_address_start = physical_address,

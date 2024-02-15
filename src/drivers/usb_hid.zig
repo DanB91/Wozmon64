@@ -985,8 +985,10 @@ fn alloc_slice_aligned(
         n,
         alignment,
     );
-    const physical_address = kernel_memory.virtual_to_physical(@intFromPtr(slice.ptr)) catch
+    const physical_address = kernel_memory.virtual_to_physical(@intFromPtr(slice.ptr));
+    if (physical_address == 0) {
         toolbox.panic("Could not find physical address for virtual address {X}", .{@intFromPtr(slice.ptr)});
+    }
     return .{
         .data = slice,
         .physical_address_start = physical_address,

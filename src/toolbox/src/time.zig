@@ -1,5 +1,6 @@
 const toolbox = @import("toolbox.zig");
 const builtin = @import("builtin");
+const std = @import("std");
 
 comptime {
     switch (toolbox.THIS_PLATFORM) {

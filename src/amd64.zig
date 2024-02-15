@@ -1,7 +1,11 @@
 const toolbox = @import("toolbox");
 const std = @import("std");
 const w64 = @import("wozmon64_kernel.zig");
+const kernel = @import("kernel.zig");
 const kernel_memory = @import("kernel_memory.zig");
+const error_log = @import("error_log.zig");
+
+const echo_line = kernel.echo_line;
 
 pub const ACPI2RSDP = extern struct {
     signature: [8]u8,
@@ -44,20 +48,36 @@ pub fn find_acpi_table(
 ) !*align(4) const Table {
     const entries = root_xsdt_entries(root_xsdt);
     const table_xsdt = b: {
+        const virtual_address = kernel_memory.generate_new_virtual_address(1, w64.MMIO_PAGE_SIZE);
         for (entries) |physical_address| {
-            const entry: *const XSDT = @ptrFromInt(
-                kernel_memory.physical_to_virtual(physical_address) catch
-                    toolbox.panic(
-                    "Could not find mapping for ACPI physical address: {X}",
-                    .{physical_address},
-                ),
-            );
-            if (std.mem.eql(u8, name, entry.signature[0..])) {
-                if (!is_xsdt_checksum_valid(entry)) {
-                    return error.ACPITableBadChecksum;
-                }
-                break :b entry;
+            if (!kernel_memory.map_mmio(virtual_address, physical_address)) {
+                _ = kernel_memory.unmap(virtual_address);
+                continue;
             }
+            const entry: *const XSDT = @ptrFromInt(virtual_address);
+            echo_line("XSDT entry signature: {s}", .{
+                entry.signature[0..],
+            });
+            echo_line("vaddr: {X}, paddr: {X}, actual paddr: {X}", .{
+                virtual_address,
+                physical_address,
+                kernel_memory.virtual_to_physical(virtual_address),
+            });
+            echo_line("cr4: {X}, EFER: {X}", .{
+                asm volatile ("mov %%cr4, %[cr4]"
+                    : [cr4] "=r" (-> u64),
+                ),
+                rdmsr(IA32_EFER),
+            });
+
+            if (std.mem.eql(u8, name, entry.signature[0..])) {
+                if (is_xsdt_checksum_valid(entry)) {
+                    break :b entry;
+                } else {
+                    error_log.log_error("Checksum failed for XSDT", .{});
+                }
+            }
+            _ = kernel_memory.unmap(virtual_address);
         } else {
             return error.ACPITableNotFound;
         }
@@ -336,20 +356,20 @@ pub const PageDirectoryEntry4KB = packed struct(u64) {
 };
 
 pub const PageTableEntry = packed struct(u64) {
-    present: bool, //P bit
-    write_enable: bool, //R/W bit
-    ring3_accessible: bool, //U/S bit
-    pat_bit_0: u1, //PWT bit
-    pat_bit_1: u1, //PCD bit
+    present: bool = false, //P bit
+    write_enable: bool = false, //R/W bit
+    ring3_accessible: bool = false, //U/S bit
+    pat_bit_0: u1 = 0, //PWT bit
+    pat_bit_1: u1 = 0, //PCD bit
     accessed: bool = false, //A bit
     dirty: bool = false, //D bit -- was this page written to? must be manually reset
-    pat_bit_2: u1, //PAT bit
-    global: bool, //G bit -- always resident in TLB
+    pat_bit_2: u1 = 0, //PAT bit
+    global: bool = false, //G bit -- always resident in TLB
     free_bits1: u3 = 0, //AVL bits
-    physical_page_base_address: u40,
+    physical_page_base_address: u40 = 0,
     free_bits2: u7 = 0, //AVL bits
-    memory_protection_key: u4, //MPK bits
-    no_execute: bool, //NX bit
+    memory_protection_key: u4 = 0, //MPK bits
+    no_execute: bool = false, //NX bit
 };
 
 pub const PageAttributeTableEncodings = enum(u3) {
@@ -398,6 +418,7 @@ pub inline fn cpuid(input_eax: u32) CPUIDResult {
 pub const IA32_APIC_BASE_MSR = 0x1B; //physical address of APIC
 pub const PAT_MSR = 0x277; //Page attribute table MSR;
 pub const IA32_TSC_AUX_MSR = 0xC0000103; //Used for storing processor id
+pub const IA32_EFER = 0xC0000080; //Extended Feature Enable Register (EFER)
 
 pub inline fn rdmsr(msr: u32) u64 {
     var eax: u64 = 0;
