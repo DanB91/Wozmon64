@@ -192,9 +192,9 @@ pub fn build(b: *std.Build) !void {
             "-device",
             "qemu-xhci,id=xhci",
             "-device",
-            "usb-kbd,bus=xhci.0",
+            "usb-kbd,bus=xhci.0,id=kb",
             "-device",
-            "usb-mouse,bus=xhci.0",
+            "usb-mouse,bus=xhci.0,id=mouse",
             "-nic",
             "model=e1000e,mac=12:34:56:AB:CD:EF",
         };

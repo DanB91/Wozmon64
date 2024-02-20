@@ -4,14 +4,12 @@ const w64 = @import("../wozmon64_kernel.zig");
 const kernel = @import("../kernel.zig");
 const kernel_memory = @import("../kernel_memory.zig");
 
-const echo_line = kernel.echo_line;
 const profiler = toolbox.profiler;
 
-//TODO: for debugging on desktop
-// fn echo_line(a: anytype, b: anytype) void {
-//     _ = a; // autofix
-//     _ = b; // autofix
-// }
+// const echo_line = kernel.echo_line;
+fn echo_line(comptime fmt: []const u8, args: anytype) void {
+    w64.println_serial(fmt, args);
+}
 
 pub const USBHIDDevice = struct {
     device_types: []Type,
@@ -716,6 +714,14 @@ pub fn poll(
                 queue_transfer_trb(hid_device);
             }
         }
+    }
+}
+pub fn disconnect(device: *usb_xhci.Device, controller: *usb_xhci.Controller) void {
+    var hid_device_it = device.hid_devices.iterator();
+    while (hid_device_it.next()) |hid_device| {
+        controller.event_response_map.remove(
+            hid_device.last_transfer_request_physical_address,
+        );
     }
 }
 fn mouse_report_to_int(data: []const u8) i16 {

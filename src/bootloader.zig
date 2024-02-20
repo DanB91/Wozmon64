@@ -1162,6 +1162,9 @@ fn parse_kernel_elf(arena: *toolbox.Arena) !KernelParseResult {
                 if (program_header.p_memsz > w64.MEMORY_PAGE_SIZE) {
                     return error.TLSSizeTooBig;
                 }
+                if (program_header.p_filesz > 0) {
+                    return error.WeDoNotSupportNonZeroTLSYet;
+                }
             },
             std.elf.PT_GNU_RELRO => {},
             std.elf.PT_PHDR => {},

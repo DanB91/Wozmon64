@@ -99,6 +99,7 @@ pub const BootloaderProcessorContext = struct {
 };
 
 pub const ApplicationProcessorKernelContext = struct {
+    self_pointer: *ApplicationProcessorKernelContext,
     processor_id: u64,
     stack_bottom_address: u64, //initial stack pointer
     cr3: u64, //page table address
@@ -109,6 +110,11 @@ pub const ApplicationProcessorKernelContext = struct {
         entry: *const fn (user_data: ?*anyopaque) callconv(.C) void,
         user_data: ?*anyopaque,
     }) = .{ .value = null },
+};
+
+pub const TLS = struct {
+    data: [w64_user.MEMORY_PAGE_SIZE]u8 align(w64_user.MEMORY_PAGE_SIZE),
+    context: ApplicationProcessorKernelContext align(w64_user.MEMORY_PAGE_SIZE),
 };
 
 pub const KernelStartContext = struct {
@@ -256,6 +262,16 @@ pub const StackUnwinder = struct {
         return ip;
     }
 };
+
+pub fn get_scratch_arena() *toolbox.Arena {
+    const StaticVars = struct {
+        threadlocal var scratch_arena: ?*toolbox.Arena = null;
+    };
+    if (StaticVars.scratch_arena == null) {
+        StaticVars.scratch_arena = toolbox.Arena.init(toolbox.mb(2));
+    }
+    return StaticVars.scratch_arena.?;
+}
 
 comptime {
     toolbox.static_assert(@sizeOf(w64_user.Pixel) == 4, "Incorrect size for Pixel");

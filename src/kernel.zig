@@ -294,17 +294,15 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
     const apic = amd64.APIC.init(apic_base_virtual_address);
     //set up main core processor context and thread local storage
     {
-        const context = g_state.global_arena.push(w64.ApplicationProcessorKernelContext);
-        const thread_local_storage = g_state.global_arena.push_slice_clear_aligned(
-            u8,
-            w64.MEMORY_PAGE_SIZE,
-            w64.MEMORY_PAGE_SIZE,
-        );
-        context.* = .{
+        const thread_local_storage = g_state.global_arena.push(w64.TLS);
+        const ap_context = &thread_local_storage.context;
+
+        ap_context.* = .{
+            .self_pointer = &thread_local_storage.context,
             .processor_id = amd64.rdmsr(amd64.IA32_TSC_AUX_MSR),
             .apic = apic,
-            .fsbase = @intFromPtr(thread_local_storage.ptr),
-            .gsbase = @intFromPtr(context),
+            .fsbase = @intFromPtr(ap_context),
+            .gsbase = @intFromPtr(ap_context),
 
             //the following fields are not currently used by the main processor
             .stack_bottom_address = kernel_start_context.stack_bottom_address,
@@ -312,12 +310,14 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
                 : [cr3] "=r" (-> u64),
             ),
         };
+        thread_local_storage.data = [_]u8{0} ** w64.MEMORY_PAGE_SIZE;
+
         asm volatile (
             \\wrfsbase %[fsbase]
             \\wrgsbase %[gsbase]
             :
-            : [fsbase] "r" (context.fsbase),
-              [gsbase] "r" (context.gsbase),
+            : [fsbase] "r" (ap_context.fsbase),
+              [gsbase] "r" (ap_context.gsbase),
             : "rax"
         );
     }
@@ -335,33 +335,30 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
                 w64.MEMORY_PAGE_SIZE,
                 w64.MEMORY_PAGE_SIZE,
             );
-            const thread_local_storage = g_state.global_arena.push_slice_clear_aligned(
-                u8,
-                w64.MEMORY_PAGE_SIZE,
-                w64.MEMORY_PAGE_SIZE,
-            );
-            //TODO: should this be page aligned?
-            const ap_kernel_context = g_state.global_arena.push_clear(
-                w64.ApplicationProcessorKernelContext,
-            );
             const rsp = @intFromPtr(stack.ptr) + stack.len;
-            const cr3: u64 =
-                asm volatile ("mov %%cr3, %[cr3]"
-                : [cr3] "=r" (-> u64),
-            );
-            ap_kernel_context.* = .{
-                .cr3 = cr3,
-                .stack_bottom_address = rsp,
+            const thread_local_storage = g_state.global_arena.push(w64.TLS);
+            const ap_context = &thread_local_storage.context;
+
+            ap_context.* = .{
+                .self_pointer = ap_context,
+                .processor_id = context.processor_id,
+
                 //All cores _should_ have the same physical address for their LAPIC.
                 //Since they all share the same CR3, they should have the same virtual address
                 //(I am hoping this doesn't bite me later...)
                 .apic = apic,
-                .fsbase = @intFromPtr(thread_local_storage.ptr),
-                .gsbase = @intFromPtr(ap_kernel_context),
-                .processor_id = context.processor_id,
+                .fsbase = @intFromPtr(ap_context),
+                .gsbase = @intFromPtr(ap_context),
+
+                .stack_bottom_address = rsp,
+                .cr3 = asm volatile ("mov %%cr3, %[cr3]"
+                    : [cr3] "=r" (-> u64),
+                ),
                 .job = .{ .value = null },
             };
-            g_state.application_processor_contexts[i] = ap_kernel_context;
+
+            thread_local_storage.data = [_]u8{0} ** w64.MEMORY_PAGE_SIZE;
+            g_state.application_processor_contexts[i] = &thread_local_storage.context;
         }
         for (g_state.application_processor_contexts, 0..) |context, i| {
             kernel_start_context.bootloader_processor_contexts[i].application_processor_kernel_entry_data.set(.{
@@ -416,7 +413,6 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
                             pcie.XHCI_PROGRAMING_INTERFACE => {
                                 var usb_controller = usb_xhci.init(
                                     dev,
-                                    g_state.scratch_arena,
                                 ) catch |e| {
                                     toolbox.panic("Could not init xHCI adapter: {}", .{e});
                                 };
@@ -1615,20 +1611,23 @@ fn handle_parse_result(parse_result: commands.ParseResult, command_buffer: []con
     echo_line("\n\\", .{});
 }
 
-pub fn xhci_interrupt_handler(_: u64, _: u64) callconv(.C) void {
+pub fn xhci_interrupt_handler(vector_number: u64, _: u64) callconv(.C) void {
+    _ = vector_number;
     // debug_clear_screen_and_hang(123, 12, 23);
     const apic = w64.get_processor_context().apic;
-    const vector = amd64.get_in_service_interrupt_vector(apic);
-    toolbox.assert(vector != 0, "Interrupt handler called with no interrupt in service", .{});
+    const isr_vector = amd64.get_in_service_interrupt_vector(apic);
 
     var it = g_state.usb_xhci_controllers.iterator();
     while (it.next()) |controller_ptr| {
         const controller = controller_ptr.*;
-        if (controller.interrupt_vector != vector) {
+        if (controller.interrupt_vector != isr_vector) {
             continue;
         }
 
-        const should_poll_hid = usb_xhci.poll_controller(controller);
+        const should_poll_hid = usb_xhci.poll_controller(
+            controller,
+            true,
+        );
 
         if (should_poll_hid) {
             usb_hid.poll(
@@ -1636,7 +1635,9 @@ pub fn xhci_interrupt_handler(_: u64, _: u64) callconv(.C) void {
                 &g_state.key_events,
             );
         }
+
         usb_xhci.send_end_of_interrupt(controller);
+        break;
     }
     amd64.send_end_of_interrupt(apic);
 }

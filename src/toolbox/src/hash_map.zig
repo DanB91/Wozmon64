@@ -128,15 +128,14 @@ fn BaseHashMap(comptime Key: type, comptime Value: type, comptime is_pointer_sta
 
         pub fn get_or_put(self: *Self, key: Key, initial_value: Value) Value {
             const index = self.index_for_key(key);
-            const kvptr = &self.buckets[index];
-            if (kvptr) |kv| {
+            if (self.buckets[index]) |*kv| {
                 return kv.v;
             } else if (self.len() == self.cap()) {
                 self.* = self.expand();
-                return self.get_or_put(key, initial_value, self.arena);
+                return self.get_or_put(key, initial_value);
             } else {
-                const index_node = self.indices.append(index, self.arena);
-                kvptr.* = .{
+                const index_node = self.indices.append(index);
+                self.buckets[index] = .{
                     .k = key,
                     .v = initial_value,
                     .index_node = index_node,
