@@ -363,7 +363,7 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
         for (g_state.application_processor_contexts, 0..) |context, i| {
             kernel_start_context.bootloader_processor_contexts[i].application_processor_kernel_entry_data.set(.{
                 .start_context_data = context,
-                .entry = core_entry,
+                .entry = processor_entry,
                 .cr3 = context.cr3,
                 .stack_bottom_address = context.stack_bottom_address,
             });
@@ -484,8 +484,7 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
     toolbox.hang();
 }
 
-threadlocal var fbase_tls: usize = 0;
-fn core_entry(context: *w64.ApplicationProcessorKernelContext) callconv(.C) noreturn {
+fn processor_entry(context: *w64.ApplicationProcessorKernelContext) callconv(.C) noreturn {
     //TODO some bug is preventing this from working on desktop.  There might be
     //     some sort of race condition.  Debug
     //     Get debug symbols working first
@@ -497,9 +496,6 @@ fn core_entry(context: *w64.ApplicationProcessorKernelContext) callconv(.C) nore
     set_up_gdt(arena);
     set_up_idt(arena);
     asm volatile (
-        \\mov %%cr3, %%rax
-        \\mov %%rax, %%cr3 #flush TLB
-        \\
         \\wrfsbase %[fsbase]
         \\wrgsbase %[gsbase]
         :
@@ -508,15 +504,23 @@ fn core_entry(context: *w64.ApplicationProcessorKernelContext) callconv(.C) nore
         : "rax"
     );
     //println_serial("APIC register {X}", .{amd64.rdmsr(amd64.IA32_APIC_BASE_MSR)});
-    fbase_tls = context.fsbase;
     //print_apic_id_and_core_id();
 
+    park_processor();
+}
+fn park_processor() noreturn {
+    asm volatile (
+        \\mov %%cr3, %%rax
+        \\mov %%rax, %%cr3 #flush TLB
+        ::: "rax");
+    const context = w64.get_processor_context();
+    if (context.job.get()) |job| {
+        job.entry(job.user_data);
+    }
+
+    //put processor into low power state and only listen for interrupts
     while (true) {
-        if (context.job.get()) |job| {
-            job.entry(job.user_data);
-            context.job.set(null);
-        }
-        std.atomic.spinLoopHint();
+        asm volatile ("hlt");
     }
 }
 pub inline fn allocate_memory(n: usize) []align(w64.MEMORY_PAGE_SIZE) u8 {
@@ -811,24 +815,20 @@ fn nmi_handler(vector_number: u64, error_code: u64) callconv(.C) void {
     _ = vector_number;
     const processor_context = w64.get_processor_context();
 
-    processor_context.job.set(null);
     asm volatile (
-        \\movq %[ksc_addr], %%rdi
-        \\
         \\pushq $0x10 #SS
         \\pushq %[stack_virtual_address]
         \\pushfq
         \\pushq $0x8 #CS
-        \\pushq %[entry_point]
+        \\pushq %[park_processor]
         \\iretq
         \\ud2 #this instruction is for searchability in the disassembly
         :
         :
         //TODO no idea why i have to subtract 8 here.  If I don't I get SSE alignment errors
           [stack_virtual_address] "r" (processor_context.stack_bottom_address - 8),
-          [ksc_addr] "r" (@intFromPtr(processor_context)),
-          [entry_point] "r" (@intFromPtr(&core_entry)),
-        : "rdi"
+          [park_processor] "r" (@intFromPtr(&park_processor)),
+        : "rax"
     );
 }
 fn page_fault_handler(vector_number: u64, error_code: u64) callconv(.C) void {
@@ -837,9 +837,6 @@ fn page_fault_handler(vector_number: u64, error_code: u64) callconv(.C) void {
     const unmapped_address = asm volatile ("mov %%cr2, %[unmapped_address]"
         : [unmapped_address] "=r" (-> u64),
     );
-    if (unmapped_address == 0xFFFFFFFFB20060C8) {
-        asm volatile ("nop");
-    }
 
     const to_map = toolbox.align_down(unmapped_address, w64.MEMORY_PAGE_SIZE);
     if (to_map == 0) {
@@ -1476,11 +1473,10 @@ fn print_apic_id_and_core_id() void {
     const apic = w64.get_processor_context().apic;
     const apic_id = apic.read_register(amd64.APICIDRegister).apic_id;
     echo_line(
-        "Core id {}, APIC ID {X}: fbase tls: {x} context: {x},",
+        "Core id {}, APIC ID {X}, context: {x},",
         .{
             core_id,
             apic_id,
-            fbase_tls,
             @as(u64, @intFromPtr(w64.get_processor_context())),
         },
     );
@@ -1488,23 +1484,8 @@ fn print_apic_id_and_core_id() void {
 fn exit_running_program() void {
     for (g_state.application_processor_contexts) |context| {
         if (context.job.get()) |_| {
-            const interrupt_command_register_low = amd64.APICInterruptControlRegisterLow{
-                .vector = 0,
-                .message_type = .NonMaskableInterrupt,
-                .destination_mode = .PhysicalAPICID,
-                .is_sent = false,
-                .assert_interrupt = false,
-                .trigger_mode = .EdgeTriggered,
-                .destination_shorthand = .Destination,
-            };
-            const interrupt_command_register_high = amd64.APICInterruptControlRegisterHigh{
-                .destination = @intCast(context.processor_id),
-            };
-            amd64.send_interprocessor_interrupt(
-                w64.get_processor_context().apic,
-                interrupt_command_register_low,
-                interrupt_command_register_high,
-            );
+            context.job.set(null);
+            send_nmi_to_processor_id(context.processor_id);
         }
     }
 
@@ -1514,6 +1495,25 @@ fn exit_running_program() void {
         toolbox.assert(mapped_physical_address != 0, "Unmapping bad virtual address: {X}", .{page_virtual_address});
     }
     g_state.user_working_set.clear();
+}
+fn send_nmi_to_processor_id(processor_id: usize) void {
+    const interrupt_command_register_low = amd64.APICInterruptControlRegisterLow{
+        .vector = 0,
+        .message_type = .NonMaskableInterrupt,
+        .destination_mode = .PhysicalAPICID,
+        .is_sent = false,
+        .assert_interrupt = false,
+        .trigger_mode = .EdgeTriggered,
+        .destination_shorthand = .Destination,
+    };
+    const interrupt_command_register_high = amd64.APICInterruptControlRegisterHigh{
+        .destination = @intCast(processor_id),
+    };
+    amd64.send_interprocessor_interrupt(
+        w64.get_processor_context().apic,
+        interrupt_command_register_low,
+        interrupt_command_register_high,
+    );
 }
 fn read_memory(from_address: ?u64, to_address: ?u64, number_of_bytes: ?u64) void {
     const length = number_of_bytes orelse 1;
@@ -1583,6 +1583,7 @@ fn handle_parse_result(parse_result: commands.ParseResult, command_buffer: []con
     echo_line("\n\\", .{});
 }
 
+//TODO: move into usb_xhci.zig.  Cannot move into it right now because of references to g_state
 pub fn xhci_interrupt_handler(vector_number: u64, _: u64) callconv(.C) void {
     _ = vector_number;
     // debug_clear_screen_and_hang(123, 12, 23);
@@ -1625,6 +1626,7 @@ pub fn run_on_core(entry_point: *const fn (user_data: ?*anyopaque) callconv(.C) 
     for (g_state.application_processor_contexts) |context| {
         if (context.job.get() == null) {
             context.job.set(.{ .entry = entry_point, .user_data = user_data });
+            send_nmi_to_processor_id(context.processor_id);
             break;
         }
     }

@@ -404,7 +404,7 @@ pub fn main() noreturn {
                 pml4_table,
                 global_arena,
             );
-            address = toolbox.align_down(@intFromPtr(&core_entry), w64.MMIO_PAGE_SIZE);
+            address = toolbox.align_down(@intFromPtr(&processor_entry), w64.MMIO_PAGE_SIZE);
             map_virtual_memory(
                 address,
                 &address,
@@ -1305,7 +1305,7 @@ fn calculaute_tsc_mhz(root_xsdt: *const amd64.XSDT, arena: *toolbox.Arena) u64 {
 
 comptime {
     asm (
-        \\.extern core_entry
+        \\.extern processor_entry
         \\.macro hang
         \\.hang: jmp .hang
         \\.endm
@@ -1399,7 +1399,7 @@ comptime {
         \\
         \\#Microsoft ABI has second parameter in rdx
         \\mov %rdi, %rdx
-        \\movabs $core_entry, %rax
+        \\movabs $processor_entry, %rax
         \\jmp *%rax
         \\.loop: jmp .loop
         \\ud2
@@ -1464,7 +1464,7 @@ comptime {
     );
 }
 
-export fn core_entry(
+export fn processor_entry(
     context: *w64.BootloaderProcessorContext,
     processor_id: u64,
 ) callconv(.C) noreturn {
