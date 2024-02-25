@@ -176,7 +176,7 @@ pub fn build(b: *std.Build) !void {
             "-cpu",
             "Skylake-Client-v3",
             "-d",
-            "int,cpu_reset,trace:pic_interrupt,trace:pci_*,trace:usb_*,trace:apic_*,trace:msix_*,trace:e1000e_*",
+            "int,cpu_reset,trace:pic_interrupt,trace:pci_*,trace:usb_*,trace:apic_*,trace:msix_*,trace:e1000e_*,trace:xhci*",
             "-D",
             "zig-out/qemu.log",
             "-serial",

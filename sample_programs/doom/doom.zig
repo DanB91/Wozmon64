@@ -12,6 +12,7 @@ pub const THIS_PLATFORM = toolbox.Platform.Wozmon64;
 const PlatformState = struct {
     program_context: *const w64.ProgramContext = undefined,
     global_arena_store: [toolbox.mb(16)]u8 = undefined,
+    is_shift_key_down: bool = false,
     global_arena: *toolbox.Arena = undefined,
 };
 
@@ -118,42 +119,108 @@ fn draw_scaled_pixel(
 }
 
 fn process_input(key_events: *w64.KeyEvents) void {
-    while (key_events.key_pressed_events.dequeue()) |scancode| {
-        switch (scancode) {
-            .Enter => doom.doom_key_down(doom.DOOM_KEY_ENTER),
-            .Escape => doom.doom_key_down(doom.DOOM_KEY_ESCAPE),
-            .UpArrow => doom.doom_key_down(doom.DOOM_KEY_UP_ARROW),
-            .DownArrow => doom.doom_key_down(doom.DOOM_KEY_DOWN_ARROW),
-            .LeftArrow => doom.doom_key_down(doom.DOOM_KEY_LEFT_ARROW),
-            .RightArrow => doom.doom_key_down(doom.DOOM_KEY_RIGHT_ARROW),
-            .Space => doom.doom_key_down(doom.DOOM_KEY_SPACE),
-            else => {},
-        }
-    }
-    while (key_events.key_released_events.dequeue()) |scancode| {
-        switch (scancode) {
-            .Enter => doom.doom_key_up(doom.DOOM_KEY_ENTER),
-            .Escape => doom.doom_key_up(doom.DOOM_KEY_ESCAPE),
-            .UpArrow => doom.doom_key_up(doom.DOOM_KEY_UP_ARROW),
-            .DownArrow => doom.doom_key_up(doom.DOOM_KEY_DOWN_ARROW),
-            .LeftArrow => doom.doom_key_up(doom.DOOM_KEY_LEFT_ARROW),
-            .RightArrow => doom.doom_key_up(doom.DOOM_KEY_RIGHT_ARROW),
-            .Space => doom.doom_key_up(doom.DOOM_KEY_SPACE),
-            else => {},
-        }
-    }
     while (key_events.modifier_key_pressed_events.dequeue()) |scancode| {
         switch (scancode) {
-            .LeftCtrl, .RightCtrl => doom.doom_key_down(doom.DOOM_KEY_CTRL),
+            .LeftShift, .RightShift => g_state.is_shift_key_down = true,
             else => {},
         }
+        doom.doom_key_down(scancode_to_doom_key(scancode, g_state.is_shift_key_down));
     }
     while (key_events.modifier_key_released_events.dequeue()) |scancode| {
         switch (scancode) {
-            .LeftCtrl, .RightCtrl => doom.doom_key_up(doom.DOOM_KEY_CTRL),
+            .LeftShift, .RightShift => g_state.is_shift_key_down = false,
             else => {},
         }
+        doom.doom_key_up(scancode_to_doom_key(scancode, g_state.is_shift_key_down));
     }
+    while (key_events.key_pressed_events.dequeue()) |scancode| {
+        doom.doom_key_down(scancode_to_doom_key(
+            scancode,
+            g_state.is_shift_key_down,
+        ));
+    }
+    while (key_events.key_released_events.dequeue()) |scancode| {
+        doom.doom_key_up(scancode_to_doom_key(
+            scancode,
+            g_state.is_shift_key_down,
+        ));
+    }
+}
+
+fn scancode_to_doom_key(scancode: w64.ScanCode, is_shift_key_down: bool) doom.doom_key_t {
+    return switch (scancode) {
+        .Enter => doom.DOOM_KEY_ENTER,
+        .Escape => doom.DOOM_KEY_ESCAPE,
+        .UpArrow => doom.DOOM_KEY_UP_ARROW,
+        .DownArrow => doom.DOOM_KEY_DOWN_ARROW,
+        .LeftArrow => doom.DOOM_KEY_LEFT_ARROW,
+        .RightArrow => doom.DOOM_KEY_RIGHT_ARROW,
+        .Space => doom.DOOM_KEY_SPACE,
+        .Tab => doom.DOOM_KEY_TAB,
+        .Quote => doom.DOOM_KEY_APOSTROPHE,
+        .Comma => doom.DOOM_KEY_COMMA,
+        .Hyphen => doom.DOOM_KEY_MINUS,
+        .Period => doom.DOOM_KEY_PERIOD,
+        .Slash => doom.DOOM_KEY_SLASH,
+        .Zero => doom.DOOM_KEY_0,
+        .One => doom.DOOM_KEY_1,
+        .Two => doom.DOOM_KEY_2,
+        .Three => doom.DOOM_KEY_3,
+        .Four => doom.DOOM_KEY_4,
+        .Five => doom.DOOM_KEY_5,
+        .Six => doom.DOOM_KEY_6,
+        .Seven => doom.DOOM_KEY_7,
+        .Eight => if (is_shift_key_down) doom.DOOM_KEY_MULTIPLY else doom.DOOM_KEY_8,
+        .Nine => doom.DOOM_KEY_9,
+        .Semicolon => doom.DOOM_KEY_SEMICOLON,
+        .Equals => doom.DOOM_KEY_EQUALS,
+        .LeftBracket => doom.DOOM_KEY_LEFT_BRACKET,
+        .RightBracket => doom.DOOM_KEY_RIGHT_BRACKET,
+        .A => doom.DOOM_KEY_A,
+        .B => doom.DOOM_KEY_B,
+        .C => doom.DOOM_KEY_C,
+        .D => doom.DOOM_KEY_D,
+        .E => doom.DOOM_KEY_E,
+        .F => doom.DOOM_KEY_F,
+        .G => doom.DOOM_KEY_G,
+        .H => doom.DOOM_KEY_H,
+        .I => doom.DOOM_KEY_I,
+        .J => doom.DOOM_KEY_J,
+        .K => doom.DOOM_KEY_K,
+        .L => doom.DOOM_KEY_L,
+        .M => doom.DOOM_KEY_M,
+        .N => doom.DOOM_KEY_N,
+        .O => doom.DOOM_KEY_O,
+        .P => doom.DOOM_KEY_P,
+        .Q => doom.DOOM_KEY_Q,
+        .R => doom.DOOM_KEY_R,
+        .S => doom.DOOM_KEY_S,
+        .T => doom.DOOM_KEY_T,
+        .U => doom.DOOM_KEY_U,
+        .V => doom.DOOM_KEY_V,
+        .W => doom.DOOM_KEY_W,
+        .X => doom.DOOM_KEY_X,
+        .Y => doom.DOOM_KEY_Y,
+        .Z => doom.DOOM_KEY_Z,
+        .Backspace => doom.DOOM_KEY_BACKSPACE,
+        .LeftCtrl, .RightCtrl => doom.DOOM_KEY_CTRL,
+        .LeftShift, .RightShift => doom.DOOM_KEY_SHIFT,
+        .LeftAlt, .RightAlt => doom.DOOM_KEY_ALT,
+        .F1 => doom.DOOM_KEY_F1,
+        .F2 => doom.DOOM_KEY_F2,
+        .F3 => doom.DOOM_KEY_F3,
+        .F4 => doom.DOOM_KEY_F4,
+        .F5 => doom.DOOM_KEY_F5,
+        .F6 => doom.DOOM_KEY_F6,
+        .F7 => doom.DOOM_KEY_F7,
+        .F8 => doom.DOOM_KEY_F8,
+        .F9 => doom.DOOM_KEY_F9,
+        .F10 => doom.DOOM_KEY_F10,
+        .F11 => doom.DOOM_KEY_F11,
+        .F12 => doom.DOOM_KEY_F12,
+        .Pause => doom.DOOM_KEY_PAUSE,
+        else => doom.DOOM_KEY_UNKNOWN,
+    };
 }
 
 fn doom_read(handle: ?*anyopaque, buffer_c: ?*anyopaque, count: c_int) callconv(.C) c_int {

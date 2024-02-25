@@ -700,6 +700,10 @@ pub fn poll(
             )) |event_response| {
                 if (event_response.err) |e| {
                     echo_line("Error polling device: {}", .{e});
+                    controller.event_response_map.remove(
+                        hid_device.last_transfer_request_physical_address,
+                    );
+                    queue_transfer_trb(hid_device);
                     continue;
                 }
                 const number_of_bytes_not_transferred = event_response.number_of_bytes_not_transferred;

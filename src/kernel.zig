@@ -411,40 +411,12 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
                                 //usb_ehci.init(virtual_bar0);
                             },
                             pcie.XHCI_PROGRAMING_INTERFACE => {
-                                var usb_controller = usb_xhci.init(
+                                const usb_controller = usb_xhci.init(
                                     dev,
                                 ) catch |e| {
                                     toolbox.panic("Could not init xHCI adapter: {}", .{e});
                                 };
                                 _ = g_state.usb_xhci_controllers.append(usb_controller);
-
-                                var it = usb_controller.devices.iterator();
-                                while (it.next_value()) |device| {
-                                    if (!device.is_connected) {
-                                        continue;
-                                    }
-                                    for (device.interfaces) |*interface| {
-                                        switch (interface.class_data) {
-                                            .HID => |hid_data| {
-                                                usb_hid.init_hid_interface(
-                                                    interface,
-                                                    hid_data.hid_descriptor,
-                                                    g_state.scratch_arena,
-                                                ) catch |e| {
-                                                    //TODO: remove
-                                                    // Required for my desktop keyboard
-                                                    switch (e) {
-                                                        error.HIDDeviceDoesNotHaveAnInterruptEndpoint, error.ReportIDsNotYetSupported => {},
-                                                        else => {
-                                                            toolbox.panic("Error initing HID interface for device {?s}: {}!", .{ device.product, e });
-                                                        },
-                                                    }
-                                                };
-                                            },
-                                            else => {},
-                                        }
-                                    }
-                                }
                             },
                             pcie.USB_DEVICE_PROGRAMING_INTERFACE => {
                                 echo_line("PCIe-attached USB device", .{});
@@ -484,7 +456,7 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
         g_state.frame_buffer_stride.* = g_state.screen.stride;
     }
 
-    //enable monitor
+    // enable monitor
     {
         g_state.is_monitor_enabled = true;
         boot_log.disable();
@@ -1624,10 +1596,7 @@ pub fn xhci_interrupt_handler(vector_number: u64, _: u64) callconv(.C) void {
             continue;
         }
 
-        const should_poll_hid = usb_xhci.poll_controller(
-            controller,
-            true,
-        );
+        const should_poll_hid = usb_xhci.poll_controller(controller, true);
 
         if (should_poll_hid) {
             usb_hid.poll(
