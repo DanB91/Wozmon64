@@ -864,7 +864,7 @@ pub fn init(pcie_device: pcie.Device) !*Controller {
     }
 
     const bar0 = pcie_device.base_address_registers[0].?;
-    w64.println_serial("Found USB xHCI controller! ", .{});
+    log("Found USB xHCI controller! ", .{});
 
     const capability_registers = bar_to_register(
         CapabilityRegisters,
@@ -877,7 +877,7 @@ pub fn init(pcie_device: pcie.Device) !*Controller {
         capability_registers.runtime_registers_space_offset + 0x20,
     );
 
-    w64.println_serial("CR Len: {}", .{capability_registers.length});
+    log("CR Len: {}", .{capability_registers.length});
     const operational_registers = bar_to_register(
         OperationalRegisters,
         bar0,
@@ -886,7 +886,7 @@ pub fn init(pcie_device: pcie.Device) !*Controller {
 
     const hcsparams1 = capability_registers.read_register(CapabilityRegisters.StructuralParameters1);
 
-    w64.println_serial(
+    log(
         "Detected xHCI device at with {} ports and {} slots.",
         .{ hcsparams1.max_ports, hcsparams1.max_device_slots },
     );
@@ -944,7 +944,7 @@ pub fn init(pcie_device: pcie.Device) !*Controller {
             }
         }
 
-        w64.println_serial("xHCI controller reset!", .{});
+        log("xHCI controller reset!", .{});
     }
 
     //After Chip Hardware Reset wait until the Controller Not Ready (CNR) flag in the USBSTS is ‘0’
@@ -1087,7 +1087,7 @@ pub fn init(pcie_device: pcie.Device) !*Controller {
             @as(u64, hcsparams2.max_scratchpad_buffers_lo);
 
         if (number_of_scratch_pad_buffers > 0) {
-            w64.println_serial("Creating {} scratch pad buffers for xHCI controller...", .{number_of_scratch_pad_buffers});
+            log("Creating {} scratch pad buffers for xHCI controller...", .{number_of_scratch_pad_buffers});
             const scratch_pad_buffer_pointer_array_allocation_result = alloc_slice_aligned(
                 ScratchPadBufferPointer,
                 number_of_scratch_pad_buffers,
@@ -1106,9 +1106,9 @@ pub fn init(pcie_device: pcie.Device) !*Controller {
             }
 
             device_slots[0] = scratch_pad_buffer_pointer_array_allocation_result.physical_address_start;
-            w64.println_serial("Done!", .{});
+            log("Done!", .{});
         } else {
-            w64.println_serial("No scratch pad buffers for xHCI controller!", .{});
+            log("No scratch pad buffers for xHCI controller!", .{});
         }
         operational_registers.write_device_context_base_address_array_pointer(
             device_slots_allocation_result.physical_address_start,
@@ -1133,14 +1133,14 @@ pub fn init(pcie_device: pcie.Device) !*Controller {
         //}
         //}
 
-        w64.println_serial("xHCI controller started!", .{});
+        log("xHCI controller started!", .{});
     }
 
     //check if there was an error starting it up
     {
         const status = operational_registers.read_register(OperationalRegisters.USBStatus);
         if (status.host_controller_error) {
-            w64.println_serial("Status: {}", .{status});
+            log("Status: {}", .{status});
             return error.ErrorStartingXHCIController;
         }
     }
@@ -1260,11 +1260,11 @@ fn reset_port(port_index: usize, controller: *Controller) void {
     while (true) {
         if (portsc.port_reset_change) {
             //reset done!
-            w64.println_serial("USB2 Port reset {}! Port Speed: {}", .{ port_id, portsc.port_speed });
+            log("USB2 Port reset {}! Port Speed: {}", .{ port_id, portsc.port_speed });
             break;
         }
         if (toolbox.now().milliseconds() >= deadline_ms) {
-            w64.println_serial("Timed out resetting USB port", .{});
+            log("Timed out resetting USB port", .{});
             //TODO report error and give up on port
             break;
         }
@@ -1297,7 +1297,7 @@ fn init_device(
         .FullSpeed, .LowSpeed, .HighSpeed, .SuperSpeed => {},
         else => {
             //TODO: logging
-            w64.println_serial("Unknown port speed: {}", .{(port_registers.portsc >> 10) & 0xF});
+            log("Unknown port speed: {}", .{(port_registers.portsc >> 10) & 0xF});
             return error.InvalidSpeedOnUSBPort;
         },
     }
@@ -1311,11 +1311,11 @@ fn init_device(
             //TODO get slot type and OR into control
             .control = @as(u32, @intFromEnum(TransferRequestBlock.Type.EnableSlotCommand)) << 10,
         }, controller) catch |e| {
-            w64.println_serial("Error enabling slot: {}", .{e});
+            log("Error enabling slot: {}", .{e});
             return e;
         };
         if (command_response.number_of_bytes_not_transferred != 0) {
-            w64.println_serial("Error enabling slot, due to short packet", .{});
+            log("Error enabling slot, due to short packet", .{});
             return error.ShortPacketError;
         }
 
@@ -1360,7 +1360,7 @@ fn init_device(
         };
         //TODO verify no error from submit command.  verify output context is addressed
         _ = submit_command(command, controller) catch |e| {
-            w64.println_serial("Error setting input context: {}", .{e});
+            log("Error setting input context: {}", .{e});
             return e;
         };
     }
@@ -1392,7 +1392,7 @@ fn init_device(
             device_slot_data_structures.endpoint_0_transfer_ring,
             controller,
         ) catch |e| {
-            w64.println_serial("Error getting device descriptor: {}", .{e});
+            log("Error getting device descriptor: {}", .{e});
             return e;
         };
 
@@ -1419,14 +1419,14 @@ fn init_device(
                     .control = @as(u32, slot_id) << 24 | @as(u32, @intFromEnum(TransferRequestBlock.Type.EvaluateContextCommand)) << 10,
                 };
                 _ = submit_command(command, controller) catch |e| {
-                    w64.println_serial("Error setting max packet on input context: {}", .{e});
+                    log("Error setting max packet on input context: {}", .{e});
                     return e;
                 };
 
                 const output_device_context = device_slot_data_structures.output_device_context;
                 const output_control_endpoint_context = get_endpoint_context_from_output_device_context(1, output_device_context);
 
-                w64.println_serial("old packet size: {}, new packet size: {}", .{ old_max_packet, output_control_endpoint_context.max_packet_size });
+                log("old packet size: {}, new packet size: {}", .{ old_max_packet, output_control_endpoint_context.max_packet_size });
             }
         }
     }
@@ -1440,7 +1440,7 @@ fn init_device(
         device_slot_data_structures.endpoint_0_transfer_ring,
         controller,
     ) catch |e| {
-        w64.println_serial("Error getting device descriptor: {}", .{e});
+        log("Error getting device descriptor: {}", .{e});
         return e;
     };
 
@@ -1505,7 +1505,7 @@ fn init_device(
             device_slot_data_structures.endpoint_0_transfer_ring,
             controller,
         ) catch |e| {
-            w64.println_serial("Error getting config descriptor: {}", .{e});
+            log("Error getting config descriptor: {}", .{e});
             return e;
         };
         const configuration_and_interface_descriptor_result = alloc_slice(
@@ -1526,12 +1526,12 @@ fn init_device(
             device_slot_data_structures.endpoint_0_transfer_ring,
             controller,
         ) catch |e| {
-            w64.println_serial("Error getting full config descriptor: {}", .{e});
+            log("Error getting full config descriptor: {}", .{e});
             return e;
         };
         //TODO set configuration for endpoint
 
-        w64.println_serial("Device {?s} (Serial Number: {?s}) by {?s} has {} interfaces and {} configs", .{ product_string, serial_number_string, manufacturer_string, configuration_descriptor.num_interfaces, device_descriptor.num_configurations });
+        log("Device {?s} (Serial Number: {?s}) by {?s} has {} interfaces and {} configs", .{ product_string, serial_number_string, manufacturer_string, configuration_descriptor.num_interfaces, device_descriptor.num_configurations });
 
         //TODO store configuration descriptors in a list and retrieve them with a generic function that takes in a descriptor struct type?
         if (configuration_descriptor.num_interfaces <= 0) {
@@ -1551,7 +1551,7 @@ fn init_device(
             const length = configuration_and_interface_descriptor[i];
             const descriptor_type = configuration_and_interface_descriptor[i + 1];
             if (length == 0) {
-                w64.println_serial("Zero length descriptor, aborting enumerating this device...", .{});
+                log("Zero length descriptor, aborting enumerating this device...", .{});
                 break;
             }
             defer i += length;
@@ -1565,7 +1565,7 @@ fn init_device(
                         *USBInterfaceDescriptor,
                         @ptrCast(configuration_and_interface_descriptor.ptr + i),
                     );
-                    w64.println_serial("    {} interface {}, setting {} with {} endpoints", .{ interface_descriptor.interface_class, interface_descriptor.interface_number, interface_descriptor.alternate_setting, interface_descriptor.num_endpoints });
+                    log("    {} interface {}, setting {} with {} endpoints", .{ interface_descriptor.interface_class, interface_descriptor.interface_number, interface_descriptor.alternate_setting, interface_descriptor.num_endpoints });
 
                     //TODO
                     const class_data: Interface.ClassData = switch (interface_descriptor.interface_class) {
@@ -1754,20 +1754,20 @@ fn init_device(
             command,
             controller,
         ) catch |e| {
-            w64.println_serial("Error running Configure Endpoint Command: {}", .{e});
+            log("Error running Configure Endpoint Command: {}", .{e});
             return e;
         };
-        w64.println_serial("Successfully ran Configure Endpoint Command!", .{});
+        log("Successfully ran Configure Endpoint Command!", .{});
 
         set_configuration_on_endpoint0(
             configuration_descriptor.configuration_value,
             device_slot_data_structures.endpoint_0_transfer_ring,
             controller,
         ) catch |e| {
-            w64.println_serial("Error running SET_CONFIGURATION: {}", .{e});
+            log("Error running SET_CONFIGURATION: {}", .{e});
             return e;
         };
-        w64.println_serial("Successfully ran SET_CONFIGURATION!", .{});
+        log("Successfully ran SET_CONFIGURATION!", .{});
 
         //TODO send SET_FEATURE for remote wake up and others if supported
 
@@ -1817,7 +1817,7 @@ fn get_string_descriptor(
         endpoint_0_transfer_ring,
         controller,
     ) catch |e| {
-        w64.println_serial("Failed to get string descriptor header: {}", .{e});
+        log("Failed to get string descriptor header: {}", .{e});
     };
     const string_descriptor_result = alloc_slice(
         u8,
@@ -1838,7 +1838,7 @@ fn get_string_descriptor(
         endpoint_0_transfer_ring,
         controller,
     ) catch |e| {
-        w64.println_serial("Failed to get string descriptor: {}", .{e});
+        log("Failed to get string descriptor: {}", .{e});
     };
     return string_descriptor[@sizeOf(USBDescriptorHeader)..];
 }
@@ -2130,7 +2130,7 @@ pub fn poll_controller(
                     const err = completion_code_to_error(trb.read_completion_code());
                     if (err != error.ShortPacketError) {
                         err_opt = err;
-                        w64.println_serial("Completion error code: {}, Error: {}", .{ trb.read_completion_code(), err });
+                        log("Completion error code: {}, Error: {}", .{ trb.read_completion_code(), err });
                     }
                 }
                 const ret = PollEventRingResult{
@@ -2162,7 +2162,7 @@ pub fn poll_controller(
                 }
             },
             else => {
-                w64.println_serial("Unhandled USB event: {} -- {}", .{ trb.read_trb_type(), trb });
+                log("Unhandled USB event: {} -- {}", .{ trb.read_trb_type(), trb });
             },
         }
     }
@@ -2181,7 +2181,7 @@ fn handle_port_status_change_event(port_index: usize, controller: *Controller) v
 
     if (port_index >= controller.root_hub_usb_ports.len) {
         //TODO log to error
-        w64.println_serial("Port change event on non-existent port: {}.  Number of ports: {}", .{
+        log("Port change event on non-existent port: {}.  Number of ports: {}", .{
             port_id,
             controller.root_hub_usb_ports.len,
         });
@@ -2209,7 +2209,7 @@ fn handle_port_status_change_event(port_index: usize, controller: *Controller) v
 
                 controller.devices.remove(device_ptr);
                 device_ptr.*.arena.free_all();
-                w64.println_serial("USB device disconnected!", .{});
+                log("USB device disconnected!", .{});
                 break;
             }
         }
@@ -2221,7 +2221,7 @@ fn handle_port_status_change_event(port_index: usize, controller: *Controller) v
             var it = controller.devices.iterator();
             while (it.next()) |device| {
                 if (device.*.port_id == port_id) {
-                    w64.println_serial("Device already connected.  Skipping...", .{});
+                    log("Device already connected.  Skipping...", .{});
                     return;
                 }
             }
@@ -2234,11 +2234,11 @@ fn handle_port_status_change_event(port_index: usize, controller: *Controller) v
             //TODO: delete
             // toolbox.panic("Error initializing device! {}", .{e});
 
-            w64.println_serial("Error initializing device! {}", .{e});
+            log("Error initializing device! {}", .{e});
             break :b null;
         };
         if (device_opt) |device| {
-            w64.println_serial("USB Device connected!", .{});
+            log("USB Device connected!", .{});
             _ = controller.devices.append(device);
             for (device.interfaces) |*interface| {
                 switch (interface.class_data) {
@@ -2586,4 +2586,8 @@ fn alloc_slice_aligned(
         .data = slice,
         .physical_address_start = physical_address,
     };
+}
+
+fn log(comptime fmt: []const u8, args: anytype) void {
+    kernel.echo_line(fmt, args);
 }
