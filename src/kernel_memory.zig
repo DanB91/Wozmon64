@@ -3,6 +3,7 @@ const amd64 = @import("amd64.zig");
 const toolbox = @import("toolbox");
 const std = @import("std");
 const error_log = @import("error_log.zig");
+const builtin = @import("builtin");
 
 const PageAllocatorState = struct {
     virtual_address_conventional_free_list: FreeList,
@@ -136,7 +137,7 @@ pub fn map_conventional(virtual_address: u64, physical_address: u64) bool {
                 .writethrough = false,
                 .cache_disable = false,
                 .pdp_base_address = @intCast(page_physical_address >> 12),
-                .no_execute = true,
+                .no_execute = false, //true,
             };
             break :b pdp;
         } else {
@@ -160,7 +161,7 @@ pub fn map_conventional(virtual_address: u64, physical_address: u64) bool {
                 .writethrough = false,
                 .cache_disable = false,
                 .pd_base_address = @intCast(page_physical_address >> 12),
-                .no_execute = true,
+                .no_execute = false, //true,
             };
             break :b pd;
         } else {
@@ -284,7 +285,7 @@ pub fn map_mmio(virtual_address: u64, physical_address: u64) bool {
                 .writethrough = false,
                 .cache_disable = false,
                 .pdp_base_address = @intCast(page_physical_address >> 12),
-                .no_execute = true,
+                .no_execute = false, //true,
             };
             break :b pdp;
         } else {
@@ -308,7 +309,7 @@ pub fn map_mmio(virtual_address: u64, physical_address: u64) bool {
                 .writethrough = false,
                 .cache_disable = false,
                 .pd_base_address = @intCast(page_physical_address >> 12),
-                .no_execute = true,
+                .no_execute = false, //true,
             };
             break :b pd;
         } else {
@@ -332,7 +333,7 @@ pub fn map_mmio(virtual_address: u64, physical_address: u64) bool {
                 .writethrough = false,
                 .cache_disable = false,
                 .pt_base_address = @intCast(page_physical_address >> 12),
-                .no_execute = true,
+                .no_execute = false, //true,
             };
             break :b pt;
         } else {
@@ -358,12 +359,16 @@ pub fn map_mmio(virtual_address: u64, physical_address: u64) bool {
                 .global = true,
                 .physical_page_base_address = @intCast(physical_address >> 12),
                 .memory_protection_key = 0,
-                .no_execute = true,
+                .no_execute = false, //true,
             };
         } else {
             error_log.log_error("Virtual address: {X} already mapped.", .{virtual_address});
             return false;
         }
+        // toolbox.println("pdp: present: {}", .{pdp.entries[vaddr_bits.pdp_offset]});
+        // toolbox.println("pd: {}", .{pd.entries[vaddr_bits.pd_offset]});
+        // toolbox.println("pt: {}", .{pt.entries[vaddr_bits.pt_offset]});
+        // toolbox.println("page: {}\n", .{entry});
     }
     return true;
 }
@@ -426,12 +431,15 @@ pub fn unmap(virtual_address: u64) u64 {
         //is it actually a 2MB page?
         if (pd_entry_2mb.must_be_one == 1) {
             pd_entry_2mb.present = false;
-            asm volatile (
-                \\invlpg (%[virtual_address])
-                :
-                : [virtual_address] "r" (virtual_address),
-                : "memory"
-            );
+            //for running unit tests on Mac M1
+            if (comptime builtin.target.cpu.arch == .x86_64) {
+                asm volatile (
+                    \\invlpg (%[virtual_address])
+                    :
+                    : [virtual_address] "r" (virtual_address),
+                    : "memory"
+                );
+            }
             return @as(u64, pd_entry_2mb.physical_page_base_address) << 21;
         }
     }
@@ -441,12 +449,15 @@ pub fn unmap(virtual_address: u64) u64 {
         const vaddr_4kb: amd64.VirtualAddress4KBPage = @bitCast(virtual_address);
         var pt_entry: *volatile amd64.PageTableEntry = &w64.get_pt(virtual_address).entries[vaddr_4kb.pt_offset];
         pt_entry.present = false;
-        asm volatile (
-            \\invlpg (%[virtual_address])
-            :
-            : [virtual_address] "r" (virtual_address),
-            : "memory"
-        );
+        //for running unit tests on Mac M1
+        if (comptime builtin.target.cpu.arch == .x86_64) {
+            asm volatile (
+                \\invlpg (%[virtual_address])
+                :
+                : [virtual_address] "r" (virtual_address),
+                : "memory"
+            );
+        }
         return @as(u64, pt_entry.physical_page_base_address) << 12;
     }
 }

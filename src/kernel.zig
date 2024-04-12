@@ -15,6 +15,7 @@ const commands = @import("commands.zig");
 const programs = @import("programs.zig");
 const boot_log = @import("bootloader_console.zig");
 const error_log = @import("error_log.zig");
+const net = @import("net.zig");
 
 pub const THIS_PLATFORM = toolbox.Platform.Wozmon64;
 pub const ENABLE_PROFILER = true;
@@ -474,6 +475,14 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
 
     echo_line("\\", .{});
 
+    //init net
+    {
+        net.init(
+            kernel_start_context.uefi_simple_network_protocol_physical_address,
+            kernel_start_context.mapped_memory,
+        );
+    }
+
     //enable interrupts
     asm volatile ("sti");
 
@@ -869,7 +878,10 @@ export fn interrupt_handler_common_inner(vector_number: u64, error_code: u64) ca
     if (g_state.interrupt_handler_table[vector_number]) |interrupt_handler| {
         interrupt_handler(vector_number, error_code);
     } else {
-        toolbox.panic("No interrupt handler for vector number {}.  Error code: {}", .{
+        // toolbox.panic("No interrupt handler for vector number {}.  Error code: {}", .{
+        //     vector_number, error_code,
+        // });
+        boot_log.serial_println("No interrupt handler for vector number {}.  Error code: {}", .{
             vector_number, error_code,
         });
     }
@@ -1097,7 +1109,7 @@ fn draw_profiler() void {
         .BootProfiler => g_state.boot_profiler_snapshot,
     };
 
-    var stats = profiler.compute_statistics(profiler_snapshot, g_state.scratch_arena);
+    var stats = profiler.compute_statistics(&profiler_snapshot, g_state.scratch_arena);
     draw_line(
         toolbox.str8fmt(
             "Total elapsed: {}ms",

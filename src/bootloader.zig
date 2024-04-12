@@ -80,7 +80,6 @@ pub fn main() noreturn {
     var bootloader_arena = toolbox.Arena.init_with_buffer(&bootloader_arena_buffer);
 
     const system_table = std.os.uefi.system_table;
-    const handle = std.os.uefi.handle;
 
     profiler.begin("clear UEFI console");
     const con_out = system_table.con_out.?;
@@ -90,6 +89,12 @@ pub fn main() noreturn {
     profiler.end();
 
     const bs = system_table.boot_services.?;
+    {
+        const status = bs.setWatchdogTimer(0, 0, 0, null);
+        if (status != ZSUEFIStatus.Success) {
+            fatal("Cannot turn off watch dog timer! Status: {}", .{status});
+        }
+    }
 
     //get image load address
     {
@@ -106,7 +111,11 @@ pub fn main() noreturn {
     var gop: *ZSGraphicsOutputProtocol = undefined;
     var found_valid_resolution = false;
     const gop_mode: ZSGraphicsOutputProtocolMode = b: {
-        var status = bs.locateProtocol(&ZSGraphicsOutputProtocol.guid, null, @ptrCast(&gop));
+        var status = bs.locateProtocol(
+            &ZSGraphicsOutputProtocol.guid,
+            null,
+            @ptrCast(&gop),
+        );
         if (status != ZSUEFIStatus.Success) {
             fatal("Cannot init graphics system! Error locating GOP protocol: {}", .{status});
         }
@@ -236,19 +245,20 @@ pub fn main() noreturn {
     //NOTE: Do not call println or any UEFI functions here!!!
 
     //exit boot services
-    {
-        profiler.begin("UEFI ExitBootServices");
-        const status = bs.exitBootServices(handle, map_key);
-        profiler.end();
+    // {
+    //     const handle = std.os.uefi.handle;
+    //     profiler.begin("UEFI ExitBootServices");
+    //     const status = bs.exitBootServices(handle, map_key);
+    //     profiler.end();
 
-        if (status != ZSUEFIStatus.Success) {
-            fatal(
-                "Failed to exit boot services! Error: {}, Handle: {}, Map key: {X}",
-                .{ status, handle, map_key },
-            );
-        }
-        console.exit_boot_services();
-    }
+    //     if (status != ZSUEFIStatus.Success) {
+    //         fatal(
+    //             "Failed to exit boot services! Error: {}, Handle: {}, Map key: {X}",
+    //             .{ status, handle, map_key },
+    //         );
+    //     }
+    //     console.exit_boot_services();
+    // }
     {
         system_table.console_in_handle = null;
         system_table.con_in = null;
@@ -464,6 +474,21 @@ pub fn main() noreturn {
                         global_arena,
                     );
                 },
+                .BootServicesCode,
+                .BootServicesData,
+                .RuntimeServicesCode,
+                .RuntimeServicesData,
+                => {
+                    map_virtual_memory(
+                        desc.physical_start,
+                        &next_free_virtual_address,
+                        desc.number_of_pages,
+                        .UEFIMemory,
+                        &mapped_memory,
+                        pml4_table,
+                        global_arena,
+                    );
+                },
                 else => {
                     println("Not mapping: address {X}, number of pages: {}, type: {}", .{
                         desc.physical_start,
@@ -550,6 +575,19 @@ pub fn main() noreturn {
     const kernel_elf_bytes = global_arena.push_slice(u8, KERNEL_ELF.len);
     @memcpy(kernel_elf_bytes, KERNEL_ELF);
 
+    const snp_physical_address: usize = b: {
+        var snp: *std.os.uefi.protocol.SimpleNetwork = undefined;
+        const status = bs.locateProtocol(
+            &std.os.uefi.protocol.SimpleNetwork.guid,
+            null,
+            @ptrCast(&snp),
+        );
+        if (status != std.os.uefi.Status.Success) {
+            fatal("Cannot init SimpleNetwork protocol: {}", .{status});
+        }
+        break :b @intFromPtr(snp);
+    };
+
     var kernel_start_context = global_arena.push(w64.KernelStartContext);
     kernel_start_context.* = .{
         .root_xsdt = physical_to_virtual_pointer(root_xsdt, mapped_memory.items()),
@@ -563,6 +601,7 @@ pub fn main() noreturn {
         .kernel_elf_bytes = physical_to_virtual_pointer(kernel_elf_bytes, mapped_memory.items()),
         .stack_bottom_address = KERNEL_STACK_BOTTOM_ADDRESS,
         .boot_profiler_snapshot = .{}, //profiler.save(global_arena),
+        .uefi_simple_network_protocol_physical_address = snp_physical_address,
     };
     kernel_start_context.screen.back_buffer = physical_to_virtual_pointer(
         kernel_start_context.screen.back_buffer,
@@ -853,7 +892,7 @@ fn map_virtual_memory(
 ) void {
     const page_size: usize = switch (memory_type) {
         .ConventionalMemory, .FrameBufferMemory => w64.MEMORY_PAGE_SIZE,
-        .MMIOMemory, .ToBeUnmapped => w64.MMIO_PAGE_SIZE,
+        .MMIOMemory, .ToBeUnmapped, .UEFIMemory => w64.MMIO_PAGE_SIZE,
     };
 
     toolbox.assert(
@@ -1029,7 +1068,7 @@ fn map_virtual_memory(
                     }
                 }
             },
-            .MMIOMemory, .ToBeUnmapped => {
+            .MMIOMemory, .ToBeUnmapped, .UEFIMemory => {
                 var pd = @as(
                     *amd64.PageDirectory4KB,
                     @ptrFromInt(

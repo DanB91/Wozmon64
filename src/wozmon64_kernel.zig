@@ -129,6 +129,7 @@ pub const KernelStartContext = struct {
     stack_bottom_address: u64, //initial stack pointer
     kernel_elf_bytes: []const u8,
     boot_profiler_snapshot: profiler.State,
+    uefi_simple_network_protocol_physical_address: u64,
 };
 
 pub const ConventionalMemoryDescriptor = struct {
@@ -142,6 +143,7 @@ pub const MemoryType = enum {
     MMIOMemory,
     FrameBufferMemory,
     ToBeUnmapped,
+    UEFIMemory,
 };
 pub const VirtualMemoryMapping = struct {
     physical_address: u64,

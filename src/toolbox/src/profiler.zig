@@ -157,7 +157,10 @@ pub const Statistics = struct {
     total_elapsed: toolbox.Duration,
     section_statistics: toolbox.DynamicArray(SectionStatistics),
 };
-pub fn compute_statistics(snapshot: State, arena: *toolbox.Arena) Statistics {
+pub fn compute_statistics_of_current_state(arena: *toolbox.Arena) Statistics {
+    return compute_statistics(&g_state, arena);
+}
+pub fn compute_statistics(snapshot: *const State, arena: *toolbox.Arena) Statistics {
     if (comptime !ENABLE_PROFILER) {
         return .{};
     }
@@ -166,12 +169,28 @@ pub fn compute_statistics(snapshot: State, arena: *toolbox.Arena) Statistics {
     var section_statistics = toolbox.DynamicArray(SectionStatistics).init(arena, snapshot.sections_used);
     //index 0 is unused
     for (snapshot.section_store[1 .. snapshot.sections_used + 1]) |section| {
-        const percent_of_profiler_total_elapsed = 100 *
-            @as(f32, @floatFromInt(section.time_elapsed_without_children.ticks)) /
-            @as(f32, @floatFromInt(total_elapsed.ticks));
-        const percent_with_children = 100 *
-            @as(f32, @floatFromInt(section.time_elapsed_with_children.ticks)) /
-            @as(f32, @floatFromInt(total_elapsed.ticks));
+        const percent_of_profiler_total_elapsed = b: {
+            if (@typeInfo(toolbox.Duration.Ticks) == .Float) {
+                break :b 100 *
+                    section.time_elapsed_without_children.ticks /
+                    total_elapsed.ticks;
+            } else {
+                break :b 100 *
+                    @as(f32, @floatFromInt(section.time_elapsed_without_children.ticks)) /
+                    @as(f32, @floatFromInt(total_elapsed.ticks));
+            }
+        };
+        const percent_with_children = b: {
+            if (@typeInfo(toolbox.Duration.Ticks) == .Float) {
+                break :b 100 *
+                    section.time_elapsed_with_children.ticks /
+                    total_elapsed.ticks;
+            } else {
+                break :b 100 *
+                    @as(f32, @floatFromInt(section.time_elapsed_with_children.ticks)) /
+                    @as(f32, @floatFromInt(total_elapsed.ticks));
+            }
+        };
         const has_children =
             section.time_elapsed_without_children.ticks != section.time_elapsed_with_children.ticks;
         if (has_children) {

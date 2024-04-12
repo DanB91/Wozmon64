@@ -85,6 +85,11 @@ pub fn RingQueue(comptime T: type) type {
                 }
             }
         }
+        pub inline fn enqueue_expecting_room(self: *Self, value: T) void {
+            if (!self.enqueue(value)) {
+                toolbox.panic("Queue full!", .{});
+            }
+        }
         pub fn dequeue(self: *Self) ?T {
             if (self.rcursor == self.wcursor) {
                 return null;

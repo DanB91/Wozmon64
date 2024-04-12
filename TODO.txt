@@ -11,4 +11,11 @@
         - Map first page of conventional memory which will hold the kernel start context
     X Collect .ConventionalMemory into a list
     X Determine the first free 2MiB-based virtual address that is free in kernel space
-- Bootstrap cores in bootloader
+X Bootstrap cores in bootloader
+- Create branch for getting UEFI code working
+    - It really looks like UEFI data would have to be identity mapped to work since
+        the UEFI API implementations store pointers that are no good.
+- Figure out issue with exectuing data from 0xA000_0000
+- Rearchitect XHCI driver to use a queue per HID device instead of a shared map
+- Ethernet driver
+- Show progress on discord

@@ -97,11 +97,12 @@ pub const String8 = struct {
     }
     pub fn rune_at(self: *const String8, index: usize) RuneAndLength {
         var it = self.iterator();
-        const i: usize = 0;
+        var i: usize = 0;
         while (it.next()) |rune_and_length| {
             if (i == index) {
                 return rune_and_length;
             }
+            i += 1;
         }
         toolbox.panic("String index out of bounds: {}", .{index});
     }
