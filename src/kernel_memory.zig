@@ -53,7 +53,7 @@ pub fn init(
         },
     };
 }
-pub fn allocate_conventional_at_address(virtual_address: u64, num_pages: usize) []align(w64.MEMORY_PAGE_SIZE) u8 {
+pub fn allocate_conventional_at_address(virtual_address: u64, num_pages: usize, is_executable: bool) []align(w64.MEMORY_PAGE_SIZE) u8 {
     const virtual_start = virtual_address;
     var virtual_address_cursor = virtual_address;
     const physical_conventional_free_list = &g_state.physical_address_conventional_free_list;
@@ -71,6 +71,7 @@ pub fn allocate_conventional_at_address(virtual_address: u64, num_pages: usize) 
         const result = map_conventional(
             virtual_address_cursor,
             physical_address,
+            is_executable,
         );
         if (!result) {
             toolbox.panic("Unable to map {X} to {X}", .{ virtual_address_cursor, physical_address });
@@ -83,7 +84,9 @@ pub fn allocate_conventional_at_address(virtual_address: u64, num_pages: usize) 
         @ptrFromInt(virtual_start),
     )[0 .. num_pages * page_size];
 }
-pub fn allocate_conventional(num_pages: usize) []align(w64.MEMORY_PAGE_SIZE) u8 {
+pub fn allocate_conventional(
+    num_pages: usize,
+) []align(w64.MEMORY_PAGE_SIZE) u8 {
     g_state.lock.lock();
     defer g_state.lock.release();
 
@@ -94,10 +97,14 @@ pub fn allocate_conventional(num_pages: usize) []align(w64.MEMORY_PAGE_SIZE) u8 
         toolbox.panic("No more virtual address space left in kernel!", .{});
     }
 
-    return allocate_conventional_at_address(virtual_address, num_pages);
+    return allocate_conventional_at_address(
+        virtual_address,
+        num_pages,
+        false,
+    );
 }
 
-pub fn map_conventional(virtual_address: u64, physical_address: u64) bool {
+pub fn map_conventional(virtual_address: u64, physical_address: u64, is_executable: bool) bool {
     if (!toolbox.is_aligned_to(virtual_address, w64.MEMORY_PAGE_SIZE)) {
         error_log.log_error("Bad alignment for virtual address: {X}", .{virtual_address});
         return false;
@@ -136,7 +143,7 @@ pub fn map_conventional(virtual_address: u64, physical_address: u64) bool {
                 .writethrough = false,
                 .cache_disable = false,
                 .pdp_base_address = @intCast(page_physical_address >> 12),
-                .no_execute = true,
+                .no_execute = !is_executable,
             };
             break :b pdp;
         } else {
@@ -160,7 +167,7 @@ pub fn map_conventional(virtual_address: u64, physical_address: u64) bool {
                 .writethrough = false,
                 .cache_disable = false,
                 .pd_base_address = @intCast(page_physical_address >> 12),
-                .no_execute = true,
+                .no_execute = !is_executable,
             };
             break :b pd;
         } else {
@@ -181,7 +188,7 @@ pub fn map_conventional(virtual_address: u64, physical_address: u64) bool {
                 .global = (virtual_address & (1 << 63)) != 0,
                 .physical_page_base_address = @intCast(physical_address >> 21),
                 .memory_protection_key = 0,
-                .no_execute = false,
+                .no_execute = !is_executable,
             };
         } else {
             if (entry.must_be_one != 1) {

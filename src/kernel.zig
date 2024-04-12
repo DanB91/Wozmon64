@@ -463,6 +463,7 @@ export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.
     }
 
     {
+        echo_welcome_line("\n", .{});
         echo_welcome_line("*** Wozmon64 ***\n", .{});
         echo_welcome_line("{} bytes free *** {} processors free *** {} x {} pixels free\n", .{
             kernel_memory.pages_free() * w64.MEMORY_PAGE_SIZE,
@@ -846,7 +847,7 @@ fn page_fault_handler(vector_number: u64, error_code: u64) callconv(.C) void {
         toolbox.panic("Page fault at MMIO address: {X}", .{unmapped_address});
     }
 
-    const page = kernel_memory.allocate_conventional_at_address(to_map, 1);
+    const page = kernel_memory.allocate_conventional_at_address(to_map, 1, true);
     @memset(page, 0);
 
     if (!w64.is_kernel_address(to_map) and to_map >= w64.DEFAULT_PROGRAM_LOAD_ADDRESS) {
@@ -1093,8 +1094,8 @@ fn draw_profiler() void {
     g_state.scratch_arena.save();
     defer g_state.scratch_arena.restore();
     const profiler_snapshot = switch (g_state.profiler_to_draw) {
-        .FrameProfiler => g_state.last_frames_profiler_snapshot,
-        .BootProfiler => g_state.boot_profiler_snapshot,
+        .FrameProfiler => &g_state.last_frames_profiler_snapshot,
+        .BootProfiler => &g_state.boot_profiler_snapshot,
     };
 
     var stats = profiler.compute_statistics(profiler_snapshot, g_state.scratch_arena);
@@ -1142,7 +1143,7 @@ fn draw_rune(rune: toolbox.Rune, rune_x: usize, rune_y: usize, vertical_padding:
         'a'...'z' => rune - 32,
         else => rune,
     };
-    if (r < ' ' or r > '_') {
+    if (r <= ' ' or r > '_') {
         return;
     }
     const ascii: u8 = @intCast(r);

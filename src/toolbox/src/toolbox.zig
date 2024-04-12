@@ -15,17 +15,18 @@ pub usingnamespace @import("dynamic_array.zig");
 pub usingnamespace @import("os_utils.zig");
 pub usingnamespace @import("atomic.zig");
 pub usingnamespace @import("bit_flags.zig");
+pub usingnamespace @import("panic.zig");
+
 pub const profiler = @import("profiler.zig");
 
 const builtin = @import("builtin");
 const build_flags = @import("build_flags");
 const root = @import("root");
 const std = @import("std");
+const byte_math = @import("byte_math.zig");
+const os_utils = @import("os_utils.zig");
+const print = @import("print.zig");
 
-pub const panic_handler = if (THIS_PLATFORM != .Playdate)
-    std.builtin.default_panic
-else
-    playdate_panic;
 pub const Platform = enum {
     MacOS,
     //Linux, //TODO
@@ -72,47 +73,6 @@ pub fn init_playdate_runtime(
     playdate_error = _playdate_error;
     playdate_get_seconds = _playdate_get_seconds;
     playdate_get_milliseconds = _playdate_get_milliseconds;
-}
-pub fn playdate_panic(
-    msg: []const u8,
-    error_return_trace: ?*std.builtin.StackTrace,
-    return_address: ?usize,
-) noreturn {
-    _ = error_return_trace;
-    _ = return_address;
-
-    switch (comptime builtin.os.tag) {
-        .freestanding => {
-            //playdate hardware
-            playdate_error("%s lr: %x", msg.ptr, asm volatile (""
-                : [lr] "={lr}" (-> u32),
-            ));
-        },
-        else => {
-            //playdate simulator
-            var stack_trace_buffer = [_]u8{0} ** 4096;
-            var buffer = [_]u8{0} ** 4096;
-            var stream = std.io.fixedBufferStream(&stack_trace_buffer);
-
-            b: {
-                if (builtin.strip_debug_info) {
-                    const to_print = std.fmt.bufPrintZ(&buffer, "Unable to dump stack trace: debug info stripped\n", .{}) catch return;
-                    playdate_error("%s", to_print.ptr);
-                    break :b;
-                }
-                const debug_info = std.debug.getSelfDebugInfo() catch |err| {
-                    const to_print = std.fmt.bufPrintZ(&buffer, "Unable to dump stack trace: Unable to open debug info: {s}\n", .{@errorName(err)}) catch break :b;
-                    playdate_error("%s", to_print.ptr);
-                    break :b;
-                };
-                std.debug.writeCurrentStackTrace(stream.writer(), debug_info, std.io.tty.detectConfig(std.io.getStdErr()), null) catch {};
-            }
-            const to_print = std.fmt.bufPrintZ(&buffer, "{s} -- {s}", .{ msg, stack_trace_buffer[0..stream.pos] }) catch "Unknown error";
-            playdate_error("%s", to_print.ptr);
-        },
-    }
-
-    while (true) {}
 }
 
 //C bridge functions
