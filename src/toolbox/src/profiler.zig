@@ -17,6 +17,8 @@ pub const State = struct {
     current_section_index: usize = 0,
     block_stack: toolbox.FixedStack(TimedBlock, MAX_SECTIONS) = .{},
 
+    is_running: bool = false,
+
     const MAX_SECTIONS = 64;
 };
 
@@ -24,6 +26,9 @@ pub const MAX_LABEL_LEN = 64;
 pub const Section = struct {
     time_elapsed_with_children: toolbox.Duration = .{},
     time_elapsed_without_children: toolbox.Duration = .{},
+    min_time_elapsed_without_children: toolbox.Duration = .{},
+    max_time_elapsed_without_children: toolbox.Duration = .{},
+
     hit_count: u32 = 0,
     label_store: [MAX_LABEL_LEN]u8 = [_]u8{0} ** MAX_LABEL_LEN,
     label_len: usize = 0,
@@ -39,23 +44,29 @@ pub const TimedBlock = struct {
     parent_section_index: usize = 0,
 };
 
-var g_state: State = .{};
+pub var g_state: State = .{};
 
 pub fn start_profiler() void {
     if (comptime !ENABLE_PROFILER) {
         return;
     }
     g_state = .{};
+    g_state.is_running = true;
     g_state.start = toolbox.now();
 }
 
 pub fn begin(comptime label: []const u8) void {
-    if (comptime !ENABLE_PROFILER) {
+    if ((comptime !ENABLE_PROFILER) or !g_state.is_running) {
         return;
     }
     const StaticVars = struct {
         //index 0 is always unused, since it is the "root parent"
         var section_index: usize = 0;
+        comptime {
+            const hack_to_get_unique_address_that_will_probably_break_in_the_future =
+                label;
+            _ = hack_to_get_unique_address_that_will_probably_break_in_the_future;
+        }
     };
 
     //this will give us a different index per label since we have a different
@@ -72,6 +83,7 @@ pub fn begin(comptime label: []const u8) void {
         g_state.section_store[section_index] = .{
             .label_len = label.len,
             .index_address = @intFromPtr(&StaticVars.section_index),
+            .min_time_elapsed_without_children = toolbox.MAX_DURATION,
         };
         section = &g_state.section_store[section_index];
         @memcpy(section.label_store[0..label.len], label);
@@ -87,7 +99,7 @@ pub fn begin(comptime label: []const u8) void {
 }
 
 pub fn end() void {
-    if (comptime !ENABLE_PROFILER) {
+    if ((comptime !ENABLE_PROFILER) or !g_state.is_running) {
         return;
     }
     const end_time = toolbox.now();
@@ -101,6 +113,16 @@ pub fn end() void {
     section.hit_count += 1;
     section.time_elapsed_without_children.ticks += elapsed.ticks;
     section.time_elapsed_with_children = elapsed.add(block.previous_time_elapsed_with_children);
+    section.min_time_elapsed_without_children.ticks =
+        @min(
+        section.min_time_elapsed_without_children.ticks,
+        elapsed.ticks,
+    );
+    section.max_time_elapsed_without_children.ticks =
+        @max(
+        section.max_time_elapsed_without_children.ticks,
+        elapsed.ticks,
+    );
 
     g_state.current_section_index = block.parent_section_index;
 }
@@ -110,6 +132,7 @@ pub fn end_profiler() void {
         return;
     }
     g_state.end = toolbox.now();
+    g_state.is_running = false;
 }
 
 pub fn save() State {
@@ -125,6 +148,8 @@ pub const SectionStatistics = struct {
     label_len: usize = 0,
     time_elapsed_without_children: toolbox.Duration = .{},
     time_elapsed_with_children: toolbox.Duration = .{},
+    min_time_elapsed_without_children: toolbox.Duration = .{},
+    max_time_elapsed_without_children: toolbox.Duration = .{},
     percent_of_profiler_total_elapsed: f32 = 0,
     percent_with_children: f32 = 0,
     hit_count: u32 = 0,
@@ -133,29 +158,33 @@ pub const SectionStatistics = struct {
     pub fn str8(self: SectionStatistics, arena: *toolbox.Arena) toolbox.String8 {
         if (self.has_children) {
             return toolbox.str8fmt(
-                "{s}: {} hits, Total: {}mcs, {d:.2}%, {d:.2}% w/children",
+                "{s}: {} hits, Total: {}mcs, Min: {}mcs, Max: {}mcs, {d:.2}%, {d:.2}% w/children",
                 .{
                     self.label_store[0..self.label_len],
                     self.hit_count,
                     self.time_elapsed_without_children.microseconds(),
+                    self.min_time_elapsed_without_children.microseconds(),
+                    self.max_time_elapsed_without_children.microseconds(),
                     self.percent_of_profiler_total_elapsed,
                     self.percent_with_children,
                 },
                 arena,
             );
         } else {
-            return toolbox.str8fmt("{s}: {} hits, Total: {}mcs, {d:.2}%", .{
+            return toolbox.str8fmt("{s}: {} hits, Total: {}mcs, Min: {}mcs, Max: {}mcs, {d:.2}%", .{
                 self.label_store[0..self.label_len],
                 self.hit_count,
                 self.time_elapsed_without_children.microseconds(),
+                self.min_time_elapsed_without_children.microseconds(),
+                self.max_time_elapsed_without_children.microseconds(),
                 self.percent_of_profiler_total_elapsed,
             }, arena);
         }
     }
 };
 pub const Statistics = struct {
-    total_elapsed: toolbox.Duration,
-    section_statistics: toolbox.DynamicArray(SectionStatistics),
+    total_elapsed: toolbox.Duration = .{},
+    section_statistics: toolbox.DynamicArray(SectionStatistics) = .{},
 };
 pub fn compute_statistics_of_current_state(arena: *toolbox.Arena) Statistics {
     return compute_statistics(&g_state, arena);
@@ -198,6 +227,8 @@ pub fn compute_statistics(snapshot: *const State, arena: *toolbox.Arena) Statist
                 .label_store = section.label_store,
                 .label_len = section.label_len,
                 .time_elapsed_without_children = section.time_elapsed_without_children,
+                .min_time_elapsed_without_children = section.min_time_elapsed_without_children,
+                .max_time_elapsed_without_children = section.max_time_elapsed_without_children,
                 .percent_of_profiler_total_elapsed = percent_of_profiler_total_elapsed,
                 .percent_with_children = percent_with_children,
                 .has_children = has_children,
@@ -208,6 +239,8 @@ pub fn compute_statistics(snapshot: *const State, arena: *toolbox.Arena) Statist
                 .label_store = section.label_store,
                 .label_len = section.label_len,
                 .time_elapsed_without_children = section.time_elapsed_without_children,
+                .min_time_elapsed_without_children = section.min_time_elapsed_without_children,
+                .max_time_elapsed_without_children = section.max_time_elapsed_without_children,
                 .percent_of_profiler_total_elapsed = percent_of_profiler_total_elapsed,
                 .hit_count = section.hit_count,
                 .time_elapsed_with_children = section.time_elapsed_without_children,

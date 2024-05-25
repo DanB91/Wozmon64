@@ -265,7 +265,7 @@ pub fn main() noreturn {
     //     cores_detected,
     //     screen,
     // );
-    // @atomicStore(bool, &print_strip, true, .SeqCst);
+    // @atomicStore(bool, &print_strip, true, .seq_cst);
 
     const kernel_start_context_bytes = b: {
         // const size = toolbox.next_power_of_2(
@@ -535,7 +535,7 @@ pub fn main() noreturn {
     //wait for application processors to come up
     {
         for (bootloader_processor_contexts) |context| {
-            while (!@atomicLoad(bool, &context.is_booted, .SeqCst)) {
+            while (!@atomicLoad(bool, &context.is_booted, .seq_cst)) {
                 std.atomic.spinLoopHint();
             }
         }
@@ -1470,8 +1470,8 @@ export fn processor_entry(
 ) callconv(.C) noreturn {
     @setAlignStack(256);
     println("processor id: {}", .{processor_id});
-    @atomicStore(u64, &context.processor_id, processor_id, .SeqCst);
-    @atomicStore(bool, &context.is_booted, true, .SeqCst);
+    @atomicStore(u64, &context.processor_id, processor_id, .seq_cst);
+    @atomicStore(bool, &context.is_booted, true, .seq_cst);
 
     amd64.wrmsr(amd64.IA32_TSC_AUX_MSR, processor_id);
     while (true) {

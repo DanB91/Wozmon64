@@ -2,11 +2,13 @@ const toolbox = @import("toolbox.zig");
 const std = @import("std");
 const root = @import("root");
 
+pub const z = std.mem.zeroes;
+
 pub const PAGE_SIZE = switch (toolbox.THIS_PLATFORM) {
     .MacOS => toolbox.kb(16),
-    .UEFI, .BoksOS => toolbox.kb(4), //boksos.PAGE_SIZE,
+    .UEFI => toolbox.kb(4),
     .Playdate => 4, //Playdate is embeded, so no concept of pages, but everything should be 4-byte aligned
-    .Wozmon64 => toolbox.mb(2),
+    .BoksOS, .Wozmon64 => toolbox.mb(2),
     .WASM => toolbox.kb(64),
 };
 
@@ -67,7 +69,7 @@ pub fn PoolAllocator(comptime T: type) type {
                     .{ to_free_address, elements_address },
                 );
             }
-            var element = @fieldParentPtr(Element, "data", to_free);
+            var element: *Element = @fieldParentPtr("data", to_free);
             element.in_use = false;
             self.elements_allocated -= 1;
         }
@@ -377,9 +379,8 @@ const platform_allocate_memory = switch (toolbox.THIS_PLATFORM) {
     //.MacOS => unix_allocate_memory,
     //.MacOS => posix_allocate_memory,
     .MacOS => macos_allocate_memory,
-    .BoksOS => boksos_allocate_memory,
     .Playdate => playdate_allocate_memory,
-    .Wozmon64 => root.allocate_memory,
+    .BoksOS, .Wozmon64 => root.allocate_memory,
     .WASM => posix_allocate_memory,
     else => @compileError("OS not supported"),
 };
@@ -387,10 +388,9 @@ const platform_free_memory = switch (toolbox.THIS_PLATFORM) {
     //.MacOS => unix_free_memory,
     //.MacOS => posix_free_memory,
     .MacOS => macos_free_memory,
-    .BoksOS => boksos_free_memory,
     .Playdate => playdate_free_memory,
     .WASM => posix_free_memory,
-    .Wozmon64 => root.free_memory,
+    .BoksOS, .Wozmon64 => root.free_memory,
     else => @compileError("OS not supported"),
 };
 
@@ -452,15 +452,6 @@ fn posix_allocate_memory(n: usize) []u8 {
 }
 fn posix_free_memory(memory: []u8) void {
     c_free(memory.ptr);
-}
-////BoksOS functions
-fn boksos_allocate_memory(n: usize) []u8 {
-    return toolbox.boksos_kernel_heap.alloc(u8, n) catch {
-        toolbox.panic("Out of memory allocating {} bytes", .{n});
-    };
-}
-fn boksos_free_memory(memory: []u8) void {
-    return toolbox.boksos_kernel_heap.free(memory);
 }
 
 ////Playdate functions

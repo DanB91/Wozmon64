@@ -12,9 +12,8 @@ pub fn str8fmt(comptime fmt: []const u8, args: anytype, arena: *toolbox.Arena) S
         toolbox.panic("Error std.fmt.bufPrint in str8fmt: {}", .{e});
     return str8(string_bytes);
 }
-pub fn str8fmtbuf(comptime fmt: []const u8, args: anytype, comptime buffer_len: usize) String8 {
-    var buffer: [buffer_len]u8 = undefined;
-    const string_bytes = std.fmt.bufPrint(&buffer, fmt, args) catch |e|
+pub fn str8fmtbuf(buffer: []u8, comptime fmt: []const u8, args: anytype) String8 {
+    const string_bytes = std.fmt.bufPrint(buffer, fmt, args) catch |e|
         toolbox.panic("Error std.fmt.bufPrint in str8fmt: {}", .{e});
     return str8(string_bytes);
 }
@@ -63,22 +62,21 @@ pub const String8 = struct {
         var i: usize = 0;
         var start_byte: usize = 0;
 
-        if (rune_start != 0) {
-            while (it.next()) |rune_and_len| {
-                defer i += 1;
-                if (i == rune_start - 1) {
-                    start_byte += rune_and_len.len;
-                    if (rune_end_opt == null) {
-                        return .{
-                            .bytes = self.bytes[start_byte..],
-                            .rune_length = self.rune_length - rune_start,
-                        };
-                    } else {
-                        break;
-                    }
+        while (it.next()) |rune_and_len| {
+            if (i == rune_start) {
+                if (rune_end_opt == null) {
+                    return .{
+                        .bytes = self.bytes[start_byte..],
+                        .rune_length = self.rune_length - rune_start,
+                    };
+                } else {
+                    break;
                 }
             }
+            i += 1;
+            start_byte += rune_and_len.len;
         }
+
         var end_byte: usize = start_byte;
         if (rune_end_opt) |rune_end| {
             while (it.next()) |rune_and_len| {

@@ -363,7 +363,7 @@ const OperationalRegisters = extern struct {
         reserved2: u16,
     };
     fn read_register(self: *volatile OperationalRegisters, comptime RegisterType: type) RegisterType {
-        @fence(.SeqCst);
+        @fence(.seq_cst);
         switch (RegisterType) {
             USBCommand => {
                 const register = self.command;
@@ -409,7 +409,7 @@ const OperationalRegisters = extern struct {
 
         const int_value: u32 = @as(u32, @bitCast(value));
         ptr.* = int_value;
-        @fence(.SeqCst);
+        @fence(.seq_cst);
     }
 };
 
@@ -1064,7 +1064,7 @@ pub fn init(pcie_device: pcie.Device) !*Controller {
         };
 
         //TODO: xhci does not start up on old desktop.  but will start if erstdba is not set
-        //@fence(.SeqCst);
+        //@fence(.seq_cst);
         //println_serial("interrupter_registers.erstsz: {x}", .{interrupter_registers.erstsz});
         //println_serial("interrupter_registers.erdp: {x}", .{interrupter_registers.erdp});
         //println_serial("interrupter_registers.erstba: {x}", .{interrupter_registers.erstba});
@@ -2064,7 +2064,7 @@ pub fn send_setup_command_endpoint0(
 //}
 //event_trb_ring.erdp.* = (event_trb_ring.event_trb_ring_physical_address +
 //(event_trb_ring.ring.index * @sizeOf(TransferRequestBlock))) | (1 << 3);
-//@fence(.SeqCst);
+//@fence(.seq_cst);
 
 //switch (trb.read_trb_type()) {
 //.CommandCompletionEvent,
@@ -2172,7 +2172,7 @@ pub fn poll_controller(
         .ehb = 1,
     };
     event_trb_ring.erdp.* = new_erdp;
-    @fence(.SeqCst);
+    @fence(.seq_cst);
     return did_transfer_event_occur;
 }
 
@@ -2421,7 +2421,7 @@ fn submit_command(
         }
     }
 
-    @fence(.SeqCst);
+    @fence(.seq_cst);
     //ring the doorbell.  0 is the only valid value for ringing the
     //command trb doorbell (Host Controller Command)
     command_trb_ring.doorbell.* = 0;

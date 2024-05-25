@@ -131,24 +131,24 @@ pub fn SingleProducerMultiConsumerRingQueue(comptime T: type) type {
             };
         }
         pub inline fn is_empty(self: Self) bool {
-            return @atomicLoad(usize, &self.rcursor, .Monotonic) ==
-                @atomicLoad(usize, &self.wcursor, .Monotonic);
+            return @atomicLoad(usize, &self.rcursor, .monotonic) ==
+                @atomicLoad(usize, &self.wcursor, .monotonic);
         }
         pub inline fn is_full(self: Self) bool {
-            var tmp_cursor = @atomicLoad(usize, &self.wcursor, .Monotonic);
+            var tmp_cursor = @atomicLoad(usize, &self.wcursor, .monotonic);
             next_ring_index(&tmp_cursor, self.data.len);
-            return tmp_cursor == @atomicLoad(usize, &self.rcursor, .Monotonic);
+            return tmp_cursor == @atomicLoad(usize, &self.rcursor, .monotonic);
         }
         pub fn enqueue(self: *Self, value: T) bool {
-            const rcursor = @atomicLoad(usize, &self.rcursor, .Monotonic);
-            const wcursor = @atomicLoad(usize, &self.wcursor, .Acquire);
+            const rcursor = @atomicLoad(usize, &self.rcursor, .monotonic);
+            const wcursor = @atomicLoad(usize, &self.wcursor, .acquire);
             var next_wcursor = wcursor;
             next_ring_index(&next_wcursor, self.data.len);
             if (rcursor == next_wcursor) {
                 return false;
             }
             self.data[wcursor] = value;
-            @atomicStore(usize, &self.wcursor, next_wcursor, .Release);
+            @atomicStore(usize, &self.wcursor, next_wcursor, .release);
             return true;
         }
         //In order to support force_enqueue this we must support multiple consumers
@@ -163,8 +163,8 @@ pub fn SingleProducerMultiConsumerRingQueue(comptime T: type) type {
         }
         pub fn dequeue(self: *Self) ?T {
             while (true) {
-                const rcursor = @atomicLoad(usize, &self.rcursor, .Acquire);
-                const wcursor = @atomicLoad(usize, &self.wcursor, .Monotonic);
+                const rcursor = @atomicLoad(usize, &self.rcursor, .acquire);
+                const wcursor = @atomicLoad(usize, &self.wcursor, .monotonic);
                 if (rcursor == wcursor) {
                     return null;
                 }
@@ -177,8 +177,8 @@ pub fn SingleProducerMultiConsumerRingQueue(comptime T: type) type {
                     &self.rcursor,
                     rcursor,
                     next_rcursor,
-                    .Release,
-                    .Monotonic,
+                    .release,
+                    .monotonic,
                 ) == null) {
                     return ret;
                 }

@@ -311,13 +311,13 @@ pub fn Atomic(comptime T: type) type {
         inline fn get_register(self: *Self) T {
             const RegisterType = get_register_type();
             const reg_value: RegisterType = @bitCast(self.value);
-            return @bitCast(@atomicLoad(RegisterType, &reg_value, .SeqCst));
+            return @bitCast(@atomicLoad(RegisterType, &reg_value, .seq_cst));
         }
 
         inline fn set_register(self: *Self, value: T) void {
             const RegisterType = get_register_type();
             const reg_value: RegisterType = @bitCast(value);
-            @atomicStore(RegisterType, &self.value, reg_value, .SeqCst);
+            @atomicStore(RegisterType, &self.value, reg_value, .seq_cst);
         }
 
         fn get_register_type() type {
@@ -340,22 +340,22 @@ pub const ReentrantTicketLock = struct {
     core_id: i64 = -1,
 
     pub fn lock(self: *ReentrantTicketLock) void {
-        const core_id = @atomicLoad(i64, &self.core_id, .SeqCst);
+        const core_id = @atomicLoad(i64, &self.core_id, .seq_cst);
         if (core_id == get_core_id()) {
             self.recursion_level += 1;
             return;
         }
-        const ticket = @atomicRmw(u64, &self.taken, .Add, 1, .SeqCst);
+        const ticket = @atomicRmw(u64, &self.taken, .Add, 1, .seq_cst);
         while (true) {
             if (@cmpxchgWeak(
                 u64,
                 &self.serving,
                 ticket,
                 ticket,
-                .AcqRel,
-                .Acquire,
+                .acq_rel,
+                .acquire,
             ) == null) {
-                @atomicStore(i64, &self.core_id, @intCast(get_core_id()), .SeqCst);
+                @atomicStore(i64, &self.core_id, @intCast(get_core_id()), .seq_cst);
                 self.recursion_level = 1;
                 return;
             } else {
@@ -367,8 +367,8 @@ pub const ReentrantTicketLock = struct {
     pub fn release(self: *ReentrantTicketLock) void {
         self.recursion_level -= 1;
         if (self.recursion_level == 0) {
-            @atomicStore(i64, &self.core_id, @intCast(-1), .SeqCst);
-            _ = @atomicRmw(u64, &self.serving, .Add, 1, .SeqCst);
+            @atomicStore(i64, &self.core_id, @intCast(-1), .seq_cst);
+            _ = @atomicRmw(u64, &self.serving, .Add, 1, .seq_cst);
         }
     }
 };

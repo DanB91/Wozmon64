@@ -13,6 +13,13 @@ comptime {
     }
 }
 
+pub const MAX_DURATION = Duration{
+    .ticks = switch (toolbox.THIS_PLATFORM) {
+        .MacOS => std.math.maxInt(i64),
+        .Playdate => std.math.floatMax(f32),
+        else => std.math.maxInt(i64),
+    },
+};
 pub const Duration = struct {
     ticks: Ticks = 0,
 

@@ -7,11 +7,11 @@ pub fn build(b: *std.Build) !void {
     const optimize = b.standardOptimizeOption(.{});
 
     const toolbox_module = b.addModule("toolbox", .{
-        .root_source_file = .{ .path = "src/toolbox/src/toolbox.zig" },
+        .root_source_file = b.path("src/toolbox/src/toolbox.zig"),
     });
 
     const w64_module = b.addModule("wozmon64", .{
-        .root_source_file = .{ .path = "src/wozmon64_user.zig" },
+        .root_source_file = b.path("src/wozmon64_user.zig"),
     });
     w64_module.addImport("toolbox", toolbox_module);
 
@@ -23,14 +23,14 @@ pub fn build(b: *std.Build) !void {
         }));
         const exe = b.addExecutable(.{
             .name = "woz_and_jobs",
-            .root_source_file = .{ .path = "sample_programs/woz_and_jobs/woz_and_jobs.zig" },
+            .root_source_file = b.path("sample_programs/woz_and_jobs/woz_and_jobs.zig"),
             .target = target,
             .optimize = .Debug,
             .pic = true,
         });
 
         exe.entry = .{ .symbol_name = "entry" };
-        exe.linker_script = .{ .path = "sample_programs/woz_and_jobs/linker.ld" };
+        exe.linker_script = b.path("sample_programs/woz_and_jobs/linker.ld");
         exe.root_module.addImport("wozmon64", w64_module);
         exe.root_module.addImport("toolbox", toolbox_module);
         exe.root_module.red_zone = false;
@@ -63,7 +63,7 @@ pub fn build(b: *std.Build) !void {
         const exe = b.addExecutable(.{
             .name = "doom",
             .target = target,
-            .root_source_file = .{ .path = "sample_programs/doom/doom.zig" },
+            .root_source_file = b.path("sample_programs/doom/doom.zig"),
             .optimize = .ReleaseFast,
             .pic = true,
         });
@@ -74,7 +74,7 @@ pub fn build(b: *std.Build) !void {
             .flags = &.{"-fno-sanitize=all"},
         });
         exe.entry = .{ .symbol_name = "entry" };
-        exe.linker_script = .{ .path = "sample_programs/doom/linker.ld" };
+        exe.linker_script = b.path("sample_programs/doom/linker.ld");
         exe.root_module.addImport("wozmon64", w64_module);
         exe.root_module.addImport("toolbox", toolbox_module);
         exe.root_module.red_zone = false;
@@ -106,12 +106,12 @@ pub fn build(b: *std.Build) !void {
         }));
         const exe = b.addExecutable(.{
             .name = "kernel.elf",
-            .root_source_file = .{ .path = "src/kernel.zig" },
+            .root_source_file = b.path("src/kernel.zig"),
             .target = kernel_target,
             .optimize = optimize,
             .pic = true,
         });
-        exe.linker_script = .{ .path = "src/linker.ld" };
+        exe.linker_script = b.path("src/linker.ld");
         exe.root_module.code_model = .kernel;
         exe.root_module.red_zone = false;
         exe.entry = .{ .symbol_name = "kernel_entry" };
@@ -143,11 +143,11 @@ pub fn build(b: *std.Build) !void {
         }));
         const exe = b.addExecutable(.{
             .name = "bootx64",
-            .root_source_file = .{ .path = "src/bootloader.zig" },
+            .root_source_file = b.path("src/bootloader.zig"),
             .target = uefi_target,
             .optimize = optimize,
             .pic = true,
-            // .main_pkg_path = .{ .path = "." },
+            // .main_pkg_path = b.path("."),
         });
         exe.root_module.addImport("toolbox", toolbox_module);
         exe.root_module.addImport("kernel.elf", kernel_elf_module);
@@ -226,7 +226,7 @@ pub fn build(b: *std.Build) !void {
         // Creates a step for unit testing. This only builds the test executable
         // but does not run it.
         const unit_tests = b.addTest(.{
-            .root_source_file = .{ .path = "src/unit_tests.zig" },
+            .root_source_file = b.path("src/unit_tests.zig"),
             .target = target,
             .optimize = optimize,
         });

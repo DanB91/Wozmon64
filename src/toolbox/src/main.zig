@@ -3,12 +3,13 @@ const toolbox = @import("toolbox.zig");
 const profiler = toolbox.profiler;
 
 pub const THIS_PLATFORM = toolbox.Platform.MacOS;
-pub const ENABLE_PROFILER = !toolbox.IS_DEBUG;
+pub const ENABLE_PROFILER = true; // !toolbox.IS_DEBUG;
 pub const panic = toolbox.panic_handler;
 
 pub fn main() anyerror!void {
     if (toolbox.IS_DEBUG) {
         try run_tests();
+        run_benchmarks();
     } else {
         run_benchmarks();
     }

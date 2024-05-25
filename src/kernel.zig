@@ -1407,7 +1407,7 @@ fn handle_command(command: commands.Command) void {
             g_state.is_user_program_running = true;
             run_on_core(entry_point, &system_api);
             while (true) {
-                if (!@atomicLoad(bool, &g_state.is_user_program_running, .SeqCst)) {
+                if (!@atomicLoad(bool, &g_state.is_user_program_running, .seq_cst)) {
                     exit_running_program();
                     return;
                 }
@@ -1640,7 +1640,7 @@ pub fn register_key_events_queue(key_events: *w64.KeyEvents) callconv(.C) void {
 }
 
 pub fn user_program_terminate() callconv(.C) noreturn {
-    @atomicStore(bool, &g_state.is_user_program_running, false, .SeqCst);
+    @atomicStore(bool, &g_state.is_user_program_running, false, .seq_cst);
     toolbox.hang();
 }
 

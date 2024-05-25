@@ -23,12 +23,13 @@ pub inline fn align_up(n: anytype, alignment: usize) @TypeOf(n) {
         //     @compileError("Alignment is not a power of 2!");
         // }
     }
+    const unsigned_n: usize = @intCast(n);
 
-    if (alignment == 0 or (n % alignment) == 0) {
+    if (alignment == 0 or (unsigned_n % alignment) == 0) {
         return n;
     }
 
-    return n + alignment - (n % alignment);
+    return @intCast(unsigned_n + alignment - (unsigned_n % alignment));
 }
 
 pub inline fn align_down(n: anytype, alignment: usize) @TypeOf(n) {
@@ -38,8 +39,9 @@ pub inline fn align_down(n: anytype, alignment: usize) @TypeOf(n) {
         }
     }
     toolbox.assert(alignment == 0 or (alignment & (alignment - 1)) == 0, "Unexpected alignment of {}!", .{alignment});
+    const unsigned_n: usize = @intCast(n);
 
-    return n & ~(alignment - 1);
+    return @intCast(unsigned_n & ~(alignment - 1));
 }
 pub inline fn is_aligned_to(n: anytype, comptime alignment: usize) bool {
     comptime {
@@ -50,7 +52,8 @@ pub inline fn is_aligned_to(n: anytype, comptime alignment: usize) bool {
             @compileError("Alignment is not a power of 2!");
         }
     }
-    return (n % alignment) == 0;
+    const unsigned_n: usize = @intCast(n);
+    return (unsigned_n % alignment) == 0;
 }
 
 pub inline fn zig_compatible_align_up(n: anytype, alignment: u29) @TypeOf(n) {

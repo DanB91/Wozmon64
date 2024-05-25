@@ -213,7 +213,7 @@ pub fn RandomRemovalLinkedList(comptime T: type) type {
         }
 
         pub fn remove(self: *Self, to_remove: *T) void {
-            const node = @fieldParentPtr(Node, "value", to_remove);
+            const node: *Node = @fieldParentPtr("value", to_remove);
             defer {
                 self.len -= 1;
                 self.free_node(node);
