@@ -812,7 +812,7 @@ pub fn send_interprocessor_interrupt(
     interrupt_command_register_high: APICInterruptControlRegisterHigh,
 ) void {
     apic.write_register(interrupt_command_register_high);
-    @fence(.SeqCst);
+    @fence(.seq_cst);
     apic.write_register(interrupt_command_register_low);
 }
 pub fn send_end_of_interrupt(apic: APIC) void {
