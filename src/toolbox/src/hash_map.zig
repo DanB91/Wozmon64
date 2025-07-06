@@ -323,10 +323,10 @@ fn to_bytes(v: anytype) []const u8 {
     }
     const ti = @typeInfo(T);
     switch (comptime ti) {
-        .Pointer => |info| {
+        .pointer => |info| {
             const Child = info.child;
             switch (comptime info.size) {
-                .Slice => {
+                .slice => {
                     return @as([*]const u8, @ptrCast(v.ptr))[0..@sizeOf(Child)];
                 },
                 else => {
@@ -347,13 +347,13 @@ fn eql(a: anytype, b: @TypeOf(a)) bool {
     }
 
     switch (comptime @typeInfo(T)) {
-        .Struct => |info| {
+        .@"struct" => |info| {
             inline for (info.fields) |field_info| {
                 if (!eql(@field(a, field_info.name), @field(b, field_info.name))) return false;
             }
             return true;
         },
-        .ErrorUnion => {
+        .error_union => {
             if (a) |a_p| {
                 if (b) |b_p| return eql(a_p, b_p) else |_| return false;
             } else |a_e| {
@@ -376,27 +376,27 @@ fn eql(a: anytype, b: @TypeOf(a)) bool {
 
         //@compileError("cannot compare untagged union type " ++ @typeName(T));
         //},
-        .Array => {
+        .array => {
             if (a.len != b.len) return false;
             for (a, 0..) |e, i|
                 if (!eql(e, b[i])) return false;
             return true;
         },
-        .Vector => |info| {
+        .vector => |info| {
             var i: usize = 0;
             while (i < info.len) : (i += 1) {
                 if (!eql(a[i], b[i])) return false;
             }
             return true;
         },
-        .Pointer => |info| {
+        .pointer => |info| {
             return switch (info.size) {
                 .One, .Many, .C => a == b,
                 //changed from std.meta.eql
-                .Slice => std.mem.eql(info.child, a, b),
+                .slice => std.mem.eql(info.child, a, b),
             };
         },
-        .Optional => {
+        .optional => {
             if (a == null and b == null) return true;
             if (a == null or b == null) return false;
             return eql(a.?, b.?);

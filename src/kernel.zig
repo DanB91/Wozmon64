@@ -33,7 +33,7 @@ const KernelState = struct {
     key_events: w64.KeyEvents,
     are_characters_shifted: bool,
     is_ctrl_down: bool,
-    debug_symbols: ?std.dwarf.DwarfInfo,
+    debug_symbols: ?std.debug.Dwarf,
 
     global_arena: *toolbox.Arena,
     frame_arena: *toolbox.Arena,
@@ -89,7 +89,7 @@ pub fn panic(msg: []const u8, error_return_trace: ?*std.builtin.StackTrace, ret_
             };
             const line_info = debug_symbols.getLineNumberInfo(
                 global_allocator,
-                compile_unit.*,
+                compile_unit,
                 address,
             ) catch |e| {
                 echo_line("At {X} Line Info Error: {}", .{ address, e });
@@ -115,7 +115,7 @@ pub fn panic(msg: []const u8, error_return_trace: ?*std.builtin.StackTrace, ret_
                     };
                     const line_info = debug_symbols.getLineNumberInfo(
                         global_allocator,
-                        compile_unit.*,
+                        compile_unit,
                         address,
                     ) catch |e| {
                         echo_line("At {X} Line Info Error: {}", .{ address, e });
@@ -152,11 +152,10 @@ var g_state: KernelState = undefined;
 extern var _bss_start: u8;
 extern var _bss_end: u8;
 
-export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.C) noreturn {
+export fn kernel_entry(kernel_start_context: *w64.KernelStartContext) callconv(.withStackAlign(.c, 256)) noreturn {
     //disable interrupts
     asm volatile ("cli");
 
-    @setAlignStack(256);
     //clear bss
     {
         const bss_start_address = @intFromPtr(&_bss_start);
@@ -537,13 +536,13 @@ pub inline fn free_memory(data: []u8) void {
 
     const aligned_data =
         @as(
-        [*]align(w64.MEMORY_PAGE_SIZE) u8,
-        @ptrFromInt(vaddr_aligned),
-    )[0..new_len];
+            [*]align(w64.MEMORY_PAGE_SIZE) u8,
+            @ptrFromInt(vaddr_aligned),
+        )[0..new_len];
     kernel_memory.free_conventional(aligned_data);
 }
 
-fn parse_dwarf_debug_symbols(kernel_elf: []const u8, arena: *toolbox.Arena) !std.dwarf.DwarfInfo {
+fn parse_dwarf_debug_symbols(kernel_elf: []const u8, arena: *toolbox.Arena) !std.debug.Dwarf {
     var section_store = toolbox.DynamicArray(std.elf.Elf64_Shdr).init(arena, 64);
     const header = b: {
         var kernel_image_byte_stream = std.io.fixedBufferStream(kernel_elf);
@@ -580,7 +579,7 @@ fn parse_dwarf_debug_symbols(kernel_elf: []const u8, arena: *toolbox.Arena) !std
         ".eh_frame_hdr",
     };
 
-    var debug_sections = std.dwarf.DwarfInfo.null_section_array;
+    var debug_sections = std.debug.Dwarf.null_section_array;
     for (sections) |section| {
         const namez = @as([*:0]const u8, @ptrCast(shstr.ptr + section.sh_name));
         const name = std.mem.span(namez);
@@ -597,12 +596,12 @@ fn parse_dwarf_debug_symbols(kernel_elf: []const u8, arena: *toolbox.Arena) !std
         profiler.begin("Parse DWARF");
         defer profiler.end();
 
-        var debug_info = std.dwarf.DwarfInfo{
+        var debug_info = std.debug.Dwarf{
             .endian = header.endian,
             .sections = debug_sections,
             .is_macho = false,
         };
-        std.dwarf.openDwarfDebugInfo(
+        std.debug.Dwarf.open(
             &debug_info,
             arena.zstd_allocator,
         ) catch {
@@ -775,21 +774,21 @@ fn set_up_idt(arena: *toolbox.Arena) void {
         const handler_addr = @intFromPtr(handler);
         idt[i] =
             .{
-            .offset_bits_0_to_15 = @as(u16, @truncate(handler_addr)),
-            .selector = asm volatile ("mov %%cs, %[ret]"
-                : [ret] "=r" (-> u16),
-                :
-                : "cs"
-            ),
-            .ist = 0,
-            .type_attr = .InterruptGate64Bit,
-            .zeroA = 0,
-            .privilege_bits = 0,
-            .is_present = true,
-            .offset_bits_16_to_31 = @as(u16, @truncate(handler_addr >> 16)),
-            .offset_bits_32_to_63 = @as(u32, @truncate(handler_addr >> 32)),
-            .zeroB = 0,
-        };
+                .offset_bits_0_to_15 = @as(u16, @truncate(handler_addr)),
+                .selector = asm volatile ("mov %%cs, %[ret]"
+                    : [ret] "=r" (-> u16),
+                    :
+                    : "cs"
+                ),
+                .ist = 0,
+                .type_attr = .InterruptGate64Bit,
+                .zeroA = 0,
+                .privilege_bits = 0,
+                .is_present = true,
+                .offset_bits_16_to_31 = @as(u16, @truncate(handler_addr >> 16)),
+                .offset_bits_32_to_63 = @as(u32, @truncate(handler_addr >> 32)),
+                .zeroB = 0,
+            };
     }
     register_exception_handler(&page_fault_handler, .PageFault);
     register_exception_handler(&invalid_opcode_handler, .InvalidOpcode);
@@ -913,7 +912,7 @@ comptime {
     else
         \\
         \\
-        ;
+    ;
 
     asm (
         \\.global interrupt_handler_common
@@ -925,72 +924,72 @@ comptime {
         \\
         \\push %rsi
         \\mov %rbp, %rsi #rsi now has the error code
-        ++ SAVE_FRAME_POINTER ++
-            \\push %rax
-            \\push %rbx
-            \\push %rcx
-            \\push %rdx
-            \\push %r8
-            \\push %r9
-            \\push %r10
-            \\push %r11
-            \\push %r12
-            \\push %r13
-            \\push %r14
-            \\push %r15
-            \\sub $0x100, %rsp
-            \\movdqu %xmm15, 0xF0(%rsp)
-            \\movdqu %xmm14, 0xE0(%rsp)
-            \\movdqu %xmm13, 0xD0(%rsp)
-            \\movdqu %xmm12, 0xC0(%rsp)
-            \\movdqu %xmm11, 0xB0(%rsp)
-            \\movdqu %xmm10, 0xC0(%rsp)
-            \\movdqu %xmm9, 0x90(%rsp)
-            \\movdqu %xmm8, 0x80(%rsp)
-            \\movdqu %xmm7, 0x70(%rsp)
-            \\movdqu %xmm6, 0x60(%rsp)
-            \\movdqu %xmm5, 0x50(%rsp)
-            \\movdqu %xmm4, 0x40(%rsp)
-            \\movdqu %xmm3, 0x30(%rsp)
-            \\movdqu %xmm2, 0x20(%rsp)
-            \\movdqu %xmm1, 0x10(%rsp)
-            \\movdqu %xmm0, 0x0(%rsp)
-            \\
-            \\call interrupt_handler_common_inner
-            \\
-            \\movdqu 0(%rsp), %xmm0 
-            \\movdqu 0x10(%rsp), %xmm1
-            \\movdqu 0x20(%rsp), %xmm2
-            \\movdqu 0x30(%rsp), %xmm3
-            \\movdqu 0x40(%rsp), %xmm4
-            \\movdqu 0x50(%rsp), %xmm5
-            \\movdqu 0x60(%rsp), %xmm6 
-            \\movdqu 0x70(%rsp), %xmm7 
-            \\movdqu 0x80(%rsp), %xmm8 
-            \\movdqu 0x90(%rsp), %xmm9 
-            \\movdqu 0xA0(%rsp), %xmm10 
-            \\movdqu 0xB0(%rsp), %xmm11
-            \\movdqu 0xC0(%rsp), %xmm12
-            \\movdqu 0xD0(%rsp), %xmm13
-            \\movdqu 0xE0(%rsp), %xmm14
-            \\movdqu 0xF0(%rsp), %xmm15
-            \\add $0x100, %rsp
-            \\pop %r15
-            \\pop %r14
-            \\pop %r13
-            \\pop %r12
-            \\pop %r11
-            \\pop %r10
-            \\pop %r9
-            \\pop %r8
-            \\pop %rdx
-            \\pop %rcx
-            \\pop %rbx
-            \\pop %rax
-            \\pop %rsi
-            \\pop %rdi
-            \\pop %rbp
-            \\iretq
+    ++ SAVE_FRAME_POINTER ++
+        \\push %rax
+        \\push %rbx
+        \\push %rcx
+        \\push %rdx
+        \\push %r8
+        \\push %r9
+        \\push %r10
+        \\push %r11
+        \\push %r12
+        \\push %r13
+        \\push %r14
+        \\push %r15
+        \\sub $0x100, %rsp
+        \\movdqu %xmm15, 0xF0(%rsp)
+        \\movdqu %xmm14, 0xE0(%rsp)
+        \\movdqu %xmm13, 0xD0(%rsp)
+        \\movdqu %xmm12, 0xC0(%rsp)
+        \\movdqu %xmm11, 0xB0(%rsp)
+        \\movdqu %xmm10, 0xC0(%rsp)
+        \\movdqu %xmm9, 0x90(%rsp)
+        \\movdqu %xmm8, 0x80(%rsp)
+        \\movdqu %xmm7, 0x70(%rsp)
+        \\movdqu %xmm6, 0x60(%rsp)
+        \\movdqu %xmm5, 0x50(%rsp)
+        \\movdqu %xmm4, 0x40(%rsp)
+        \\movdqu %xmm3, 0x30(%rsp)
+        \\movdqu %xmm2, 0x20(%rsp)
+        \\movdqu %xmm1, 0x10(%rsp)
+        \\movdqu %xmm0, 0x0(%rsp)
+        \\
+        \\call interrupt_handler_common_inner
+        \\
+        \\movdqu 0(%rsp), %xmm0 
+        \\movdqu 0x10(%rsp), %xmm1
+        \\movdqu 0x20(%rsp), %xmm2
+        \\movdqu 0x30(%rsp), %xmm3
+        \\movdqu 0x40(%rsp), %xmm4
+        \\movdqu 0x50(%rsp), %xmm5
+        \\movdqu 0x60(%rsp), %xmm6 
+        \\movdqu 0x70(%rsp), %xmm7 
+        \\movdqu 0x80(%rsp), %xmm8 
+        \\movdqu 0x90(%rsp), %xmm9 
+        \\movdqu 0xA0(%rsp), %xmm10 
+        \\movdqu 0xB0(%rsp), %xmm11
+        \\movdqu 0xC0(%rsp), %xmm12
+        \\movdqu 0xD0(%rsp), %xmm13
+        \\movdqu 0xE0(%rsp), %xmm14
+        \\movdqu 0xF0(%rsp), %xmm15
+        \\add $0x100, %rsp
+        \\pop %r15
+        \\pop %r14
+        \\pop %r13
+        \\pop %r12
+        \\pop %r11
+        \\pop %r10
+        \\pop %r9
+        \\pop %r8
+        \\pop %rdx
+        \\pop %rcx
+        \\pop %rbx
+        \\pop %rax
+        \\pop %rsi
+        \\pop %rdi
+        \\pop %rbp
+        \\iretq
     );
 }
 
@@ -1364,9 +1363,9 @@ fn type_key(scancode: w64.ScanCode, are_characters_shifted: bool) void {
             echo_line("", .{});
             const parse_result =
                 commands.parse_command(
-                g_state.command_buffer.items(),
-                g_state.scratch_arena,
-            );
+                    g_state.command_buffer.items(),
+                    g_state.scratch_arena,
+                );
             defer g_state.scratch_arena.reset();
             handle_parse_result(parse_result, g_state.command_buffer.items());
 

@@ -16,7 +16,7 @@ pub inline fn gb(n: anytype) @TypeOf(n) {
 pub inline fn align_up(n: anytype, alignment: usize) @TypeOf(n) {
     comptime {
         switch (@typeInfo(@TypeOf(n))) {
-            .Int, .ComptimeInt => {},
+            .int, .comptime_int => {},
             else => @compileError("align_up only supports ints!"),
         }
         // if (!(alignment == 0 or (alignment & (alignment - 1)) == 0)) {
@@ -34,7 +34,7 @@ pub inline fn align_up(n: anytype, alignment: usize) @TypeOf(n) {
 
 pub inline fn align_down(n: anytype, alignment: usize) @TypeOf(n) {
     comptime {
-        if (@typeInfo(@TypeOf(n)) != .Int) {
+        if (@typeInfo(@TypeOf(n)) != .int) {
             @compileError("align_up only supports ints!");
         }
     }
@@ -45,7 +45,7 @@ pub inline fn align_down(n: anytype, alignment: usize) @TypeOf(n) {
 }
 pub inline fn is_aligned_to(n: anytype, comptime alignment: usize) bool {
     comptime {
-        if (@typeInfo(@TypeOf(n)) != .Int) {
+        if (@typeInfo(@TypeOf(n)) != .int) {
             @compileError("align_up only supports ints!");
         }
         if (!(alignment == 0 or (alignment & (alignment - 1)) == 0)) {
@@ -58,7 +58,7 @@ pub inline fn is_aligned_to(n: anytype, comptime alignment: usize) bool {
 
 pub inline fn zig_compatible_align_up(n: anytype, alignment: u29) @TypeOf(n) {
     comptime {
-        if (@typeInfo(@TypeOf(n)) != .Int) {
+        if (@typeInfo(@TypeOf(n)) != .int) {
             @compileError("zig_compatible_align_up only supports ints!");
         }
     }

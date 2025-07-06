@@ -18,7 +18,7 @@ pub fn build(b: *std.Build) !void {
     var woz_and_jobs_step: *std.Build.Step.Compile = undefined;
     var woz_and_jobs_install_step: *std.Build.Step.InstallFile = undefined;
     {
-        const target = b.resolveTargetQuery(try std.zig.CrossTarget.parse(.{
+        const target = b.resolveTargetQuery(try std.Target.Query.parse(.{
             .arch_os_abi = "x86_64-freestanding-gnu",
         }));
         const exe = b.addExecutable(.{
@@ -57,7 +57,7 @@ pub fn build(b: *std.Build) !void {
     var doom_step: *std.Build.Step.Compile = undefined;
     var doom_install_step: *std.Build.Step.InstallFile = undefined;
     {
-        const target = b.resolveTargetQuery(try std.zig.CrossTarget.parse(.{
+        const target = b.resolveTargetQuery(try std.Target.Query.parse(.{
             .arch_os_abi = "x86_64-freestanding-gnu",
         }));
         const exe = b.addExecutable(.{
@@ -101,7 +101,7 @@ pub fn build(b: *std.Build) !void {
     var kernel_step: *std.Build.Step.Compile = undefined;
     var kernel_install_step: *std.Build.Step.InstallArtifact = undefined;
     {
-        const kernel_target = b.resolveTargetQuery(try std.zig.CrossTarget.parse(.{
+        const kernel_target = b.resolveTargetQuery(try std.Target.Query.parse(.{
             .arch_os_abi = "x86_64-freestanding-gnu",
         }));
         const exe = b.addExecutable(.{
@@ -138,7 +138,7 @@ pub fn build(b: *std.Build) !void {
 
     //compile bootloader
     const bootloader_install_step = b: {
-        const uefi_target = b.resolveTargetQuery(try std.zig.CrossTarget.parse(.{
+        const uefi_target = b.resolveTargetQuery(try std.Target.Query.parse(.{
             .arch_os_abi = "x86_64-uefi-gnu",
         }));
         const exe = b.addExecutable(.{
@@ -214,9 +214,9 @@ pub fn build(b: *std.Build) !void {
     //clean step
     {
         const clean_step = b.step("clean", "Clean all artifacts");
-        const rm_zig_cache = b.addRemoveDirTree("zig-cache");
+        const rm_zig_cache = b.addRemoveDirTree(b.path(".zig-cache"));
         clean_step.dependOn(&rm_zig_cache.step);
-        const rm_zig_out = b.addRemoveDirTree("zig-out");
+        const rm_zig_out = b.addRemoveDirTree(b.path("zig-out"));
         clean_step.dependOn(&rm_zig_out.step);
     }
 

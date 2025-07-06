@@ -48,14 +48,14 @@ pub fn DynamicArray(comptime T: type) type {
         }
 
         pub const sort = switch (@typeInfo(T)) {
-            .Int, .Float => sort_number,
-            .Struct => sort_struct,
+            .int, .float => sort_number,
+            .@"struct" => sort_struct,
             else => @compileError("Unsupported type " ++ @typeName(T) ++ " for DynamicArray"),
         };
 
         pub const sort_reverse = switch (@typeInfo(T)) {
-            .Int, .Float => sort_number_reverse,
-            .Struct => sort_struct_reverse,
+            .int, .float => sort_number_reverse,
+            .@"struct" => sort_struct_reverse,
             else => @compileError("Unsupported type " ++ @typeName(T) ++ " for DynamicArray"),
         };
 

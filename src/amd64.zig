@@ -219,7 +219,7 @@ pub const VirtualAddress4KBPage = packed struct(u64) {
     }
 
     pub fn to(self: VirtualAddress4KBPage, comptime T: type) T {
-        if (comptime @typeInfo(T) != .Pointer) {
+        if (comptime @typeInfo(T) != .pointer) {
             @compileError("Cannot convert an address into a non pointer value!");
         }
         const address_number: u64 = @bitCast(self);
@@ -812,7 +812,6 @@ pub fn send_interprocessor_interrupt(
     interrupt_command_register_high: APICInterruptControlRegisterHigh,
 ) void {
     apic.write_register(interrupt_command_register_high);
-    @fence(.seq_cst);
     apic.write_register(interrupt_command_register_low);
 }
 pub fn send_end_of_interrupt(apic: APIC) void {

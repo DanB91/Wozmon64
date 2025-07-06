@@ -3,7 +3,7 @@ pub fn is_iterable(x: anytype) bool {
     const T = if (@TypeOf(x) == type) x else @TypeOf(x);
     const ti = @typeInfo(T);
     const ret = switch (comptime ti) {
-        .Pointer => |ptr_info| switch (ptr_info.size) {
+        .pointer => |ptr_info| switch (ptr_info.size) {
             .Slice, .Many, .C => true,
             .One => !is_single_pointer(ptr_info.child) and is_iterable(ptr_info.child),
         },
@@ -20,7 +20,7 @@ pub fn is_single_pointer(x: anytype) bool {
     const T = if (@TypeOf(x) == type) x else @TypeOf(x);
     const ti = @typeInfo(T);
     switch (comptime ti) {
-        .Pointer => |ptr_info| return ptr_info.size == .One,
+        .pointer => |ptr_info| return ptr_info.size == .One,
         else => return false,
     }
 }
@@ -31,7 +31,7 @@ pub fn is_string_type(comptime Type: type) bool {
     }
     const ti = @typeInfo(Type);
     switch (comptime ti) {
-        .Pointer => |info| {
+        .pointer => |info| {
             return info.child == u8;
         },
         else => {
@@ -43,7 +43,7 @@ pub fn is_string_type(comptime Type: type) bool {
 pub fn child_type(comptime Type: type) type {
     const ti = @typeInfo(Type);
     switch (comptime ti) {
-        .Pointer => |info| {
+        .pointer => |info| {
             return info.child;
         },
         else => {
@@ -53,12 +53,12 @@ pub fn child_type(comptime Type: type) type {
 }
 
 pub fn enum_size(comptime T: type) usize {
-    return comptime @typeInfo(T).Enum.fields.len;
+    return comptime @typeInfo(T).@"enum".fields.len;
 }
 
 pub fn ptr_cast(comptime T: type, ptr: anytype) T {
     const ti = @typeInfo(T);
-    if (ti != .Pointer) {
+    if (ti != .pointer) {
         @compileError("T in ptr_cast must be a pointer");
     }
     return @as(T, @ptrCast(@alignCast(ptr)));

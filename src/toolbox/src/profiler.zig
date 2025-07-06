@@ -115,14 +115,14 @@ pub fn end() void {
     section.time_elapsed_with_children = elapsed.add(block.previous_time_elapsed_with_children);
     section.min_time_elapsed_without_children.ticks =
         @min(
-        section.min_time_elapsed_without_children.ticks,
-        elapsed.ticks,
-    );
+            section.min_time_elapsed_without_children.ticks,
+            elapsed.ticks,
+        );
     section.max_time_elapsed_without_children.ticks =
         @max(
-        section.max_time_elapsed_without_children.ticks,
-        elapsed.ticks,
-    );
+            section.max_time_elapsed_without_children.ticks,
+            elapsed.ticks,
+        );
 
     g_state.current_section_index = block.parent_section_index;
 }
@@ -199,7 +199,7 @@ pub fn compute_statistics(snapshot: *const State, arena: *toolbox.Arena) Statist
     //index 0 is unused
     for (snapshot.section_store[1 .. snapshot.sections_used + 1]) |section| {
         const percent_of_profiler_total_elapsed = b: {
-            if (@typeInfo(toolbox.Duration.Ticks) == .Float) {
+            if (@typeInfo(toolbox.Duration.Ticks) == .float) {
                 break :b 100 *
                     section.time_elapsed_without_children.ticks /
                     total_elapsed.ticks;
@@ -210,7 +210,7 @@ pub fn compute_statistics(snapshot: *const State, arena: *toolbox.Arena) Statist
             }
         };
         const percent_with_children = b: {
-            if (@typeInfo(toolbox.Duration.Ticks) == .Float) {
+            if (@typeInfo(toolbox.Duration.Ticks) == .float) {
                 break :b 100 *
                     section.time_elapsed_with_children.ticks /
                     total_elapsed.ticks;

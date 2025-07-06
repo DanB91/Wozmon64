@@ -84,9 +84,9 @@ pub fn main() noreturn {
 
     profiler.begin("clear UEFI console");
     const con_out = system_table.con_out.?;
-    _ = con_out.reset(false);
-    _ = con_out.clearScreen();
-    _ = con_out.setCursorPosition(0, 0);
+    _ = con_out.reset(false) catch fatal(":(", .{});
+    _ = con_out.clearScreen() catch fatal(":(", .{});
+    _ = con_out.setCursorPosition(0, 0) catch fatal(":(", .{});
     profiler.end();
 
     const bs = system_table.boot_services.?;
@@ -95,7 +95,7 @@ pub fn main() noreturn {
     {
         var loaded_image_protocol: *ZSLoadedImageProtocol = undefined;
         const status = bs.handleProtocol(std.os.uefi.handle, &ZSLoadedImageProtocol.guid, @ptrCast(&loaded_image_protocol));
-        if (status != ZSUEFIStatus.Success) {
+        if (status != ZSUEFIStatus.success) {
             fatal("Cannot init timing system! Error locating Loaded Image Protocol: {}", .{status});
         }
         image_load_address = @intFromPtr(loaded_image_protocol.image_base);
@@ -106,48 +106,37 @@ pub fn main() noreturn {
     var gop: *ZSGraphicsOutputProtocol = undefined;
     var found_valid_resolution = false;
     const gop_mode: ZSGraphicsOutputProtocolMode = b: {
-        var status = bs.locateProtocol(&ZSGraphicsOutputProtocol.guid, null, @ptrCast(&gop));
-        if (status != ZSUEFIStatus.Success) {
+        const status = bs.locateProtocol(&ZSGraphicsOutputProtocol.guid, null, @ptrCast(&gop));
+        if (status != ZSUEFIStatus.success) {
             fatal("Cannot init graphics system! Error locating GOP protocol: {}", .{status});
         }
 
         //set graphics mode to 0 if NotStarted is returned
-        {
-            var gop_mode_info: *ZSGraphicsOutputModeInformation = undefined;
-            var size_of_info: usize = 0;
-            const query_mode_status = gop.queryMode(0, &size_of_info, &gop_mode_info);
-            if (query_mode_status == .NotStarted) {
-                _ = gop.setMode(0);
-            }
-        }
+        // {
+        //     var gop_mode_info: *ZSGraphicsOutputModeInformation = undefined;
+        //     var size_of_info: usize = 0;
+        //     const query_mode_status = gop.queryMode(0, &size_of_info, &gop_mode_info);
+        //     if (query_mode_status == .NotStarted) {
+        //         _ = gop.setMode(0);
+        //     }
+        // }
         var mode: u32 = 0;
         resolution_loop: for (w64.SUPPORTED_RESOLUTIONS) |resolution| {
             for (0..gop.mode.max_mode + 1) |i| {
                 mode = @intCast(i);
-                var gop_mode_info: *ZSGraphicsOutputModeInformation = undefined;
-                var size_of_info: usize = 0;
-                const query_mode_status = gop.queryMode(mode, &size_of_info, &gop_mode_info);
-                if (query_mode_status == .Success) {
-                    toolbox.assert(
-                        @sizeOf(ZSGraphicsOutputModeInformation) == size_of_info,
-                        "Wrong size for GOP mode info. Expected: {}, Actual: {}",
-                        .{
-                            @sizeOf(ZSGraphicsOutputModeInformation),
-                            size_of_info,
-                        },
-                    );
+                const query_result = gop.queryMode(mode);
+                if (query_result) |gop_mode_info| {
                     if (gop_mode_info.horizontal_resolution == resolution.width and
                         gop_mode_info.vertical_resolution == resolution.height and
-                        gop_mode_info.pixel_format == .BlueGreenRedReserved8BitPerColor)
+                        gop_mode_info.pixel_format == .blue_green_red_reserved_8_bit_per_color)
                     {
                         found_valid_resolution = true;
-                        status = gop.setMode(mode);
-                        if (status != ZSUEFIStatus.Success) {
-                            fatal("Cannot init graphics system! Error setting mode {}: {}", .{ mode, status });
-                        }
+                        gop.setMode(mode) catch |e| {
+                            fatal("Cannot init graphics system! Error setting mode {}: {}", .{ mode, e });
+                        };
                         break :resolution_loop;
                     }
-                }
+                } else |_| {}
             }
         }
         if (!found_valid_resolution) {
@@ -185,13 +174,13 @@ pub fn main() noreturn {
     {
         var mp: *mpsp.MPServiceProtocol = undefined;
         var status = bs.locateProtocol(&mpsp.MPServiceProtocol.guid, null, @ptrCast(&mp));
-        if (status != ZSUEFIStatus.Success) {
+        if (status != ZSUEFIStatus.success) {
             fatal("Cannot init multicore support! Error locating MP protocol: {}", .{status});
         }
 
         var number_of_processors: usize = 0;
         status = mp.mp_services_get_number_of_processors(&number_of_processors, &number_of_enabled_processors);
-        if (status != ZSUEFIStatus.Success) {
+        if (status != ZSUEFIStatus.success) {
             fatal("Cannot init multicore support! Error getting number of processors: {}", .{status});
         }
         println("Number of enabled processors: {}", .{number_of_enabled_processors});
@@ -212,7 +201,7 @@ pub fn main() noreturn {
 
         const status = bs.getMemoryMap(&mmap_size, @ptrCast(&mmap_store), &map_key, &descriptor_size, &descriptor_version);
 
-        if (status != ZSUEFIStatus.Success) {
+        if (status != ZSUEFIStatus.success) {
             fatal("Failed to get memory map! Error: {}", .{status});
         }
 
@@ -241,7 +230,7 @@ pub fn main() noreturn {
         const status = bs.exitBootServices(handle, map_key);
         profiler.end();
 
-        if (status != ZSUEFIStatus.Success) {
+        if (status != ZSUEFIStatus.success) {
             fatal(
                 "Failed to exit boot services! Error: {}, Handle: {}, Map key: {X}",
                 .{ status, handle, map_key },
@@ -274,7 +263,7 @@ pub fn main() noreturn {
         const size = w64.KERNEL_GLOBAL_ARENA_SIZE;
         for (memory_map) |*desc| {
             switch (desc.type) {
-                .ConventionalMemory => {
+                .conventional_memory => {
                     //must be aligned on a 2MB boundary
                     const target_address = toolbox.align_up(desc.physical_start, w64.MEMORY_PAGE_SIZE);
                     const padding = target_address - desc.physical_start;
@@ -433,7 +422,7 @@ pub fn main() noreturn {
         for (memory_map) |desc| {
             const descriptor_size = desc.number_of_pages * UEFI_PAGE_SIZE;
             switch (desc.type) {
-                .ConventionalMemory => {
+                .conventional_memory => {
                     const aligned_physical_address = toolbox.align_up(
                         desc.physical_start,
                         w64.MEMORY_PAGE_SIZE,
@@ -448,11 +437,11 @@ pub fn main() noreturn {
                         });
                     }
                 },
-                .MemoryMappedIO,
-                .MemoryMappedIOPortSpace,
-                .ReservedMemoryType,
-                .ACPIMemoryNVS,
-                .ACPIReclaimMemory,
+                .memory_mapped_io,
+                .memory_mapped_io_port_space,
+                .reserved_memory_type,
+                .acpi_memory_nvs,
+                .acpi_reclaim_memory,
                 => {
                     map_virtual_memory(
                         desc.physical_start,
@@ -920,8 +909,8 @@ fn map_virtual_memory(
 
         var pdp: *amd64.PageDirectoryPointer =
             @ptrFromInt(
-            @as(u64, pml4e.pdp_base_address) << 12,
-        );
+                @as(u64, pml4e.pdp_base_address) << 12,
+            );
         const pdp_index = (vaddr >> 30) & 0b1_1111_1111;
         const pdpe = &pdp.entries[pdp_index];
         if (!pdpe.present) {
@@ -1168,8 +1157,9 @@ fn parse_kernel_elf(arena: *toolbox.Arena) !KernelParseResult {
             },
             std.elf.PT_GNU_RELRO => {},
             std.elf.PT_PHDR => {},
-            //else => toolbox.panic("Unexpected ELF section: {x}", .{program_header.p_type}),
-            else => return error.UnexpectedELFSection,
+            std.elf.PT_GNU_EH_FRAME => {},
+            else => toolbox.panic("Unexpected ELF section: {x}", .{program_header.p_type}),
+            // else => return error.UnexpectedELFSection,
         }
     }
 
@@ -1193,13 +1183,13 @@ fn physical_to_virtual_pointer(
     const type_info = @typeInfo(T);
 
     const pointer_size = switch (type_info) {
-        .Pointer => |ptr| ptr.size,
+        .pointer => |ptr| ptr.size,
         else => {
             @compileError("Must be a pointer!");
         },
     };
 
-    const physical_address = if (pointer_size == .Slice)
+    const physical_address = if (pointer_size == .slice)
         @intFromPtr(physical.ptr)
     else
         @intFromPtr(physical);
@@ -1220,8 +1210,8 @@ fn physical_to_virtual_pointer(
         }
     };
 
-    if (pointer_size == .Slice) {
-        const Child = @typeInfo(T).Pointer.child;
+    if (pointer_size == .slice) {
+        const Child = @typeInfo(T).pointer.child;
         return @as([*]Child, @ptrFromInt(virtual_address))[0..physical.len];
     }
     return @as(T, @ptrFromInt(virtual_address));
@@ -1467,8 +1457,7 @@ comptime {
 export fn processor_entry(
     context: *w64.BootloaderProcessorContext,
     processor_id: u64,
-) callconv(.C) noreturn {
-    @setAlignStack(256);
+) callconv(.withStackAlign(.c, 256)) noreturn {
     println("processor id: {}", .{processor_id});
     @atomicStore(u64, &context.processor_id, processor_id, .seq_cst);
     @atomicStore(bool, &context.is_booted, true, .seq_cst);

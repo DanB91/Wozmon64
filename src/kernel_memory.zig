@@ -39,6 +39,7 @@ pub fn init(
         .alloc = zig_std_alloc,
         .resize = zig_std_resize,
         .free = zig_std_free,
+        .remap = zig_std_remap,
     };
     g_state = .{
         .virtual_address_conventional_free_list = FreeList.init(mem_arena),
@@ -578,11 +579,11 @@ fn calculate_next_free_conventional_physical_address(num_pages: usize) u64 {
 /// `ret_addr` is optionally provided as the first return address of the
 /// allocation call stack. If the value is `0` it means no return address
 /// has been provided.
-fn zig_std_alloc(ctx: *anyopaque, len: usize, ptr_align: u8, ret_addr: usize) ?[*]u8 {
+fn zig_std_alloc(ctx: *anyopaque, len: usize, ptr_align: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
     _ = ctx; // autofix
     _ = ret_addr; // autofix
     toolbox.assert(
-        ptr_align <= w64.MEMORY_PAGE_SIZE,
+        ptr_align.toByteUnits() <= w64.MEMORY_PAGE_SIZE,
         "Alignment is bigger than 2MB??? It is: {}",
         .{ptr_align},
     );
@@ -605,7 +606,7 @@ fn zig_std_alloc(ctx: *anyopaque, len: usize, ptr_align: u8, ret_addr: usize) ?[
 /// `ret_addr` is optionally provided as the first return address of the
 /// allocation call stack. If the value is `0` it means no return address
 /// has been provided.
-fn zig_std_resize(ctx: *anyopaque, buf: []u8, buf_align: u8, new_len: usize, ret_addr: usize) bool {
+fn zig_std_resize(ctx: *anyopaque, buf: []u8, buf_align: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
     _ = ctx; // autofix
     _ = buf_align; // autofix
     _ = ret_addr; // autofix
@@ -615,6 +616,40 @@ fn zig_std_resize(ctx: *anyopaque, buf: []u8, buf_align: u8, new_len: usize, ret
         return true;
     }
     return false;
+}
+/// Attempt to expand or shrink memory, allowing relocation.
+///
+/// `memory.len` must equal the length requested from the most recent
+/// successful call to `alloc`, `resize`, or `remap`. `alignment` must
+/// equal the same value that was passed as the `alignment` parameter to
+/// the original `alloc` call.
+///
+/// A non-`null` return value indicates the resize was successful. The
+/// allocation may have same address, or may have been relocated. In either
+/// case, the allocation now has size of `new_len`. A `null` return value
+/// indicates that the resize would be equivalent to allocating new memory,
+/// copying the bytes from the old memory, and then freeing the old memory.
+/// In such case, it is more efficient for the caller to perform the copy.
+///
+/// `new_len` must be greater than zero.
+///
+/// `ret_addr` is optionally provided as the first return address of the
+/// allocation call stack. If the value is `0` it means no return address
+/// has been provided.
+pub fn zig_std_remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+    const resized = zig_std_resize(ctx, memory, alignment, new_len, ret_addr);
+    if (resized) {
+        return memory.ptr;
+    }
+
+    const alloc_result = zig_std_alloc(ctx, new_len, alignment, ret_addr);
+    if (alloc_result) |alloc| {
+        @memcpy(alloc[0..memory.len], memory);
+        zig_std_free(ctx, memory, alignment, ret_addr);
+        return alloc;
+    }
+
+    return null;
 }
 
 /// Free and invalidate a buffer.
@@ -628,7 +663,7 @@ fn zig_std_resize(ctx: *anyopaque, buf: []u8, buf_align: u8, new_len: usize, ret
 /// `ret_addr` is optionally provided as the first return address of the
 /// allocation call stack. If the value is `0` it means no return address
 /// has been provided.
-fn zig_std_free(ctx: *anyopaque, buf: []u8, buf_align: u8, ret_addr: usize) void {
+fn zig_std_free(ctx: *anyopaque, buf: []u8, buf_align: std.mem.Alignment, ret_addr: usize) void {
     _ = ctx; // autofix
     _ = buf_align; // autofix
     _ = ret_addr; // autofix
@@ -638,9 +673,9 @@ fn zig_std_free(ctx: *anyopaque, buf: []u8, buf_align: u8, ret_addr: usize) void
 
     const aligned_data =
         @as(
-        [*]align(w64.MEMORY_PAGE_SIZE) u8,
-        @ptrFromInt(vaddr_aligned),
-    )[0..new_len];
+            [*]align(w64.MEMORY_PAGE_SIZE) u8,
+            @ptrFromInt(vaddr_aligned),
+        )[0..new_len];
     free_conventional(aligned_data);
 }
 
@@ -696,9 +731,9 @@ test search_for_free_address {
 
     var address =
         search_for_free_address(
-        4,
-        free_list,
-    );
+            4,
+            free_list,
+        );
     try std.testing.expectEqual(0xFFFF_FFFF_81C0_0000, address);
     try std.testing.expectEqual(
         1,
@@ -707,9 +742,9 @@ test search_for_free_address {
 
     address =
         search_for_free_address(
-        4,
-        free_list,
-    );
+            4,
+            free_list,
+        );
     try std.testing.expectEqual(0, address);
     try std.testing.expectEqual(
         1,

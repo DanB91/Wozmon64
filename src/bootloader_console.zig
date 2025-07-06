@@ -206,7 +206,7 @@ fn uefi_print(comptime fmt: []const u8, args: anytype) void {
     var buf16: [MAX_BYTES:0]u16 = [_:0]u16{0} ** MAX_BYTES;
     const utf8 = std.fmt.bufPrintZ(&buf8, fmt, args) catch buf8[0..];
     _ = std.unicode.utf8ToUtf16Le(&buf16, utf8) catch return;
-    _ = std.os.uefi.system_table.con_out.?.outputString(&buf16);
+    _ = std.os.uefi.system_table.con_out.?.outputString(&buf16) catch return;
 }
 pub fn serial_println(comptime fmt: []const u8, args: anytype) void {
     serial_print(fmt ++ "\n", args);

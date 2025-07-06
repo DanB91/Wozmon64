@@ -363,7 +363,6 @@ const OperationalRegisters = extern struct {
         reserved2: u16,
     };
     fn read_register(self: *volatile OperationalRegisters, comptime RegisterType: type) RegisterType {
-        @fence(.seq_cst);
         switch (RegisterType) {
             USBCommand => {
                 const register = self.command;
@@ -409,7 +408,6 @@ const OperationalRegisters = extern struct {
 
         const int_value: u32 = @as(u32, @bitCast(value));
         ptr.* = int_value;
-        @fence(.seq_cst);
     }
 };
 
@@ -980,11 +978,11 @@ pub fn init(pcie_device: pcie.Device) !*Controller {
 
     const doorbells: []volatile u32 =
         bar_to_slice(
-        u32,
-        bar0,
-        capability_registers.doorbell_offset,
-        hcsparams1.max_device_slots,
-    );
+            u32,
+            bar0,
+            capability_registers.doorbell_offset,
+            hcsparams1.max_device_slots,
+        );
 
     //inititalize Command Transfer Request Block Ring
     var command_trb_ring: *volatile CommandRing = undefined;
@@ -1056,15 +1054,15 @@ pub fn init(pcie_device: pcie.Device) !*Controller {
                 .base_address = @intCast(
                     (event_trb_ring_allocation_result.physical_address_start +
                         @offsetOf(
-                        EventRing,
-                        "event_ring_segment_entry",
-                    )) >> 6,
+                            EventRing,
+                            "event_ring_segment_entry",
+                        )) >> 6,
                 ),
             },
         };
 
         //TODO: xhci does not start up on old desktop.  but will start if erstdba is not set
-        //@fence(.seq_cst);
+        //;
         //println_serial("interrupter_registers.erstsz: {x}", .{interrupter_registers.erstsz});
         //println_serial("interrupter_registers.erdp: {x}", .{interrupter_registers.erdp});
         //println_serial("interrupter_registers.erstba: {x}", .{interrupter_registers.erstba});
@@ -1157,11 +1155,11 @@ pub fn init(pcie_device: pcie.Device) !*Controller {
     // )[0..hcsparams1.max_ports];
     const root_hub_usb_ports =
         bar_to_slice(
-        PortRegisters,
-        bar0,
-        @as(usize, capability_registers.length) + 0x400,
-        hcsparams1.max_ports,
-    );
+            PortRegisters,
+            bar0,
+            @as(usize, capability_registers.length) + 0x400,
+            hcsparams1.max_ports,
+        );
     const root_hub_usb_port_versions = controller_arena.push_slice(
         USBVersion,
         root_hub_usb_ports.len,
@@ -2064,7 +2062,7 @@ pub fn send_setup_command_endpoint0(
 //}
 //event_trb_ring.erdp.* = (event_trb_ring.event_trb_ring_physical_address +
 //(event_trb_ring.ring.index * @sizeOf(TransferRequestBlock))) | (1 << 3);
-//@fence(.seq_cst);
+//;
 
 //switch (trb.read_trb_type()) {
 //.CommandCompletionEvent,
@@ -2172,7 +2170,6 @@ pub fn poll_controller(
         .ehb = 1,
     };
     event_trb_ring.erdp.* = new_erdp;
-    @fence(.seq_cst);
     return did_transfer_event_occur;
 }
 
@@ -2421,7 +2418,6 @@ fn submit_command(
         }
     }
 
-    @fence(.seq_cst);
     //ring the doorbell.  0 is the only valid value for ringing the
     //command trb doorbell (Host Controller Command)
     command_trb_ring.doorbell.* = 0;

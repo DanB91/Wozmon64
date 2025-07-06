@@ -674,7 +674,6 @@ fn queue_transfer_trb(hid_device: *USBHIDDevice) void {
     var trb = &trb_ring.ring[trb_ring.index];
     trb.* = trb_to_store;
     trb.write_cycle_bit(trb_ring.cs);
-    @fence(.seq_cst);
     hid_device.input_endpoint.transfer_ring.doorbell.* = hid_device.input_endpoint.doorbell_value;
     hid_device.last_transfer_request_physical_address = trb_ring.physical_address_of_current_index();
 

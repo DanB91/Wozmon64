@@ -420,10 +420,10 @@ pub fn enumerate_devices(
                         const command_register = &pcie_bridge_device.command;
                         const base_address_registers =
                             map_base_address_register_into_virtual_memory(
-                            physical_bars,
-                            command_register,
-                            arena,
-                        );
+                                physical_bars,
+                                command_register,
+                                arena,
+                            );
                         ret.append(.{
                             .device = device_number,
                             .bus = bus,
@@ -440,11 +440,11 @@ pub fn enumerate_devices(
                         const command_register = &pcie_endpoint_device_header.command;
                         const base_address_registers =
                             map_base_address_register_into_virtual_memory(
-                            physical_bars,
-                            command_register,
-                            arena,
-                        );
-                        const device = .{
+                                physical_bars,
+                                command_register,
+                                arena,
+                            );
+                        const device = Device{
                             .device = device_number,
                             .bus = bus,
                             .function = function_number,
