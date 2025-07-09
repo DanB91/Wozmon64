@@ -1,12 +1,12 @@
 # Wozmon64
 ---
-![](img/wozandjobs.png)
+<img src="img/loading_doom.png" width=50%></img> <img src="img/doom.png" width=50%></img>
 ---
 ## Overview
 Please see [the plan](https://github.com/DanB91/Wozmon64/blob/main/Plan.md).
 ## Requirements
 - Either macOS or Linux. Windows may work, but can be difficult to get QEMU to run properly on.
-- Zig compiler 0.12.0-dev.1101+25400fadf or newer. Pulling down the latest build is your best bet.
+- Zig compiler 0.15.0-dev.471+369177f0b or newer. Pulling down the latest build is your best bet.
 - qemu-system-x86_64 in $PATH.
 - If you want to run bare-metal:
     - Flash drive.
@@ -26,6 +26,11 @@ Please see [the plan](https://github.com/DanB91/Wozmon64/blob/main/Plan.md).
     - Boot your machine from your machine in the UEFI/BIOS settings.
     - If you are successful you should reach the Wozmon64 prompt.
     - If unsuccessful, your machine will reboot or hang.
+
+## Quick Start
+Wozmon64 comes with 2 programs builtin:
+- WozAndJobs: An example program where you can use the arrow keys to move around a picture of Woz and Jobs
+-
 
 ## Usage
 Wozmon64 is line based and support similar syntax as the original WozMon. That is, the "commands" you enter are memory addresses and whether you want to read from them, write to them, or execute them. In the examples below, `[ENTER]` will represent hitting the enter key, while `[RESPONSE]` means that's what the monitor responded with.
@@ -87,22 +92,22 @@ Wozmon64 is line based and support similar syntax as the original WozMon. That i
     ```
 - You can play with similar commands (except the "/" operator) on an Apple I emulator here: https://www.scullinsteel.com/apple1/ (be sure to hit the RESET key to start using it). The max address on the Apple I is 0xFFFF, so try reading from an address like `FF00` (which is where WozMon lives in memory!).
 
-- There is currently a sample program packaged in that shows a picture of Wozniak and Jobs, like in the screenshot above.  To run:
+- There is currently a sample program packaged in that shows a picture of Wozniak and Jobs.  To run:
     - Hit F1 and you should see:
     ```
     \
-    LOADED PROGRAM TO ADDRESS 2600000!
+    LOADED 958820 BYTE PROGRAM TO ADDRESS 2600000!
     02600000/00000010
-    260000: 55 48 89 E5 48 81 EC 40 1 0 0 B8 30 0 40 2 
+    2600000: 55 48 89 E5 48 81 EC E0 4 0 0 48 89 BD C0 FC 
 
     \
-    2600000R
+    02600000R
     ```
     - Hit Enter to run the program.
     - You now see the picture of Woz and Jobs on the screen.
-    - Press Escape to quit out of the program and you should return to the prompt.
-- Hitting F2 will bring up the profiler.
-- Hitting F3 will bring up the snapshot of the boot-time profiler.
+    - You can use the arrow keys to move the picture around.
+    - Press Ctrl-Escape to quit out of the program and you should return to the prompt.
+- Hitting F2 followed by Enter will load Doom. There is currently no sound and you cannot save. You can also hit Ctrl-Escape to quit.
 
 ## Questions and Feedback
 If you have any questions or feedback, I'd love to hear from you! Please reach out to me at dan@boksos.com or DM @dbokser91 on X/Twitter.

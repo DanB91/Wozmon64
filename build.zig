@@ -64,7 +64,9 @@ pub fn build(b: *std.Build) !void {
             .name = "doom",
             .target = target,
             .root_source_file = b.path("sample_programs/doom/doom.zig"),
-            .optimize = .ReleaseFast,
+            //TODO: Seems to break with ReleaseFast
+            // .optimize = optimize,
+            .optimize = .Debug,
             .pic = true,
         });
         exe.addIncludePath(.{ .cwd_relative = "sample_programs/doom" });
